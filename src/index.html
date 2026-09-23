@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'">
+  <title>Stratum</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app">
+    <div id="menubar" role="menubar"></div>
+    <div id="optionsbar"></div>
+    <div id="main">
+      <div id="toolbox" role="toolbar" aria-label="Tools"></div>
+      <div id="center">
+        <div id="tabs" role="tablist" hidden></div>
+        <div id="stage" tabindex="-1">
+          <div id="empty-state">
+            <h1>Stratum</h1>
+            <p><kbd>Ctrl</kbd>+<kbd>N</kbd> new image &nbsp;·&nbsp; <kbd>Ctrl</kbd>+<kbd>O</kbd> open &nbsp;·&nbsp; or drop an image here</p>
+            <p class="dim">Layers, selections, history, adjustments and effects.</p>
+          </div>
+        </div>
+      </div>
+      <aside id="side">
+        <section id="panel-history" class="panel"></section>
+        <section id="panel-layers" class="panel"></section>
+        <section id="panel-colors" class="panel"></section>
+      </aside>
+    </div>
+    <div id="statusbar"></div>
+  </div>
+  <datalist id="font-list"></datalist>
+  <div id="modal-root"></div>
+  <div id="toasts" aria-live="polite"></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

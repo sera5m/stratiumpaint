@@ -1,0 +1,45 @@
+# Local PKGBUILD: builds from this checkout, no tarball needed.
+#   cd packaging/arch && makepkg -si
+pkgname=stratum
+pkgver=2.0.0
+pkgrel=1
+pkgdesc='Layered raster image editor in the spirit of Paint.NET'
+arch=('any')
+url='https://localhost/stratum'
+license=('MIT')
+depends=('electron')
+makedepends=('esbuild' 'nodejs')
+optdepends=('ttf-dejavu: default font for the Text tool'
+            'noto-fonts: more fonts for the Text tool'
+            'wl-clipboard: Wayland clipboard support')
+options=('!strip')
+
+_root="$startdir/../.."
+
+build() {
+  cd "$_root"
+  # No npm install needed: the script falls back to the esbuild binary from the `esbuild` package.
+  node scripts/bundle-standalone.mjs
+}
+
+check() {
+  cd "$_root"
+  node --test test/*.test.mjs
+}
+
+package() {
+  cd "$_root"
+  local lib="$pkgdir/usr/lib/$pkgname"
+
+  install -Dm644 package.json "$lib/package.json"
+  install -Dm644 electron/main.cjs "$lib/electron/main.cjs"
+  install -Dm644 electron/preload.cjs "$lib/electron/preload.cjs"
+  install -Dm644 dist/index.html "$lib/dist/index.html"
+  install -Dm644 dist/app.js "$lib/dist/app.js"
+  install -Dm644 dist/app.css "$lib/dist/app.css"
+
+  install -Dm755 packaging/arch/stratum.sh "$pkgdir/usr/bin/stratum"
+  install -Dm644 packaging/arch/stratum.desktop "$pkgdir/usr/share/applications/stratum.desktop"
+  install -Dm644 assets/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/stratum.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

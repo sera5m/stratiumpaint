@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Stratum
+GenericName=Image Editor
+Comment=Layered raster image editor in the spirit of Paint.NET
+Exec=stratum %F
+Icon=stratum
+Terminal=false
+Categories=Graphics;RasterGraphics;2DGraphics;
+MimeType=image/png;image/jpeg;image/webp;image/bmp;image/gif;image/avif;image/openraster;
+Keywords=paint;image;photo;layers;editor;
+StartupWMClass=stratum

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.pkg.tar.*
+packaging/arch/pkg/
+packaging/arch/src/
