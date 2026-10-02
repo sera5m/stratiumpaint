@@ -12,6 +12,7 @@ import { crc32, zipStore, unzip } from '../src/js/core/zip.js';
 import { encodeOra, decodeOra } from '../src/js/core/ora.js';
 import { fillMask, renderGradient, patternIsPrimary } from '../src/js/core/fill.js';
 import { mulberry32 } from '../src/js/core/util.js';
+import { powerSteps, stepValueAt, indexOfStep } from '../src/js/core/color.js';
 
 const sum = (a) => a.reduce((x, y) => x + y, 0);
 const maskArea = (m) => sum(m.data) / 255;
@@ -277,4 +278,31 @@ test('cropImage pads out-of-range areas with transparency', () => {
   const c = cropImage(src, { x: -1, y: -1, w: 3, h: 3 });
   assert.equal(c.data[3], 0);
   assert.deepEqual([...c.data.slice((1 * 3 + 1) * 4, (1 * 3 + 1) * 4 + 4)], [10, 20, 30, 255]);
+});
+
+test('powerSteps: whole doubling ramp, endpoints, and half/quarter subdivision', () => {
+  assert.deepEqual(powerSteps(255, 'whole'), [0, 2, 4, 8, 16, 32, 64, 128, 255]);
+  assert.deepEqual(powerSteps(16, 'whole'), [0, 2, 4, 8, 16]);
+  const half = powerSteps(255, 'half');
+  assert.equal(half[0], 0);
+  assert.equal(half.at(-1), 255);
+  assert.ok(half.includes(91), `expected the geometric mean of 64/128 (~91) in ${half}`); // 2^6.5 ≈ 90.5
+  assert.ok(half.length > powerSteps(255, 'whole').length);
+  const quarter = powerSteps(255, 'quarter');
+  assert.ok(quarter.length > half.length);
+  assert.equal(new Set(quarter).size, quarter.length, 'no duplicate steps');
+  assert.deepEqual([...quarter].sort((a, b) => a - b), quarter, 'stays sorted ascending');
+});
+
+test('stepValueAt / indexOfStep are inverses across a powerSteps ramp', () => {
+  const steps = powerSteps(255, 'whole');
+  assert.equal(stepValueAt(steps, 0), 0);
+  assert.equal(stepValueAt(steps, steps.length - 1), 255);
+  assert.equal(stepValueAt(steps, 1.5), (2 + 4) / 2); // halfway between the 2nd and 3rd step
+  assert.ok(Math.abs(indexOfStep(steps, 3) - 1.5) < 1e-9); // 3 is halfway between steps[1]=2 and steps[2]=4
+  for (const idx of [0, 2, 4.25, steps.length - 1]) {
+    assert.ok(Math.abs(indexOfStep(steps, stepValueAt(steps, idx)) - idx) < 1e-6);
+  }
+  assert.equal(indexOfStep(steps, -50), 0, 'clamps below range');
+  assert.equal(indexOfStep(steps, 9999), steps.length - 1, 'clamps above range');
 });

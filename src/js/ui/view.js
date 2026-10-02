@@ -280,16 +280,23 @@ export class View {
   #bindPointer() {
     const o = this.overlay, ed = this.ed;
     o.addEventListener('contextmenu', (e) => e.preventDefault());
+    // Backstop for Linux/X11's "middle-click pastes the primary selection" convention: pointerdown
+    // below already preventDefault()s this, but suppress it as early as possible too, since that
+    // convention lives outside pointer-event semantics on some platforms.
+    o.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }, true);
+    o.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
     o.addEventListener('pointerdown', (e) => {
-      if (!ed.doc) return;
-      o.setPointerCapture(e.pointerId);
       if (e.button === 1 || (e.button === 0 && this.spaceDown)) {
+        e.preventDefault(); // always suppress default middle-click behaviour, doc or no doc
+        if (!ed.doc) return;
+        o.setPointerCapture(e.pointerId);
         this.panning = { x: e.clientX, y: e.clientY };
         this.#updateCursor();
-        e.preventDefault();
         return;
       }
+      if (!ed.doc) return;
+      o.setPointerCapture(e.pointerId);
       if (e.button !== 0 && e.button !== 2) return;
       if (this.pressed !== null) return; // ignore a second button while a stroke is running
       this.pressed = e.button;

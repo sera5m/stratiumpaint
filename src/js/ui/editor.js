@@ -13,6 +13,7 @@ export const DEFAULT_OPTS = {
   pattern: 'solid', patternSize: 16,
   font: 'DejaVu Sans', fontSize: 32, bold: false, italic: false,
   grid: false,
+  wholeImage: false, // fill/erase/adjustments/effects ignore the selection and apply everywhere
 };
 
 const DOC_EVENTS = ['render', 'layers', 'selection', 'size', 'history', 'meta'];
@@ -24,6 +25,7 @@ export class Editor extends Emitter {
     this.doc = null;
     this.primary = { r: 0, g: 0, b: 0, a: 1 };
     this.secondary = { r: 255, g: 255, b: 255, a: 1 };
+    this.recentColors = []; // most-recent-first, deduped by rgba; see noteRecentColor
     this.opts = { ...DEFAULT_OPTS };
     this.tools = tools;
     this.tool = tools[0];
@@ -41,11 +43,20 @@ export class Editor extends Emitter {
   setTool(id) {
     const t = this.toolById(id);
     if (!t || t === this.tool) return;
-    this.tool.cancel?.(this);
-    this.tool.deactivate?.(this);
+    this.commitPending(); // finish (not discard) whatever the old tool was doing, e.g. an open text box
     this.tool = t;
     this.emit('tool', t);
     this.requestOverlay();
+  }
+
+  /**
+   * Finalize the current tool's pending work without switching away from it: commits an open
+   * text box, then cancels any leftover in-progress drag. Call this before anything that changes
+   * the document out from under the active tool (switching tools/documents, menu commands, ...).
+   */
+  commitPending() {
+    this.tool.deactivate?.(this);
+    this.tool.cancel?.(this);
   }
 
   /** Pressing a tool's letter again cycles through the tools that share it. */
@@ -68,13 +79,30 @@ export class Editor extends Emitter {
 
   // ---------------------------------------------------------------- colours
 
-  setPrimary(c) { this.primary = { r: c.r, g: c.g, b: c.b, a: c.a ?? 1 }; this.emit('colors'); }
-  setSecondary(c) { this.secondary = { r: c.r, g: c.g, b: c.b, a: c.a ?? 1 }; this.emit('colors'); }
-  swapColors() { [this.primary, this.secondary] = [this.secondary, this.primary]; this.emit('colors'); }
+  setPrimary(c) { this.primary = { r: c.r, g: c.g, b: c.b, a: c.a ?? 1 }; this.#colorsChanged(); }
+  setSecondary(c) { this.secondary = { r: c.r, g: c.g, b: c.b, a: c.a ?? 1 }; this.#colorsChanged(); }
+  swapColors() { [this.primary, this.secondary] = [this.secondary, this.primary]; this.#colorsChanged(); }
   resetColors() {
     this.primary = { r: 0, g: 0, b: 0, a: 1 };
     this.secondary = { r: 255, g: 255, b: 255, a: 1 };
+    this.#colorsChanged();
+  }
+
+  #colorsChanged() {
     this.emit('colors');
+    this.tool.colorsChanged?.(this); // let a tool with an in-progress draw (e.g. a shape) live-update
+  }
+
+  /**
+   * Record a colour as "recently used" (most-recent-first, capped, deduped by exact rgba).
+   * Called when a colour pick is *finished* — a swatch click, a completed eyedropper sample, the
+   * colour dialog's OK — not on every intermediate value while a slider or the SV square is dragged.
+   */
+  noteRecentColor(c) {
+    const rgba = { r: c.r, g: c.g, b: c.b, a: c.a ?? 1 };
+    const key = (x) => `${x.r},${x.g},${x.b},${x.a}`;
+    this.recentColors = [rgba, ...this.recentColors.filter((x) => key(x) !== key(rgba))].slice(0, 12);
+    this.emit('recentColors');
   }
 
   // ---------------------------------------------------------------- documents
@@ -87,8 +115,7 @@ export class Editor extends Emitter {
 
   activate(doc) {
     if (doc === this.doc) return;
-    this.tool.cancel?.(this);
-    this.tool.deactivate?.(this);
+    this.commitPending();
     for (const off of this._off) off();
     this._off = [];
     this.doc = doc;
@@ -134,4 +161,6 @@ export class Editor extends Emitter {
 
   /** Abort whatever drag is in progress (Escape). */
   cancelTool() { this.tool.cancel?.(this); this.requestOverlay(); }
+  /** Enter: set down whatever the current tool has pending (a floating move, an open text box). */
+  commitTool() { this.tool.deactivate?.(this); this.requestOverlay(); }
 }

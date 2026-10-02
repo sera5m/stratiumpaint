@@ -4,7 +4,20 @@ A layered raster image editor in the spirit of Paint.NET — layers, selections,
 undo history, adjustments, effects, and OpenRaster (.ora) support. Built for
 Linux (Electron), with a standalone browser build as a bonus.
 
-warning: only tested on arch linux, and heavily written by ai to match a 4 page fully human written spec, then tested and tweaked by sleepy humans
+Saving keeps the previous file (a `.bak` copy plus timestamped files in
+`.stratum-backups/` next to it, and a copy in the browser). File → Save Backup
+writes an extra OpenRaster snapshot. File → Restore Backup opens one without
+overwriting the original. An autosave runs about once a minute while a
+document has unsaved changes.
+
+Remove Background (U, or Image → Remove Background) clears the colour on the
+edges of the active layer. Tolerance is the same slider as the paint bucket.
+Contiguous stops at the subject; Global clears every similar pixel.
+
+Color Range (C, or Edit → Color Range) treats two RGBA colours as an inclusive
+interval on each channel and deletes or replaces every pixel inside it.
+Left-click sets colour A, right-click sets colour B and opens the dialog.
+Primary and secondary are the starting ends.
 
 ## Quick start (dev)
 

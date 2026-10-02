@@ -6,6 +6,8 @@ import { buildMenubar } from './menus.js';
 import { buildToolbox, buildOptionsBar, buildTabs, buildLayersPanel, buildHistoryPanel, buildColorsPanel, buildStatusbar } from './panels.js';
 import { isModalOpen } from './dialogs.js';
 import * as platform from './platform.js';
+import { encodeDocument } from '../doc/io.js';
+import { putBackup } from './backup.js';
 import { $, h } from './dom.js';
 
 const TEXT_INPUTS = new Set(['text', 'number', 'search', 'url', 'email', 'password', 'tel']);
@@ -33,6 +35,7 @@ export function start() {
 
   const run = async (cmd) => {
     if (cmd.enabled && !cmd.enabled()) return;
+    ed.commitPending(); // e.g. finish an open text box before Select All, Undo, an adjustment, ...
     try { await cmd.run(); } catch (err) { console.error(err); ed.toast(err.message || String(err)); }
   };
 
@@ -59,6 +62,7 @@ export function start() {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
 
     if (e.key === 'Escape') { ed.cancelTool(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); ed.commitTool(); return; }
     if (e.key === '[') { ed.nudgeSize(e.shiftKey ? -10 : -1); return; }
     if (e.key === ']') { ed.nudgeSize(e.shiftKey ? 10 : 1); return; }
     if (e.key === '{') { ed.nudgeSize(-10); return; }
@@ -68,6 +72,13 @@ export function start() {
   });
   window.addEventListener('keyup', (e) => { if (e.key === ' ') view.setSpace(false); });
   window.addEventListener('blur', () => view.setSpace(false));
+
+  // On Linux, middle-click conventionally pastes the X11 "primary" selection (whatever text was
+  // last highlighted anywhere on the desktop) into focused editable elements. Our own Paste command
+  // never goes through this native event (it uses the clipboard bridge), so it's safe to always
+  // swallow it outside real text inputs — this keeps a middle-click on the canvas from dumping
+  // stray text in, while still allowing normal pasting into the text tool box or a dialog field.
+  window.addEventListener('paste', (e) => { if (!isTyping(e.target)) e.preventDefault(); }, true);
 
   // ---------------------------------------------------------------- toasts
   const toasts = $('#toasts');
@@ -107,6 +118,17 @@ export function start() {
     window.addEventListener('beforeunload', (e) => { if (ed.docs.some((d) => d.modified)) { e.preventDefault(); e.returnValue = ''; } });
   }
   platform.initialFiles().then((files) => { if (files.length) openFilesInto(files); });
+
+  // Quiet recovery copies while a document has unsaved work. File → Restore Backup reads them.
+  const AUTOSAVE_MS = 60_000;
+  setInterval(() => {
+    for (const doc of ed.docs) {
+      if (!doc.modified) continue;
+      encodeDocument(doc, 'ora')
+        .then((bytes) => putBackup({ docKey: doc.backupKey, name: doc.name, bytes, kind: 'auto' }))
+        .catch((err) => console.warn('Autosave failed:', err));
+    }
+  }, AUTOSAVE_MS);
 
   return { ed, view, cmds };
 }

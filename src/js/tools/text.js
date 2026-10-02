@@ -1,4 +1,6 @@
-// Text: click to place a box, type, then Ctrl+Enter or click elsewhere to commit (Esc cancels).
+// Text: click to place a box, type, then Enter (or right-click, or click elsewhere) to set it onto
+// the layer. Shift+Enter inserts a line break instead. Escape also sets the text down — to discard
+// it, clear the box first (an empty box commits nothing).
 import { cropImage } from '../core/image.js';
 import { paintImage, rasterize, hardenAlpha, createCanvas } from '../doc/raster.js';
 import { rectIntersect } from '../core/util.js';
@@ -75,9 +77,18 @@ export function textTool() {
       el.addEventListener('input', () => fit(el));
       el.addEventListener('keydown', (ev) => {
         ev.stopPropagation();
-        if (ev.key === 'Escape') { ev.preventDefault(); close(); }
-        else if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); commit(ed); }
+        if (ev.key === 'Escape') { ev.preventDefault(); commit(ed); }
+        else if (ev.key === 'Enter' && ev.shiftKey) {
+          // Explicit newline: don't rely on the textarea's own default, since plain Enter below
+          // now commits instead of the browser's usual "Enter = newline" behaviour.
+          ev.preventDefault();
+          const { selectionStart: s, selectionEnd: e2 } = el;
+          el.value = `${el.value.slice(0, s)}\n${el.value.slice(e2)}`;
+          el.selectionStart = el.selectionEnd = s + 1;
+          fit(el);
+        } else if (ev.key === 'Enter') { ev.preventDefault(); commit(ed); }
       });
+      el.addEventListener('contextmenu', (ev) => { ev.preventDefault(); commit(ed); });
       ed.view.stage.appendChild(el);
       S = { x: e.x, y: e.y, el, layer, doc: ed.doc, color: e.button === 2 ? ed.secondary : ed.primary, opts: { ...ed.opts } };
       place(ed.view);

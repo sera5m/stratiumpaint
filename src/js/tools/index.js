@@ -6,6 +6,7 @@ import { fillTools } from './fill.js';
 import { brushTools } from './brush.js';
 import { shapeTools } from './shapes.js';
 import { textTool } from './text.js';
+import { extraTools } from './extra.js';
 
 /** Fresh tool instances (each keeps its own drag state). */
 export function createTools() {
@@ -15,5 +16,5 @@ export function createTools() {
   const [bucket, gradient] = fillTools();
   const [brush, pencil, eraser, clone] = brushTools();
   const [line, rect, roundrect, ellipse] = shapeTools();
-  return [rectSel, ellSel, lasso, wand, movePx, moveSel, zoom, pan, bucket, gradient, brush, pencil, eraser, clone, picker, line, rect, roundrect, ellipse, textTool()];
+  return [rectSel, ellSel, lasso, wand, movePx, moveSel, zoom, pan, bucket, gradient, brush, pencil, eraser, clone, picker, line, rect, roundrect, ellipse, textTool(), ...extraTools()];
 }

@@ -1,9 +1,10 @@
 // Modal dialogs. `modal()` is the primitive; the rest build on it.
 import { clamp } from '../core/util.js';
-import { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb } from '../core/color.js';
+import { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb, powerSteps, stepValueAt, indexOfStep } from '../core/color.js';
 import { defaultParams } from '../core/adjustments.js';
 import { BLEND_MODES } from '../core/blend.js';
 import { FilterSession } from '../doc/ops.js';
+import { applyColorRange } from '../core/colorrange.js';
 import { h } from './dom.js';
 
 const stack = [];
@@ -150,7 +151,7 @@ export function effectDialog(ed, spec) {
   const doc = ed.doc, layer = ed.editableLayer();
   if (!layer) return;
   const values = defaultParams(spec);
-  const session = new FilterSession(doc, layer, spec);
+  const session = new FilterSession(doc, layer, spec, { ignoreSelection: ed.opts.wholeImage });
   let timer = 0;
   const preview = () => { clearTimeout(timer); timer = setTimeout(() => session.preview(values), 30); };
   const body = h('div', null);
@@ -317,6 +318,106 @@ export function layerPropsDialog(ed, layer) {
 
 // ---------------------------------------------------------------------- colour picker
 
+// ---------------------------------------------------------------------- palette (math-generated)
+
+const CHANNEL_ORDER = ['r', 'g', 'b'];
+let paletteFixed = 'b', paletteMode = 'whole'; // remembered across dialog opens, resets on reload
+
+/**
+ * A square grid of every combination of two channels (stepped per powerSteps) with the third
+ * channel held at the current colour's value, plus a ring overlay around the current colour
+ * marking one and two perceptual (log-scale) steps away, coloured with what's actually out there
+ * at that distance rather than a plain outline — so you can eyeball a match against the grid.
+ * getCurrent() reads the live colour; onPick(rgb) is called when the user clicks a cell.
+ */
+function buildPaletteTab(getCurrent, onPick) {
+  const GRID = 240;
+  const canvas = h('canvas', { class: 'palette-canvas', width: GRID, height: GRID });
+  const fixedLabel = h('span', { class: 'mini-label' });
+
+  const seg = (options, get, set) => {
+    const btns = options.map(([v, label]) => {
+      const b = h('button', { type: 'button', class: 'seg-btn' }, label);
+      b.addEventListener('click', () => { set(v); render(); });
+      return [v, b];
+    });
+    const sync = () => btns.forEach(([v, b]) => b.classList.toggle('on', get() === v));
+    return { el: h('div', { class: 'seg palette-seg' }, btns.map(([, b]) => b)), sync };
+  };
+  const fixSeg = seg([['r', 'R'], ['g', 'G'], ['b', 'B']], () => paletteFixed, (v) => { paletteFixed = v; });
+  const modeSeg = seg([['whole', 'Whole'], ['half', 'Half'], ['quarter', 'Quarter']], () => paletteMode, (v) => { paletteMode = v; });
+
+  let xKey = 'r', yKey = 'g', xSteps = [], ySteps = [];
+  const cellColor = (xi, yi) => {
+    const c = { r: 0, g: 0, b: 0 };
+    c[paletteFixed] = getCurrent()[paletteFixed];
+    c[xKey] = xSteps[xi];
+    c[yKey] = ySteps[yi];
+    return c;
+  };
+
+  function render() {
+    fixSeg.sync(); modeSeg.sync();
+    [xKey, yKey] = CHANNEL_ORDER.filter((k) => k !== paletteFixed);
+    const cur = getCurrent();
+    fixedLabel.textContent = `${paletteFixed.toUpperCase()} fixed at ${Math.round(cur[paletteFixed])} — X: ${xKey.toUpperCase()}, Y: ${yKey.toUpperCase()}`;
+    xSteps = powerSteps(255, paletteMode);
+    ySteps = powerSteps(255, paletteMode);
+    const nx = xSteps.length, ny = ySteps.length, cw = GRID / nx, ch = GRID / ny;
+    const g = canvas.getContext('2d');
+    g.clearRect(0, 0, GRID, GRID);
+    for (let yi = 0; yi < ny; yi++) {
+      for (let xi = 0; xi < nx; xi++) {
+        const c = cellColor(xi, ny - 1 - yi); // row 0 (top) shows the highest value
+        g.fillStyle = `rgb(${c.r},${c.g},${c.b})`;
+        g.fillRect(Math.floor(xi * cw), Math.floor(yi * ch), Math.ceil(cw) + 1, Math.ceil(ch) + 1);
+      }
+    }
+    const cxIdx = indexOfStep(xSteps, cur[xKey]), cyIdx = indexOfStep(ySteps, cur[yKey]);
+    const cx = (cxIdx + 0.5) * cw, cy = GRID - (cyIdx + 0.5) * ch;
+    const ringRadii = paletteMode === 'whole' ? [1, 2] : [0.5, 1, 1.5, 2];
+    for (const rad of ringRadii) {
+      const arcSteps = 96;
+      g.lineWidth = 2.5;
+      for (let i = 0; i < arcSteps; i++) {
+        const a0 = (i / arcSteps) * Math.PI * 2, a1 = ((i + 1) / arcSteps) * Math.PI * 2;
+        const xi = clamp(cxIdx + Math.cos(a0) * rad, 0, nx - 1), yi = clamp(cyIdx + Math.sin(a0) * rad, 0, ny - 1);
+        const c = { r: 0, g: 0, b: 0 };
+        c[paletteFixed] = cur[paletteFixed];
+        c[xKey] = stepValueAt(xSteps, xi);
+        c[yKey] = stepValueAt(ySteps, yi);
+        g.strokeStyle = `rgb(${Math.round(c.r)},${Math.round(c.g)},${Math.round(c.b)})`;
+        g.beginPath();
+        g.arc(cx, cy, rad * cw, a0, a1);
+        g.stroke();
+      }
+    }
+    g.lineWidth = 1.5; g.strokeStyle = '#fff';
+    g.beginPath(); g.arc(cx, cy, 5, 0, Math.PI * 2); g.stroke();
+    g.lineWidth = 1; g.strokeStyle = '#000';
+    g.beginPath(); g.arc(cx, cy, 5, 0, Math.PI * 2); g.stroke();
+  }
+
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const r = canvas.getBoundingClientRect();
+    const xi = clamp(Math.floor(((e.clientX - r.left) / r.width) * xSteps.length), 0, xSteps.length - 1);
+    const rowFromTop = clamp(Math.floor(((e.clientY - r.top) / r.height) * ySteps.length), 0, ySteps.length - 1);
+    onPick(cellColor(xi, ySteps.length - 1 - rowFromTop));
+    render();
+  });
+
+  render();
+  const el = h('div', { class: 'palette-tab' },
+    h('div', { class: 'palette-controls' },
+      h('span', { class: 'mini-label' }, 'Fix'), fixSeg.el,
+      h('span', { class: 'mini-label' }, 'Steps'), modeSeg.el),
+    canvas, fixedLabel,
+    h('p', { class: 'palette-hint dim' }, 'Click a cell to pick it. The rings mark one and two perceptual steps from the current colour, in the colours actually found there — match them against the grid.'));
+  return { el, render };
+}
+
 export function colorDialog(ed, which) {
   const get = () => (which === 'primary' ? ed.primary : ed.secondary);
   const put = (c) => (which === 'primary' ? ed.setPrimary(c) : ed.setSecondary(c));
@@ -355,9 +456,11 @@ export function colorDialog(ed, which) {
     swatchNew.style.background = `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})`;
     alphaSlider.style.setProperty('--c', `${rgb.r},${rgb.g},${rgb.b}`);
     drawSV();
+    palette.render();
   };
   const fromHsv = (skip) => commit(hsvToRgb(hue, s, v), skip);
   const fromRgb = (rgb, skip) => { ({ h: hue, s, v } = rgbToHsv(rgb.r, rgb.g, rgb.b)); hueSlider.value = Math.round(hue); commit(rgb, skip); };
+  const palette = buildPaletteTab(get, (rgb) => { fromRgb(rgb); ed.noteRecentColor(rgb); });
 
   let dragging = false;
   const pick = (e) => {
@@ -386,9 +489,25 @@ export function colorDialog(ed, which) {
       h('label', { class: 'mini-label' }, 'Hex'), hex,
       ...['R', 'G', 'B'].flatMap((l, i) => [h('label', { class: 'mini-label' }, l), rgbInputs[i]])));
 
+  const slidersPane = h('div', null, body);
+  const palettePane = h('div', { class: 'hidden-pane' }, palette.el);
+  const tabSliders = h('button', { type: 'button', class: 'dlg-tab on' }, 'Sliders');
+  const tabPalette = h('button', { type: 'button', class: 'dlg-tab' }, 'Palette');
+  const selectTab = (name) => {
+    const onSliders = name === 'sliders';
+    tabSliders.classList.toggle('on', onSliders);
+    tabPalette.classList.toggle('on', !onSliders);
+    slidersPane.classList.toggle('hidden-pane', !onSliders);
+    palettePane.classList.toggle('hidden-pane', onSliders);
+    if (!onSliders) palette.render();
+  };
+  tabSliders.addEventListener('click', () => selectTab('sliders'));
+  tabPalette.addEventListener('click', () => selectTab('palette'));
+
   modal({
-    title: `${which === 'primary' ? 'Primary' : 'Secondary'} Color`, width: 320, body,
-    buttons: [{ label: 'Cancel', cancel: true }, { label: 'OK', primary: true }],
+    title: `${which === 'primary' ? 'Primary' : 'Secondary'} Color`, width: 320,
+    body: h('div', null, h('div', { class: 'dlg-tabs' }, tabSliders, tabPalette), slidersPane, palettePane),
+    buttons: [{ label: 'Cancel', cancel: true }, { label: 'OK', primary: true, onClick: () => ed.noteRecentColor(get()) }],
     onCancel: () => put(orig),
   });
   fromHsv();
@@ -419,5 +538,115 @@ export function webSaveDialog({ name, format, formats }) {
       { id: 'format', label: 'Format', type: 'select', options: formats },
     ],
     validate: (v) => (v.name.trim() ? null : 'Please enter a file name.'),
+  });
+}
+
+function ch8(c, key, fallback) {
+  const v = c?.[key];
+  if (v == null) return fallback;
+  if (key === 'a') return v <= 1 ? Math.round(v * 255) : Math.round(v);
+  return Math.round(v);
+}
+
+/** Live preview. A and B are the inclusive RGBA interval. Delete clears alpha; replace writes a third colour. */
+export function colorRangeDialog(ed, seed = {}) {
+  const layer = ed.editableLayer();
+  if (!layer) return Promise.resolve(null);
+  const A = seed.a ?? ed.primary, B = seed.b ?? ed.secondary;
+  const values = {
+    ar: ch8(A, 'r', 0), ag: ch8(A, 'g', 0), ab: ch8(A, 'b', 0), aa: ch8(A, 'a', 255),
+    br: ch8(B, 'r', 255), bg: ch8(B, 'g', 255), bb: ch8(B, 'b', 255), ba: ch8(B, 'a', 255),
+    mode: seed.mode ?? 'delete',
+    rr: 0, rg: 0, rb: 0, ra: 0,
+  };
+  const ends = () => ({
+    a: { r: values.ar, g: values.ag, b: values.ab, a: values.aa },
+    b: { r: values.br, g: values.bg, b: values.bb, a: values.ba },
+    replace: { r: values.rr, g: values.rg, b: values.rb, a: values.ra },
+  });
+  const spec = {
+    name: 'Color Range',
+    count: 0,
+    apply(img) {
+      const e = ends();
+      const r = applyColorRange(img, e.a, e.b, { mode: values.mode, replace: e.replace });
+      spec.count = r.count;
+      return r.img;
+    },
+  };
+  const session = new FilterSession(ed.doc, layer, spec, { ignoreSelection: ed.opts.wholeImage });
+  let timer = 0;
+  const preview = () => { clearTimeout(timer); timer = setTimeout(() => session.preview({}), 30); };
+  const fields = [
+    { id: 'ar', label: 'A red', type: 'number', min: 0, max: 255 },
+    { id: 'ag', label: 'A green', type: 'number', min: 0, max: 255 },
+    { id: 'ab', label: 'A blue', type: 'number', min: 0, max: 255 },
+    { id: 'aa', label: 'A alpha', type: 'number', min: 0, max: 255 },
+    { id: 'br', label: 'B red', type: 'number', min: 0, max: 255 },
+    { id: 'bg', label: 'B green', type: 'number', min: 0, max: 255 },
+    { id: 'bb', label: 'B blue', type: 'number', min: 0, max: 255 },
+    { id: 'ba', label: 'B alpha', type: 'number', min: 0, max: 255 },
+    { id: 'mode', label: 'Action', type: 'select', options: [['delete', 'Delete (clear alpha)'], ['replace', 'Replace']] },
+    { id: 'rr', label: 'Replace red', type: 'number', min: 0, max: 255 },
+    { id: 'rg', label: 'Replace green', type: 'number', min: 0, max: 255 },
+    { id: 'rb', label: 'Replace blue', type: 'number', min: 0, max: 255 },
+    { id: 'ra', label: 'Replace alpha', type: 'number', min: 0, max: 255 },
+  ];
+  return new Promise((resolve) => {
+    const body = h('div', null);
+    const note = h('p', { class: 'msg dim' }, 'Every channel is an inclusive interval from A to B. Swapped ends are fine. Primary and secondary are the starting A and B.');
+    const rebuild = () => body.replaceChildren(note, buildFields(fields, values, preview));
+    rebuild();
+    modal({
+      title: 'Color Range', width: 440, body,
+      buttons: [
+        { label: 'Primary / secondary', keepOpen: true, onClick: () => {
+          const p = ed.primary, s = ed.secondary;
+          Object.assign(values, {
+            ar: ch8(p, 'r', 0), ag: ch8(p, 'g', 0), ab: ch8(p, 'b', 0), aa: ch8(p, 'a', 255),
+            br: ch8(s, 'r', 0), bg: ch8(s, 'g', 0), bb: ch8(s, 'b', 0), ba: ch8(s, 'a', 255),
+          });
+          rebuild(); preview();
+        } },
+        { label: 'Cancel', cancel: true },
+        { label: 'Apply', primary: true, onClick: () => {
+          clearTimeout(timer);
+          const ok = session.preview({}) && session.commit();
+          resolve(ok ? { count: spec.count, mode: values.mode } : null);
+        } },
+      ],
+      onCancel: () => { clearTimeout(timer); session.cancel(); resolve(null); },
+    });
+    preview();
+  });
+}
+
+/** Pick one stored backup. rows: [{id, name, at, kind}]. → id or null. */
+export function restoreBackupDialog(rows, formatWhen) {
+  return new Promise((resolve) => {
+    if (!rows.length) {
+      modal({
+        title: 'Restore Backup', width: 420,
+        body: h('p', { class: 'msg' }, 'No backups yet. They appear when you save, or automatically while a document is open.'),
+        buttons: [{ label: 'Close', primary: true, onClick: () => resolve(null) }],
+        onCancel: () => resolve(null),
+      });
+      return;
+    }
+    let picked = rows[0].id;
+    const list = h('div', { class: 'fields' }, rows.map((r) => {
+      const input = h('input', { type: 'radio', name: 'bak', value: r.id, checked: r.id === picked });
+      input.addEventListener('change', () => { picked = r.id; });
+      return h('label', { class: 'field-label', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+        input, `${r.name} — ${r.kind === 'auto' ? 'autosave' : 'save'} — ${formatWhen(r.at)}`);
+    }));
+    modal({
+      title: 'Restore Backup', width: 480, body: list,
+      buttons: [
+        { label: 'Cancel', cancel: true },
+        { label: 'Restore', primary: true, onClick: () => resolve(picked) },
+      ],
+      onCancel: () => resolve(null),
+    });
   });
 }

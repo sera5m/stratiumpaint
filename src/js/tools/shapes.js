@@ -46,6 +46,9 @@ function makeShape({ id, name, kind, key }) {
 
   const draw = (ed, s) => {
     const { layer, orig } = s, o = ed.opts, g = geometry(s);
+    // Read colour live rather than what was captured at mousedown, so changing the primary/secondary
+    // colour mid-drag (e.g. via a keyboard shortcut) updates the shape before it's released.
+    const stroke = s.swap ? ed.secondary : ed.primary, fill = s.swap ? ed.primary : ed.secondary;
     if (s.prev) { // put back what the previous frame covered
       stampImage(layer.img, cropImage(orig, s.prev), s.prev.x, s.prev.y);
     }
@@ -61,9 +64,9 @@ function makeShape({ id, name, kind, key }) {
       ctx.lineWidth = Math.max(1, o.size);
       ctx.lineCap = 'round';
       ctx.lineJoin = kind === 'rect' ? 'miter' : 'round';
-      if (kind === 'line' || o.shape === 'outline') { ctx.strokeStyle = rgbaCss(s.stroke); ctx.stroke(); }
-      else if (o.shape === 'fill') { ctx.fillStyle = rgbaCss(s.stroke); ctx.fill(); }
-      else { ctx.fillStyle = rgbaCss(s.fill); ctx.fill(); ctx.strokeStyle = rgbaCss(s.stroke); ctx.stroke(); }
+      if (kind === 'line' || o.shape === 'outline') { ctx.strokeStyle = rgbaCss(stroke); ctx.stroke(); }
+      else if (o.shape === 'fill') { ctx.fillStyle = rgbaCss(stroke); ctx.fill(); }
+      else { ctx.fillStyle = rgbaCss(fill); ctx.fill(); ctx.strokeStyle = rgbaCss(stroke); ctx.stroke(); }
     });
     if (!o.aa) hardenAlpha(img);
     paintImage(layer.img, img, region.x, region.y, ed.doc.selection, o.opacity / 100);
@@ -80,10 +83,9 @@ function makeShape({ id, name, kind, key }) {
     down(e, ed) {
       const layer = ed.editableLayer();
       if (!layer) return;
-      const swap = e.button === 2;
       S = {
         layer, orig: cloneImage(layer.img), x0: e.x, y0: e.y, x1: e.x, y1: e.y, shift: e.shift,
-        stroke: swap ? ed.secondary : ed.primary, fill: swap ? ed.primary : ed.secondary,
+        swap: e.button === 2,
         prev: null, all: null, moved: false,
       };
     },
@@ -92,6 +94,10 @@ function makeShape({ id, name, kind, key }) {
       S.x1 = e.x; S.y1 = e.y; S.shift = e.shift; S.moved = true;
       draw(ed, S);
     },
+    // Redraw immediately if the colour changes mid-drag, so you don't have to nudge the mouse to
+    // see it. Only once a real drag is underway — draw() marks the stroke as "something to commit
+    // or revert", so calling it before any move() would happen is not safe.
+    colorsChanged(ed) { if (S?.moved) draw(ed, S); },
     up(e, ed) {
       if (!S) return;
       const s = S;

@@ -258,12 +258,28 @@ export function buildColorsPanel(root, ed) {
   const palette = h('div', { class: 'palette' }, PALETTE.map((hex) => {
     const b = h('button', { class: 'pal', type: 'button', title: `${hex} (left: primary, right: secondary)`, 'aria-label': hex, style: { background: hex } });
     const c = { r: parseInt(hex.slice(1, 3), 16), g: parseInt(hex.slice(3, 5), 16), b: parseInt(hex.slice(5, 7), 16), a: 1 };
-    b.addEventListener('click', () => ed.setPrimary(c));
-    b.addEventListener('contextmenu', (e) => { e.preventDefault(); ed.setSecondary(c); });
+    b.addEventListener('click', () => { ed.setPrimary(c); ed.noteRecentColor(c); });
+    b.addEventListener('contextmenu', (e) => { e.preventDefault(); ed.setSecondary(c); ed.noteRecentColor(c); });
     return b;
   }));
 
-  root.append(h('h3', null, 'Colors'), h('div', { class: 'swatches' }, sec, prim, swap, reset), palette);
+  const recentLabel = h('h3', { class: 'recent-label' }, 'Recent');
+  const recent = h('div', { class: 'palette recent' });
+  const renderRecent = () => {
+    clear(recent);
+    for (const c of ed.recentColors) {
+      const hex = rgbToHex(c);
+      const b = h('button', { class: 'pal', type: 'button', title: `${hex} (left: primary, right: secondary)`, 'aria-label': hex, style: { background: `rgba(${c.r},${c.g},${c.b},${c.a})` } });
+      b.addEventListener('click', () => ed.setPrimary(c));
+      b.addEventListener('contextmenu', (e) => { e.preventDefault(); ed.setSecondary(c); });
+      recent.append(b);
+    }
+    recentLabel.hidden = recent.hidden = ed.recentColors.length === 0;
+  };
+  ed.on('recentColors', renderRecent);
+  renderRecent();
+
+  root.append(h('h3', null, 'Colors'), h('div', { class: 'swatches' }, sec, prim, swap, reset), palette, recentLabel, recent);
   const sync = () => {
     prim.firstChild.style.background = css(ed.primary);
     sec.firstChild.style.background = css(ed.secondary);
@@ -291,8 +307,8 @@ export function buildStatusbar(root, ed, view) {
     'ellipse-select': 'Drag to select. Ctrl adds, Alt subtracts, Shift makes a circle.',
     lasso: 'Drag to draw a free-form selection.',
     wand: 'Click to select similar colours.',
-    'move-pixels': 'Drag to move the selected pixels (or the whole layer).',
-    'move-selection': 'Drag to move the selection outline only.',
+    'move-pixels': 'Drag to move the selected pixels (or the whole layer). Enter or right-click sets it down; Esc cancels.',
+    'move-selection': 'Drag to move the selection outline only. Enter or right-click sets it down; Esc cancels.',
     zoom: 'Click to zoom in, right-click to zoom out, drag a box to zoom to it.',
     pan: 'Drag to pan. You can also hold Space with any tool.',
     bucket: 'Click to fill. Right-click fills with the secondary colour.',

@@ -5,8 +5,9 @@ import { EFFECTS } from '../core/effects.js';
 import { Doc } from '../doc/document.js';
 import { FORMATS, formatFromName, stripExt, openDocument, decodeImage, encodeDocument, imageToPng } from '../doc/io.js';
 import { applyFilter, eraseSelection, fillSelection, extractSelection, pasteImage } from '../doc/ops.js';
-import * as platform from './platform.js';
 import * as dlg from './dialogs.js';
+import { putBackup, listBackups, formatWhen } from './backup.js';
+import * as platform from './platform.js';
 import { h } from './dom.js';
 
 const base = (path) => path.split(/[\\/]/).pop();
@@ -72,6 +73,12 @@ export function createCommands({ ed, view }) {
     }
 
     const bytes = await encodeDocument(doc, format, quality);
+    if (platform.isNative && path) {
+      try { await platform.backupExisting(path); } catch (err) { console.warn('Could not keep the previous file:', err); }
+    }
+    try {
+      await putBackup({ docKey: doc.backupKey, name: doc.name, bytes, kind: 'save' });
+    } catch (err) { console.warn('Could not store a backup copy:', err); }
     let fileName;
     if (platform.isNative) {
       await platform.writeFile(path, bytes);
@@ -119,6 +126,31 @@ export function createCommands({ ed, view }) {
   add('open', 'Open…', guard(async () => openFilesInto(await platform.openFiles())), { shortcut: 'Ctrl+O', enabled: () => true });
   add('save', 'Save', guard(() => saveDoc(ed.doc)), { shortcut: 'Ctrl+S' });
   add('saveAs', 'Save As…', guard(() => saveDoc(ed.doc, true)), { shortcut: 'Ctrl+Shift+S' });
+  add('saveBackup', 'Save Backup', guard(async () => {
+    const doc = ed.doc;
+    const bytes = await encodeDocument(doc, 'ora');
+    await putBackup({ docKey: doc.backupKey, name: doc.name, bytes, kind: 'save' });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const fileName = `${stripExt(doc.name)}.${stamp}.ora`;
+    if (platform.isNative) {
+      const where = await platform.writeBackup(doc.path, fileName, bytes);
+      ed.toast(where ? `Backup written.` : 'Backup stored.');
+    } else {
+      platform.download(fileName, bytes, 'image/openraster');
+      ed.toast('Backup downloaded, and kept in this browser.');
+    }
+  })), { shortcut: 'Ctrl+Alt+S' });
+  add('restoreBackup', 'Restore Backup…', guard(async () => {
+    const rows = await listBackups();
+    const id = await dlg.restoreBackupDialog(rows, formatWhen);
+    if (!id) return;
+    const rec = rows.find((r) => r.id === id);
+    if (!rec) return;
+    const doc = await openDocument(rec.bytes instanceof Uint8Array ? rec.bytes : new Uint8Array(rec.bytes), rec.name);
+    doc.rename(`${stripExt(rec.name)} restored`);
+    ed.addDoc(doc);
+    ed.toast('Restored a backup into a new image. The original file was not overwritten.');
+  }), { enabled: () => true });
   add('close', 'Close', guard(() => closeDoc()), { shortcut: 'Ctrl+W' });
   add('quit', 'Quit', guard(async () => { if (await closeAll()) platform.quit(); }), { shortcut: 'Ctrl+Q', enabled: () => platform.isNative });
 
@@ -168,8 +200,8 @@ export function createCommands({ ed, view }) {
     ed.addDoc(doc);
   }), { shortcut: 'Ctrl+Alt+V', enabled: () => true });
 
-  add('erase', 'Erase Selection', () => { const l = ed.editableLayer(); if (l && !eraseSelection(ed.doc, l)) ed.toast('The selection is empty.'); }, { shortcut: 'Delete' });
-  add('fill', 'Fill Selection', () => { const l = ed.editableLayer(); if (l && !fillSelection(ed.doc, l, ed.primary)) ed.toast('The selection is empty.'); }, { shortcut: 'Backspace' });
+  add('erase', 'Erase Selection', () => { const l = ed.editableLayer(); if (l && !eraseSelection(ed.doc, l, ed.opts.wholeImage)) ed.toast('The selection is empty.'); }, { shortcut: 'Delete' });
+  add('fill', 'Fill Selection', () => { const l = ed.editableLayer(); if (l && !fillSelection(ed.doc, l, ed.primary, ed.opts.wholeImage)) ed.toast('The selection is empty.'); }, { shortcut: 'Backspace' });
   add('selectAll', 'Select All', () => ed.doc.selectAll(), { shortcut: 'Ctrl+A' });
   add('deselect', 'Deselect All', () => ed.doc.deselect(), { shortcut: 'Ctrl+D', enabled: hasSel });
   add('invertSel', 'Invert Selection', () => ed.doc.invertSelection(), { shortcut: 'Ctrl+I' });
@@ -199,6 +231,13 @@ export function createCommands({ ed, view }) {
   add('rotateCCW', 'Rotate 90° Counter-clockwise', () => ed.doc.rotate(3));
   add('rotate180', 'Rotate 180°', () => ed.doc.rotate(2));
   add('flatten', 'Flatten', () => ed.doc.flatten(), { shortcut: 'Ctrl+Shift+F', enabled: () => ed.doc?.layers.length > 1 });
+  add('removeBg', 'Remove Background', () => {
+    ed.toolById('bg-remove')?.down({}, ed);
+  }, { shortcut: 'Ctrl+Shift+B' });
+  add('colorRange', 'Color Range…', guard(async () => {
+    const result = await dlg.colorRangeDialog(ed);
+    if (result) ed.toast(result.mode === 'delete' ? `Deleted ${result.count} pixels.` : `Replaced ${result.count} pixels.`);
+  })), { shortcut: 'Ctrl+Shift+C' });
 
   // ------------------------------------------------------------------ layers
 
@@ -216,10 +255,13 @@ export function createCommands({ ed, view }) {
     const layer = ed.editableLayer();
     if (!layer) return;
     if (spec.params?.length) dlg.effectDialog(ed, spec);
-    else if (!applyFilter(ed.doc, layer, spec, {})) ed.toast('The selection is empty.');
+    else if (!applyFilter(ed.doc, layer, spec, {}, ed.opts.wholeImage)) ed.toast('The selection is empty.');
   };
   for (const s of ADJUSTMENTS) add(`adj:${s.id}`, s.name + (s.params?.length ? '…' : ''), () => runSpec(s), { shortcut: s.shortcut });
   for (const s of EFFECTS) add(`fx:${s.id}`, s.name + (s.params?.length ? '…' : ''), () => runSpec(s), { shortcut: s.shortcut });
+  add('wholeImage', 'Apply to Whole Image', () => ed.setOpt('wholeImage', !ed.opts.wholeImage), {
+    shortcut: 'Ctrl+Shift+W', enabled: () => true, checked: () => ed.opts.wholeImage,
+  });
 
   // ------------------------------------------------------------------ help
 
@@ -248,7 +290,8 @@ function shortcutsBody(cmds, ed) {
     h('table', null,
       row('Use secondary colour', 'Right button'), row('Swap colours', 'X'), row('Brush size', '[  and  ]'),
       row('Clone Stamp: set source', 'Ctrl + click'), row('Cancel the current drag', 'Esc'),
-      row('Text: commit / cancel', 'Ctrl+Enter / Esc')),
+      row('Text: line break', 'Shift+Enter'), row('Text: set it down', 'Enter, right-click, or Esc'),
+      row('Move tools: set it down', 'Enter or right-click'), row('Move tools: cancel', 'Esc')),
     h('h4', null, 'Navigation'),
     h('table', null, row('Pan', 'Space + drag, middle-drag, or scroll'), row('Zoom', 'Ctrl + scroll')),
     h('h4', null, 'Commands'),

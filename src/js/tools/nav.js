@@ -43,18 +43,19 @@ function pan() {
 }
 
 function picker() {
+  let down = false, last = null;
   const sample = (e, ed) => {
     const c = ed.doc.pixelAt(Math.floor(e.x), Math.floor(e.y), ed.opts.sampling === 'image');
     if (!c) return;
+    last = c;
     if (e.button === 2) ed.setSecondary(c); else ed.setPrimary(c);
   };
-  let down = false;
   return {
     id: 'picker', name: 'Color Picker', key: 'K', group: 'nav', cursor: 'crosshair', options: ['sampling'],
     down(e, ed) { down = true; sample(e, ed); },
     move(e, ed) { if (down) sample(e, ed); },
-    up() { down = false; },
-    cancel() { down = false; },
+    up(e, ed) { down = false; if (last) ed.noteRecentColor(last); last = null; },
+    cancel() { down = false; last = null; },
   };
 }
 

@@ -8,11 +8,12 @@ import { paintImage } from './raster.js';
 /**
  * The area an operation should touch: selection bounds (or the whole layer), grown by `margin`
  * so neighbourhood effects can see past the edge. null when the selection is empty.
+ * `ignoreSelection` treats the document as if nothing were selected (the "whole image" toggle).
  */
-export function targetRegion(doc, margin = 0) {
+export function targetRegion(doc, margin = 0, ignoreSelection = false) {
   const full = { x: 0, y: 0, w: doc.width, h: doc.height };
   let base = full;
-  if (doc.selection) {
+  if (doc.selection && !ignoreSelection) {
     base = maskBounds(doc.selection);
     if (!base) return null;
   }
@@ -22,12 +23,14 @@ export function targetRegion(doc, margin = 0) {
 /**
  * Previewable adjustment / effect. preview(params) can be called repeatedly (dialog sliders);
  * commit() records one history step; cancel() puts the layer back.
+ * `ignoreSelection` applies across the whole layer even when a selection is active.
  */
 export class FilterSession {
-  constructor(doc, layer, spec) {
+  constructor(doc, layer, spec, { ignoreSelection = false } = {}) {
     this.doc = doc;
     this.layer = layer;
     this.spec = spec;
+    this.ignoreSelection = ignoreSelection;
     this.orig = cloneImage(layer.img);
     this.dirty = null;
   }
@@ -41,12 +44,13 @@ export class FilterSession {
   }
 
   preview(params) {
-    const { doc, layer, spec, orig } = this;
+    const { doc, layer, spec, orig, ignoreSelection } = this;
     this.#restore();
-    const region = targetRegion(doc, spec.margin ? spec.margin(params) : 0);
+    const region = targetRegion(doc, spec.margin ? spec.margin(params) : 0, ignoreSelection);
     if (!region) return false;
     const src = cropImage(orig, region);
-    const merged = blendByMask(src, spec.apply(src, params), doc.selection, region.x, region.y);
+    const mask = ignoreSelection ? null : doc.selection;
+    const merged = blendByMask(src, spec.apply(src, params), mask, region.x, region.y);
     stampImage(layer.img, merged, region.x, region.y);
     layer.touch(region);
     this.dirty = region;
@@ -63,17 +67,17 @@ export class FilterSession {
   cancel() { this.#restore(); }
 }
 
-export function applyFilter(doc, layer, spec, params) {
-  const s = new FilterSession(doc, layer, spec);
+export function applyFilter(doc, layer, spec, params, ignoreSelection = false) {
+  const s = new FilterSession(doc, layer, spec, { ignoreSelection });
   return s.preview(params) && s.commit();
 }
 
-/** Clear the selected pixels (or the whole layer when nothing is selected). */
-export function eraseSelection(doc, layer) {
-  const r = targetRegion(doc);
+/** Clear the selected pixels (or the whole layer when nothing is selected, or `ignoreSelection`). */
+export function eraseSelection(doc, layer, ignoreSelection = false) {
+  const r = targetRegion(doc, 0, ignoreSelection);
   if (!r) return false;
   const before = cropImage(layer.img, r);
-  const { width: w, data } = layer.img, mask = doc.selection;
+  const { width: w, data } = layer.img, mask = ignoreSelection ? null : doc.selection;
   for (let y = r.y; y < r.y + r.h; y++) {
     for (let x = r.x; x < r.x + r.w; x++) {
       const m = mask ? mask.data[y * w + x] : 255;
@@ -85,11 +89,11 @@ export function eraseSelection(doc, layer) {
   return true;
 }
 
-export function fillSelection(doc, layer, color) {
-  const r = targetRegion(doc);
+export function fillSelection(doc, layer, color, ignoreSelection = false) {
+  const r = targetRegion(doc, 0, ignoreSelection);
   if (!r) return false;
   const before = cropImage(layer.img, r);
-  fillMask(layer.img, doc.selection, color);
+  fillMask(layer.img, ignoreSelection ? null : doc.selection, color);
   layer.touch(r);
   doc.commitRegion(layer, r, before, 'Fill Selection');
   return true;

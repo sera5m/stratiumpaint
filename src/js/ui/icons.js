@@ -20,6 +20,8 @@ const P = {
   roundrect: '<rect x="4" y="6" width="16" height="12" rx="4"/>',
   ellipse: '<ellipse cx="12" cy="12" rx="8.500" ry="6"/>',
   text: '<path d="M5 7V4.500h14V7M12 4.500V19M9 19h6"/>',
+  'bg-remove': '<rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="3 2"/><circle cx="12" cy="12" r="4"/><path d="M5 5l3 3M19 5l-3 3"/>',
+  'color-range': '<path d="M4 16c2-6 4-6 6 0s4 6 6 0 4-6 4 0"/><path d="M4 8h4M16 8h4"/>',
 
   eye: '<path d="M2 12s3.500-6.500 10-6.500S22 12 22 12s-3.500 6.500-10 6.500S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   'eye-off': '<path d="M3 3l18 18M10 6c.600-.100 1.300-.200 2-.200 6.500 0 10 6.200 10 6.200a17 17 0 01-3.300 4M6.500 7.500A17 17 0 002 12s3.500 6.500 10 6.500c1.500 0 2.800-.300 4-.800"/>',

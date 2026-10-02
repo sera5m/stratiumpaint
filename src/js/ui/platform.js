@@ -35,6 +35,13 @@ export const readDroppedFiles = async (fileList) => {
 export const pickSavePath = (defaultName) => native.pickSavePath(defaultName);
 export const writeFile = (path, bytes) => native.writeFile(path, bytes);
 
+/** Copy the current file aside before it is overwritten. No-op in the browser. → path or null */
+export const backupExisting = (path) => (native?.backupExisting ? native.backupExisting(path) : Promise.resolve(null));
+
+/** Write an extra copy (OpenRaster) into the backup folder. → path or null */
+export const writeBackup = (hintPath, filename, bytes) =>
+  (native?.writeBackup ? native.writeBackup(hintPath, filename, bytes) : Promise.resolve(null));
+
 /** Browser fallback: hand the bytes to the download manager. */
 export function download(name, bytes, mime) {
   const url = URL.createObjectURL(new Blob([bytes], { type: mime }));

@@ -116,6 +116,47 @@ ipcMain.handle('file:write', async (_e, filePath, bytes) => {
   await fs.promises.writeFile(filePath, Buffer.from(bytes));
 });
 
+function backupDir(hintPath) {
+  const base = (typeof hintPath === 'string' && path.isAbsolute(hintPath))
+    ? path.dirname(hintPath)
+    : app.getPath('userData');
+  return path.join(base, '.stratum-backups');
+}
+
+async function prune(dir, prefix, keep) {
+  const names = (await fs.promises.readdir(dir)).filter((n) => n.startsWith(prefix)).sort();
+  while (names.length > keep) await fs.promises.unlink(path.join(dir, names.shift()));
+}
+
+/** Keep the previous bytes of a file we are about to overwrite. */
+ipcMain.handle('file:backup-existing', async (_e, filePath) => {
+  if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('Refusing that path.');
+  if (!fs.existsSync(filePath)) return null;
+  const dir = backupDir(filePath);
+  await fs.promises.mkdir(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dest = path.join(dir, `${path.basename(filePath)}.${stamp}`);
+  await fs.promises.copyFile(filePath, dest);
+  const ext = path.extname(filePath);
+  const alias = path.join(path.dirname(filePath), `${path.basename(filePath, ext)}.bak${ext || '.png'}`);
+  await fs.promises.copyFile(filePath, alias);
+  await prune(dir, path.basename(filePath), 12);
+  return dest;
+});
+
+ipcMain.handle('file:write-backup', async (_e, hintPath, filename, bytes) => {
+  const safe = path.basename(String(filename || 'backup.ora')).replace(/[^a-z0-9._-]+/gi, '_');
+  if (!safe.endsWith('.ora') && !SAVE_EXTS.has(path.extname(safe).toLowerCase())) {
+    throw new Error('Refusing to write that backup type.');
+  }
+  const dir = backupDir(hintPath);
+  await fs.promises.mkdir(dir, { recursive: true });
+  const dest = path.join(dir, safe);
+  await fs.promises.writeFile(dest, Buffer.from(bytes));
+  await prune(dir, '', 24);
+  return dest;
+});
+
 // Electron replaced the sync clipboard.writeImage/readImage with a W3C-style async API (clipboard.write/read
 // with ClipboardItem). Support both, so this works on whatever `electron` the distro ships.
 async function clipboardWritePng(bytes) {

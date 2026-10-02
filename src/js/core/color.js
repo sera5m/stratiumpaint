@@ -72,3 +72,47 @@ export function hslToRgb(h, s, l) {
   else [r, g, b] = [c, 0, x];
   return { r: Math.round((r + m) * 255), g: Math.round((g + m) * 255), b: Math.round((b + m) * 255) };
 }
+
+const STEP_PARTS = { whole: 1, half: 2, quarter: 4 };
+
+/**
+ * A doubling ramp of channel values from 0 to `max` (inclusive): 0, 2, 4, 8, 16, 32, 64, 128, ...,
+ * max. This is closer to how the eye actually resolves brightness/colour differences than an
+ * evenly-spaced ramp would be — each step is a similarly-*perceptible* jump, not a similarly-sized
+ * number (the human eye responds roughly logarithmically, i.e. each doubling reads as "one step").
+ * mode 'half' or 'quarter' inserts 1 or 3 extra steps into each octave, at the geometric mean of
+ * its endpoints (so between 64 and 128: half adds ~91 (2^6.5); quarter also adds ~76 and ~108).
+ */
+export function powerSteps(max = 255, mode = 'whole') {
+  const whole = [0];
+  for (let v = 2; v < max; v *= 2) whole.push(v);
+  whole.push(max);
+  const parts = STEP_PARTS[mode] ?? 1;
+  if (parts === 1) return whole;
+  const out = [];
+  for (let i = 0; i < whole.length - 1; i++) {
+    const a = whole[i], b = whole[i + 1];
+    out.push(a);
+    for (let k = 1; k < parts; k++) out.push(Math.round(a === 0 ? (b * k) / parts : a * (b / a) ** (k / parts)));
+  }
+  out.push(max);
+  return [...new Set(out)].sort((x, y) => x - y);
+}
+
+/** Fractional (interpolated) value `idx` steps into an ascending array, e.g. for a smooth radius. */
+export function stepValueAt(arr, idx) {
+  idx = Math.max(0, Math.min(arr.length - 1, idx));
+  const i0 = Math.floor(idx), t = idx - i0, i1 = Math.min(i0 + 1, arr.length - 1);
+  return arr[i0] + (arr[i1] - arr[i0]) * t;
+}
+
+/** Fractional index at which `value` falls in an ascending array (inverse of stepValueAt). */
+export function indexOfStep(arr, value) {
+  if (value <= arr[0]) return 0;
+  const last = arr.length - 1;
+  if (value >= arr[last]) return last;
+  for (let i = 0; i < last; i++) {
+    if (value <= arr[i + 1]) return i + (value - arr[i]) / (arr[i + 1] - arr[i] || 1);
+  }
+  return last;
+}

@@ -21,6 +21,7 @@ export class Doc extends Emitter {
     this.path = null;
     this.format = null; // file format it was opened from / last saved as
     this.quality = null; // last JPEG/WebP quality chosen
+    this.backupKey = Math.random().toString(36).slice(2, 10);
     this.layers = [];
     this.active = 0;
     this.selection = null; // Uint8 mask the size of the document, or null = nothing selected

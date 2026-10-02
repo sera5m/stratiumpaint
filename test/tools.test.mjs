@@ -288,7 +288,7 @@ test('magic wand selects similar contiguous pixels', () => {
 
 // ---------------------------------------------------------------- move tools
 
-test('move selected pixels: lifts the selection, is one undo step, and moves the selection with it', () => {
+test('move selected pixels floats: nothing is written to history until it is set down', () => {
   const { ed, doc } = session(20, 10);
   doc.layer.img.data.set([255, 0, 0, 255], (3 * 20 + 3) * 4);
   doc.setSelection(rectMask(20, 10, 2, 2, 5, 5));
@@ -297,11 +297,16 @@ test('move selected pixels: lifts the selection, is one undo step, and moves the
   ed.setTool('move-pixels');
   drag(ed, [[3, 3], [6, 3], [10, 5]]);
 
-  assert.equal(alphaAt(doc.layer, 3, 3), 0, 'original spot is empty');
-  assert.deepEqual(px(doc.layer, 10, 5), [255, 0, 0, 255], 'moved by (7, 2)');
-  assert.equal(doc.selection.data[4 * 20 + 9], 255);
+  // moved by (7, 2) on screen, but not committed yet — still floating
+  assert.equal(alphaAt(doc.layer, 3, 3), 0, 'original spot is already empty on screen');
+  assert.deepEqual(px(doc.layer, 10, 5), [255, 0, 0, 255], 'moved pixels are visible at the new spot');
+  assert.equal(doc.history.entries().length, before, 'no history step yet — it is only floating');
+  assert.equal(doc.selection.data[3 * 20 + 3], 255, 'the selection mask itself has not moved yet either');
+
+  ed.commitTool(); // Enter
+  assert.equal(doc.history.entries().length, before + 1, 'now it is one step');
+  assert.equal(doc.selection.data[4 * 20 + 9], 255, 'the selection moved with it once committed');
   assert.equal(doc.selection.data[3 * 20 + 3], 0);
-  assert.equal(doc.history.entries().length, before + 1);
 
   doc.undo();
   assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255]);
@@ -311,39 +316,128 @@ test('move selected pixels: lifts the selection, is one undo step, and moves the
   assert.deepEqual(px(doc.layer, 10, 5), [255, 0, 0, 255]);
 });
 
+test('move selected pixels: Escape after releasing the mouse still cancels the whole thing', () => {
+  const { ed, doc } = session(20, 10);
+  doc.layer.img.data.set([255, 0, 0, 255], (3 * 20 + 3) * 4);
+  const before = doc.history.entries().length;
+  ed.setTool('move-pixels');
+  drag(ed, [[3, 3], [8, 8]]);
+  assert.equal(alphaAt(doc.layer, 3, 3), 0, 'looks moved while floating');
+
+  ed.cancelTool(); // Escape
+
+  assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255], 'fully reverted, not just undone one step');
+  assert.equal(doc.history.entries().length, before, 'never touched history at all');
+});
+
+test('move selected pixels: released content can be picked up again and moved further before committing', () => {
+  const { ed, doc } = session(20, 20);
+  doc.layer.img.data.set([255, 0, 0, 255], (3 * 20 + 3) * 4);
+  ed.setTool('move-pixels');
+  drag(ed, [[3, 3], [8, 3]]); // first leg: +5 on x
+  assert.deepEqual(px(doc.layer, 8, 3), [255, 0, 0, 255]);
+  drag(ed, [[8, 3], [8, 9]]); // second leg, released and re-picked-up: +6 on y
+  assert.deepEqual(px(doc.layer, 8, 9), [255, 0, 0, 255], 'kept moving the same floated pixel, not a fresh lift');
+  assert.equal(alphaAt(doc.layer, 3, 3), 0);
+  assert.equal(alphaAt(doc.layer, 8, 3), 0, 'the first stop along the way is empty again, not a second copy');
+
+  ed.commitTool();
+  assert.deepEqual(px(doc.layer, 8, 9), [255, 0, 0, 255]);
+  doc.undo();
+  assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255], 'undo goes all the way back to the original spot');
+});
+
+test('move selected pixels: dragging off-canvas and back loses nothing as long as it is not committed', () => {
+  const { ed, doc } = session(10, 10, { r: 9, g: 9, b: 9 });
+  doc.layer.img.data.set([255, 0, 0, 255], (5 * 10 + 5) * 4);
+  doc.setSelection(rectMask(10, 10, 4, 4, 6, 6));
+  const before = doc.history.entries().length; // setSelection above is itself one undo step
+  ed.setTool('move-pixels');
+  drag(ed, [[5, 5], [500, 500]]); // way off-canvas
+  // the lifted 2x2 spot is a hole now (the content is "over there", off-screen) — that's expected
+  // mid-drag; everything else on the canvas must be completely untouched.
+  for (let y = 4; y < 6; y++) for (let x = 4; x < 6; x++) assert.equal(alphaAt(doc.layer, x, y), 0);
+  for (let y = 0; y < 10; y++) for (let x = 0; x < 10; x++) {
+    if (x >= 4 && x < 6 && y >= 4 && y < 6) continue;
+    assert.deepEqual(px(doc.layer, x, y), [9, 9, 9, 255], `(${x},${y}) outside the lifted area must be untouched`);
+  }
+  drag(ed, [[500, 500], [5, 5]]); // and all the way back
+  assert.deepEqual(px(doc.layer, 5, 5), [255, 0, 0, 255], 'the pixel is back, unharmed by the off-canvas trip');
+
+  ed.commitTool();
+  assert.deepEqual(px(doc.layer, 5, 5), [255, 0, 0, 255]);
+  assert.equal(doc.history.entries().length, before, 'net position matches the start, so committing was a no-op');
+});
+
+test('move selected pixels: right-click sets it down immediately, like the text tool', () => {
+  const { ed, doc } = session(10, 10);
+  doc.layer.img.data.set([0, 200, 0, 255], (2 * 10 + 2) * 4);
+  ed.setTool('move-pixels');
+  drag(ed, [[2, 2], [6, 6]]);
+  assert.equal(doc.history.entries().length, 0);
+  ed.pointer('down', ev(6, 6, { button: 2 }));
+  assert.equal(doc.history.entries().length, 1, 'right-click committed it');
+  assert.deepEqual(px(doc.layer, 6, 6), [0, 200, 0, 255]);
+});
+
+test('move selected pixels: switching tools or running a command sets it down instead of losing it', () => {
+  const { ed, doc } = session(10, 10);
+  doc.layer.img.data.set([0, 0, 200, 255], (2 * 10 + 2) * 4);
+  ed.setTool('move-pixels');
+  drag(ed, [[2, 2], [7, 2]]);
+  ed.setTool('brush'); // not Enter, not right-click — just switching away
+  assert.equal(doc.history.entries().length, 1, 'the move should have been committed, not discarded');
+  assert.deepEqual(px(doc.layer, 7, 2), [0, 0, 200, 255]);
+});
+
 test('moving with nothing selected moves the whole layer; a click without a drag changes nothing', () => {
   const { ed, doc } = session(10, 10);
   doc.layer.img.data.set([0, 255, 0, 255], (0 * 10 + 0) * 4);
   ed.setTool('move-pixels');
   drag(ed, [[4, 4], [4, 4]]);
+  ed.commitTool();
   assert.equal(doc.history.entries().length, 0);
   assert.deepEqual(px(doc.layer, 0, 0), [0, 255, 0, 255]);
 
   drag(ed, [[4, 4], [7, 6]]);
+  ed.commitTool();
   assert.deepEqual(px(doc.layer, 3, 2), [0, 255, 0, 255]);
   assert.equal(alphaAt(doc.layer, 0, 0), 0);
   assert.equal(doc.selection, null);
 });
 
-test('dragging pixels partly off the canvas clips them and still undoes exactly', () => {
+test('dragging pixels partly off the canvas clips them and still undoes exactly, once committed', () => {
   const { ed, doc } = session(10, 10, { r: 9, g: 9, b: 9 });
   ed.setTool('move-pixels');
   drag(ed, [[5, 5], [12, 5]]);
+  ed.commitTool();
   assert.equal(alphaAt(doc.layer, 0, 5), 0);
   assert.equal(alphaAt(doc.layer, 9, 5), 255);
   doc.undo();
   for (let x = 0; x < 10; x++) assert.deepEqual(px(doc.layer, x, 5), [9, 9, 9, 255]);
 });
 
-test('move selection moves only the outline', () => {
+test('move selection floats too: only the outline moves, and only once committed', () => {
   const { ed, doc } = session();
   doc.layer.img.data.set([255, 0, 0, 255], (3 * 40 + 3) * 4);
   doc.setSelection(rectMask(40, 30, 2, 2, 6, 6));
   ed.setTool('move-selection');
   drag(ed, [[3, 3], [13, 8]]);
+  assert.equal(doc.selection.data[3 * 40 + 3], 255, 'not moved yet — still floating');
+  ed.commitTool();
   assert.equal(doc.selection.data[8 * 40 + 12], 255);
   assert.equal(doc.selection.data[3 * 40 + 3], 0);
-  assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255], 'pixels stay put');
+  assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255], 'pixels stay put, this tool never touches them');
+});
+
+test('move selection: Escape after releasing leaves the selection exactly where it was', () => {
+  const { ed, doc } = session();
+  doc.setSelection(rectMask(40, 30, 2, 2, 6, 6));
+  const before = new Uint8Array(doc.selection.data);
+  ed.setTool('move-selection');
+  drag(ed, [[3, 3], [20, 20]]);
+  ed.cancelTool();
+  assert.deepEqual(doc.selection.data, before);
 });
 
 test('colour picker takes the pixel under the cursor', () => {
