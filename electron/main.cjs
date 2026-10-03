@@ -96,6 +96,20 @@ ipcMain.handle('dialog:open', async () => {
   return r.canceled ? [] : readFiles(r.filePaths);
 });
 
+ipcMain.handle('dialog:open-mesh', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'Models', extensions: ['obj', 'json'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (r.canceled || !r.filePaths[0]) return null;
+  const filePath = r.filePaths[0];
+  const text = await fs.promises.readFile(filePath, 'utf8');
+  return { name: path.basename(filePath), path: filePath, text };
+});
+
 ipcMain.handle('dialog:save', async (_e, defaultName) => {
   const name = typeof defaultName === 'string' ? defaultName : 'Untitled.png';
   const ext = path.extname(name).slice(1).toLowerCase();

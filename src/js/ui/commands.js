@@ -5,6 +5,7 @@ import { EFFECTS } from '../core/effects.js';
 import { Doc } from '../doc/document.js';
 import { FORMATS, formatFromName, stripExt, openDocument, decodeImage, encodeDocument, imageToPng } from '../doc/io.js';
 import { applyFilter, eraseSelection, fillSelection, extractSelection, pasteImage } from '../doc/ops.js';
+import { parseMeshText, demoMesh, unwrapMesh } from '../core/mesh.js';
 import * as dlg from './dialogs.js';
 import { putBackup, listBackups, formatWhen } from './backup.js';
 import * as platform from './platform.js';
@@ -26,6 +27,10 @@ export function createCommands({ ed, view }) {
 
   async function openFilesInto(files) {
     for (const f of files) {
+      if (/\.(obj|json)$/i.test(f.name) && f.bytes) {
+        await openMeshText(f.name, new TextDecoder().decode(f.bytes));
+        continue;
+      }
       const existing = f.path && ed.docs.find((d) => d.path === f.path);
       if (existing) { ed.activate(existing); continue; }
       try {
@@ -139,7 +144,7 @@ export function createCommands({ ed, view }) {
       platform.download(fileName, bytes, 'image/openraster');
       ed.toast('Backup downloaded, and kept in this browser.');
     }
-  })), { shortcut: 'Ctrl+Alt+S' });
+  }), { shortcut: 'Ctrl+Alt+S' });
   add('restoreBackup', 'Restore Backup…', guard(async () => {
     const rows = await listBackups();
     const id = await dlg.restoreBackupDialog(rows, formatWhen);
@@ -237,7 +242,63 @@ export function createCommands({ ed, view }) {
   add('colorRange', 'Color Range…', guard(async () => {
     const result = await dlg.colorRangeDialog(ed);
     if (result) ed.toast(result.mode === 'delete' ? `Deleted ${result.count} pixels.` : `Replaced ${result.count} pixels.`);
-  })), { shortcut: 'Ctrl+Shift+C' });
+  }), { shortcut: 'Ctrl+Shift+C' });
+
+  // ------------------------------------------------------------------ model
+
+  function mountAtlas(atlas, name) {
+    const doc = new Doc(atlas.width, atlas.height, { name, background: { r: 196, g: 198, b: 204, a: 1 } });
+    doc.mount = atlas;
+    ed.layout = 'split';
+    ed.addDoc(doc);
+    ed.emit('layout');
+    const detail = atlas.keptUVs
+      ? `Kept the UVs already in the file. Atlas ${atlas.width}×${atlas.height}.`
+      : `Unwrapped ${atlas.charts} chart${atlas.charts === 1 ? '' : 's'} into ${atlas.width}×${atlas.height}.`;
+    const extra = atlas.projected ? ` ${atlas.projected} chart${atlas.projected === 1 ? '' : 's'} were projected instead of solved.` : '';
+    ed.toast(`${detail}${extra} Paint the image, or paint on the model.`);
+  }
+
+  async function openMeshText(name, text, { ask = true } = {}) {
+    const mesh = parseMeshText(name, text);
+    const opts = ask ? await dlg.unwrapDialog({ hasUV: mesh.hasUV }) : { angle: 66, padding: 4, resolution: 1024, pxPerM: 0, useExisting: false };
+    if (!opts) return;
+    mountAtlas(unwrapMesh(mesh, opts), stripExt(name));
+  }
+
+  add('openModel', 'Open Model…', guard(async () => {
+    const f = await platform.openMeshFile();
+    if (!f) return;
+    await openMeshText(f.name, f.text);
+  }), { enabled: () => true });
+
+  add('demoModel', 'Unwrap Demo', guard(() => {
+    mountAtlas(unwrapMesh(demoMesh(), { angle: 66, padding: 4, resolution: 1024, pxPerM: 0 }), 'Demo mine');
+  }), { enabled: () => true });
+
+  add('reunwrap', 'Unwrap Again…', guard(async () => {
+    const mesh = ed.doc?.mount?.mesh;
+    if (!mesh) return;
+    const opts = await dlg.unwrapDialog({ hasUV: mesh.hasUV });
+    if (!opts) return;
+    mountAtlas(unwrapMesh(mesh, opts), stripExt(ed.doc.name));
+  }), { enabled: () => !!ed.doc?.mount?.mesh });
+
+  const setLayout = (mode) => { ed.layout = mode; ed.emit('layout'); };
+  add('layoutSplit', 'Split View', () => setLayout('split'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === 'split' });
+  add('layout2d', 'Texture Only', () => setLayout('2d'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === '2d' });
+  add('layout3d', 'Model Only', () => setLayout('3d'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === '3d' });
+  add('uvLines', 'UV Lines', () => {
+    const m = ed.doc?.mount;
+    if (!m) return;
+    m.showWires = m.showWires === false;
+    ed.requestOverlay();
+  }, { enabled: () => !!ed.doc?.mount, checked: () => !!ed.doc?.mount && ed.doc.mount.showWires !== false });
+  add('unmount', 'Unmount Model', () => {
+    if (ed.doc) delete ed.doc.mount;
+    ed.emit('layout');
+    ed.requestOverlay();
+  }, { enabled: () => !!ed.doc?.mount });
 
   // ------------------------------------------------------------------ layers
 
@@ -268,7 +329,7 @@ export function createCommands({ ed, view }) {
   add('shortcuts', 'Keyboard Shortcuts', () => dlg.infoDialog('Keyboard Shortcuts', shortcutsBody(cmds, ed), 560), { shortcut: 'F1', enabled: () => true });
   add('about', 'About Stratum', () => dlg.infoDialog('About Stratum', aboutBody(), 420), { enabled: () => true });
 
-  return { cmds, openFilesInto, closeDoc, closeAll, saveDoc };
+  return { cmds, openFilesInto, closeDoc, closeAll, saveDoc, openMeshText };
 }
 
 // ---------------------------------------------------------------------- help content
@@ -301,6 +362,6 @@ function shortcutsBody(cmds, ed) {
 function aboutBody() {
   return h('div', { class: 'about' },
     h('p', null, 'Stratum is a layered raster image editor in the spirit of Paint.NET, built for Linux.'),
-    h('p', null, 'Layers, selections, unlimited-ish undo history, adjustments, effects, OpenRaster (.ora) support.'),
+    h('p', null, 'Model → Unwrap Demo (or drop an .obj) lays the surface out as a texture and mounts it beside the canvas. Paint either side; both write the same layer.'),
     h('p', { class: 'dim' }, 'Runs on Electron; the editing core has no dependencies.'));
 }

@@ -33,6 +33,7 @@ export class Editor extends Emitter {
     this.hover = null; // last pointer position in document coordinates
     this.marchOffset = null; // selection outline offset while a move tool drags
     this.clipboard = null; // in-app fallback when the system clipboard is unavailable
+    this.layout = 'split'; // 2d | 3d | split, only when a model is mounted
     this._off = [];
   }
 

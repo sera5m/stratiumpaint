@@ -214,6 +214,7 @@ export class View {
     c.strokeRect(this.ox - 0.5, this.oy - 0.5, doc.width * z + 1, doc.height * z + 1);
 
     if (ed.opts.grid && z >= 8) this.#paintGrid(c, doc);
+    if (doc.mount && doc.mount.showWires !== false) this.#paintWires(c, doc);
     if (doc.selection) this.#paintAnts(c, doc.selection);
     ed.tool.overlay?.(c, ed, this);
 
@@ -225,6 +226,31 @@ export class View {
       c.strokeStyle = 'rgba(255,255,255,.9)';
       c.beginPath(); c.arc(p.x, p.y, Math.max(0.5, r - 0.5), 0, Math.PI * 2); c.stroke();
     }
+  }
+
+  #paintWires(c, doc) {
+    const m = doc.mount;
+    if (!m?.wires?.length) return;
+    if (!m._wire || m._wireW !== doc.width || m._wireH !== doc.height) {
+      const off = document.createElement('canvas');
+      off.width = doc.width;
+      off.height = doc.height;
+      const g = off.getContext('2d');
+      g.strokeStyle = 'rgba(140, 196, 255, 0.95)';
+      g.lineWidth = Math.max(1, Math.min(doc.width, doc.height) / 512);
+      g.beginPath();
+      const w = m.wires;
+      for (let i = 0; i < w.length; i += 4) {
+        g.moveTo(w[i] * doc.width, w[i + 1] * doc.height);
+        g.lineTo(w[i + 2] * doc.width, w[i + 3] * doc.height);
+      }
+      g.stroke();
+      m._wire = off;
+      m._wireW = doc.width;
+      m._wireH = doc.height;
+    }
+    c.imageSmoothingEnabled = this.zoom < 2;
+    c.drawImage(m._wire, this.ox, this.oy, doc.width * this.zoom, doc.height * this.zoom);
   }
 
   #paintGrid(c, doc) {

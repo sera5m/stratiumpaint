@@ -8,6 +8,7 @@ import { isModalOpen } from './dialogs.js';
 import * as platform from './platform.js';
 import { encodeDocument } from '../doc/io.js';
 import { putBackup } from './backup.js';
+import { MeshView } from './meshview.js';
 import { $, h } from './dom.js';
 
 const TEXT_INPUTS = new Set(['text', 'number', 'search', 'url', 'email', 'password', 'tel']);
@@ -27,11 +28,24 @@ function comboOf(e) {
 
 export function start() {
   const ed = new Editor();
-  const stage = $('#stage');
+  const stage = $('#pane-2d');
   const view = new View(ed, stage);
   ed.view = view;
+  ed.meshView = new MeshView(ed, $('#pane-3d'));
 
-  const { cmds, openFilesInto, closeDoc, closeAll } = createCommands({ ed, view });
+  const { cmds, openFilesInto, closeDoc, closeAll, openMeshText } = createCommands({ ed, view });
+
+  const split = $('#split');
+  const pane3 = $('#pane-3d');
+  const applyLayout = () => {
+    const mode = ed.doc?.mount ? ed.layout : '2d';
+    split.classList.remove('layout-2d', 'layout-3d', 'layout-split');
+    split.classList.add(`layout-${mode}`);
+    pane3.hidden = mode === '2d';
+  };
+  ed.on('doc', applyLayout);
+  ed.on('docs', applyLayout);
+  ed.on('layout', applyLayout);
 
   const run = async (cmd) => {
     if (cmd.enabled && !cmd.enabled()) return;
@@ -104,7 +118,13 @@ export function start() {
   window.addEventListener('drop', async (e) => {
     if (!e.dataTransfer?.files?.length) return;
     e.preventDefault();
-    openFilesInto(await platform.readDroppedFiles(e.dataTransfer.files));
+    const meshes = [], images = [];
+    for (const f of e.dataTransfer.files) (/\.(obj|json)$/i.test(f.name) ? meshes : images).push(f);
+    for (const f of meshes) {
+      try { await openMeshText(f.name, await f.text()); }
+      catch (err) { console.error(err); ed.toast(err.message || String(err)); }
+    }
+    if (images.length) openFilesInto(await platform.readDroppedFiles(images));
   });
 
   // ---------------------------------------------------------------- errors nobody caught

@@ -83,7 +83,14 @@ h3 { margin: 0; padding: 8px 10px 6px; font-size: 11px; font-weight: 600; letter
 .tab-close:hover { background: var(--bg-3); }
 
 #stage { position: relative; flex: 1; min-height: 0; overflow: hidden; outline: none; }
+#split { position: absolute; inset: 0; display: flex; min-width: 0; min-height: 0; }
+#pane-2d, #pane-3d { position: relative; flex: 1; min-width: 0; min-height: 0; }
+#pane-3d { border-left: 1px solid var(--line); background: #101216; }
+#pane-3d[hidden] { display: none !important; }
+#split.layout-3d #pane-2d { display: none; }
 #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.mesh-hud { position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 2; display: flex; align-items: center; gap: 10px; pointer-events: none; color: var(--dim); font-size: 12px; text-shadow: 0 1px 2px #000; }
+.mesh-hud .seg { pointer-events: auto; }
 .overlay-canvas { touch-action: none; }
 #empty-state { position: absolute; inset: 0; display: grid; align-content: center; justify-items: center; gap: 4px; text-align: center; pointer-events: none; }
 #empty-state[hidden] { display: none; }
