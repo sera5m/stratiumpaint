@@ -132,9 +132,13 @@ export class Editor extends Emitter {
     this.emit('docs');
   }
 
+  /** The document a stroke should change. A stroke on the model targets the object texture, not a source image. */
+  surface() { return this._modelTarget || this.doc; }
+
   /** The active layer if it can be painted on, otherwise null (with a hint for the user). */
   editableLayer() {
-    const l = this.doc?.layer;
+    const doc = this.surface();
+    const l = doc?.layer;
     if (!l) return null;
     if (!l.visible) { this.toast('The active layer is hidden. Show it to paint on it.'); return null; }
     return l;

@@ -213,6 +213,30 @@ export function unwrapDialog({ hasUV }) {
   });
 }
 
+export function faceLimitDialog(groups, selected) {
+  const names = [...new Set((groups || []).map((g) => g.name).filter(Boolean))];
+  const picked = new Set(selected?.length ? selected : names);
+  return new Promise((resolve) => {
+    if (!names.length) { resolve([]); return; }
+    const boxes = names.map((name) => {
+      const input = h('input', { type: 'checkbox' });
+      input.checked = picked.has(name);
+      return { name, input, row: h('label', { class: 'check' }, input, ` ${name}`) };
+    });
+    modal({
+      title: 'Limit to faces', width: 380,
+      body: h('div', null,
+        h('p', { class: 'msg' }, 'Draw this image only onto the ticked faces. The source picture is not modified.'),
+        ...boxes.map((b) => b.row)),
+      buttons: [
+        { label: 'Cancel', cancel: true },
+        { label: 'Apply', primary: true, onClick: () => resolve(boxes.filter((b) => b.input.checked).map((b) => b.name)) },
+      ],
+      onCancel: () => resolve(null),
+    });
+  });
+}
+
 export function newImageDialog(ed, defaults = {}) {
   const values = { width: 1280, height: 720, background: 'white', ...defaults };
   const presets = [['1280 × 720', 1280, 720], ['1920 × 1080', 1920, 1080], ['800 × 600', 800, 600], ['512 × 512', 512, 512], ['64 × 64', 64, 64]];

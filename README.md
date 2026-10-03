@@ -32,12 +32,13 @@ only is in the Model menu. The mount lasts for the session; the texture
 saves like any other image. Unwrap Again opens a fresh atlas so the current
 painting is not thrown away.
 
-Several images can sit on the same model. Model → Add Image to Model, Model →
-New Image on Model, or dropping a file on the model pane adds another tab.
-Each tab is still its own image, with its own layers. The model shows them
-stacked, bottom to top, and a stroke on the model paints whichever tab is
-open. Raise and Lower change that order. Closing one image leaves the model
-on the tabs that remain. Unmount takes the model off all of them.
+Several images can sit on the same model, each in its own tab. Add Image to
+Model, New Image on Model, or a drop on the model pane places that picture
+on the object. It starts as a patch, not a full wrap. **Move** drags it
+across the surface and scroll changes its size. **Limit to Faces** moves it
+onto those parts and keeps it there, such as the sensor or the pull tab. Editing the picture redraws
+it onto the object's texture. Painting the model writes a separate Model
+paint layer. The source image is never painted back into.
 
 While a job has unsaved changes, a working copy is written about every eight
 seconds under the program's own data, not next to the picture:

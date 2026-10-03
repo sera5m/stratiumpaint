@@ -2,7 +2,7 @@
 // Left-drag paints the active layer (a brush dab lands on the UV under the cursor).
 // Alt-drag or Orbit mode tumbles the view. Scroll zooms. Middle-drag pans.
 import { buildBVH, raycastMesh } from '../core/mesh.js';
-import { placeToPixel } from './session.js';
+import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
 
 const VS = `
@@ -49,8 +49,9 @@ export class MeshView {
     this.hud = h('div', { class: 'mesh-hud' },
       h('div', { class: 'seg' },
         h('button', { type: 'button', class: 'seg-btn on', onClick: () => this.#mode('paint') }, 'Paint'),
+        h('button', { type: 'button', class: 'seg-btn', onClick: () => this.#mode('move') }, 'Move'),
         h('button', { type: 'button', class: 'seg-btn', onClick: () => this.#mode('orbit') }, 'Orbit')),
-      h('span', null, 'Alt+drag orbits · scroll zooms · a stroke paints this tab'));
+      h('span', null, 'Move drags the open image · scroll sizes it · Paint stays on the object'));
     pane.append(this.canvas, this.hud);
     this.gl = this.canvas.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: true });
     if (this.gl) {
@@ -61,6 +62,7 @@ export class MeshView {
     new ResizeObserver(() => this.#resize()).observe(pane);
     ed.on('doc', () => { this.#attach(); requestAnimationFrame(() => this.#resize()); });
     ed.on('doc:render', () => { this._texDirty = true; this.#request(); });
+    ed.on('model-texture', () => { this._texDirty = true; this.#request(); });
     ed.on('layout', () => requestAnimationFrame(() => this.#resize()));
     this.#bind();
     this.#attach();
@@ -160,7 +162,8 @@ export class MeshView {
     if (!gl || !mount || this.pane.hidden || !this.canvas.width) return;
     if (this._texDirty) {
       this._texDirty = false;
-      const src = this.#stackedTexture(doc);
+      const atlas = atlasOf(doc) || doc;
+      const src = atlas.composite();
       const pixels = src.getContext('2d').getImageData(0, 0, src.width, src.height);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
@@ -208,41 +211,31 @@ export class MeshView {
     return { origin: eye, dir };
   }
 
-  /** Every image tab on this mesh, bottom to top, drawn into the atlas. */
-  #stackedTexture(doc) {
-    const members = doc.session?.members?.length ? doc.session.members : [doc];
-    const mount = doc.mount;
-    const w = mount.width || doc.width;
-    const h = mount.height || doc.height;
-    if (members.length === 1 && doc.width === w && doc.height === h && !(doc.place && (doc.place.u || doc.place.v || doc.place.w !== 1 || doc.place.h !== 1))) {
-      return doc.composite();
-    }
-    if (!this._stack || this._stack.width !== w || this._stack.height !== h) {
-      this._stack = document.createElement('canvas');
-      this._stack.width = w;
-      this._stack.height = h;
-    }
-    const ctx = this._stack.getContext('2d');
-    ctx.clearRect(0, 0, w, h);
-    for (const member of members) {
-      const p = member.place || { u: 0, v: 0, w: 1, h: 1 };
-      ctx.drawImage(member.composite(), p.u * w, p.v * h, p.w * w, p.h * h);
-    }
-    return this._stack;
-  }
-
-  #hitDoc(e) {
-    if (!this.bvh) return null;
+  /** UV under the cursor, v down, or null. */
+  #hitUV(e) {
+    if (!this.bvh || !this.ed.doc?.mount) return null;
     const { origin, dir } = this.#ray(e);
     const hit = raycastMesh(this.bvh, origin, dir);
     if (!hit) return null;
     const mount = this.ed.doc.mount;
-    const doc = this.ed.doc;
     const i = hit.tri * 3;
     const b0 = 1 - hit.u - hit.v, b1 = hit.u, b2 = hit.v;
-    const u = b0 * mount.uvs[i * 2] + b1 * mount.uvs[(i + 1) * 2] + b2 * mount.uvs[(i + 2) * 2];
-    const v = b0 * mount.uvs[i * 2 + 1] + b1 * mount.uvs[(i + 1) * 2 + 1] + b2 * mount.uvs[(i + 2) * 2 + 1];
-    return placeToPixel(doc, u, v);
+    return {
+      u: b0 * mount.uvs[i * 2] + b1 * mount.uvs[(i + 1) * 2] + b2 * mount.uvs[(i + 2) * 2],
+      v: b0 * mount.uvs[i * 2 + 1] + b1 * mount.uvs[(i + 1) * 2 + 1] + b2 * mount.uvs[(i + 2) * 2 + 1],
+    };
+  }
+
+  #hitDoc(e) {
+    const uv = this.#hitUV(e);
+    if (!uv) return null;
+    const atlas = atlasOf(this.ed.doc) || this.ed.doc;
+    return { x: uv.u * atlas.width, y: uv.v * atlas.height };
+  }
+
+  #source() {
+    const doc = this.ed.doc;
+    return doc?.session && !doc.atlas ? doc : null;
   }
 
   #bind() {
@@ -256,9 +249,24 @@ export class MeshView {
         this.dragging = { x: e.clientX, y: e.clientY, button: e.button, alt: e.altKey };
         return;
       }
+      if (this.mode === 'move' && e.button === 0) {
+        const source = this.#source();
+        const uv = this.#hitUV(e);
+        if (!source) { ed.toast('Open the image tab you want to move.'); return; }
+        if (!uv) return;
+        this.moving = { source, u: uv.u, v: uv.v, place: { ...source.place } };
+        return;
+      }
       if (e.button !== 0 && e.button !== 2) return;
       const p = this.#hitDoc(e);
       if (!p) return;
+      const atlas = atlasOf(ed.doc);
+      if (atlas) {
+        ed._modelTarget = atlas;
+        const layer = modelPaintLayer(atlas);
+        const i = atlas.layers.indexOf(layer);
+        if (i >= 0) atlas.active = i;
+      }
       this.painting = true;
       this.paintButton = e.button;
       ed.hover = p;
@@ -273,6 +281,15 @@ export class MeshView {
         this.#request();
         return;
       }
+      if (this.moving) {
+        const uv = this.#hitUV(e);
+        if (!uv) return;
+        const s = this.moving;
+        const p = s.place;
+        s.source.place = { u: p.u + (uv.u - s.u), v: p.v + (uv.v - s.v), w: p.w, h: p.h };
+        reproject(s.source, ed);
+        return;
+      }
       if (!this.painting) return;
       const p = this.#hitDoc(e);
       if (!p) return;
@@ -282,16 +299,29 @@ export class MeshView {
     });
     const end = () => {
       this.dragging = null;
+      this.moving = null;
       if (!this.painting) return;
       this.painting = false;
       const p = ed.hover || { x: 0, y: 0 };
       ed.pointer('up', { ...p, sx: 0, sy: 0, button: this.paintButton === 2 ? 2 : 0, shift: false, ctrl: false, alt: false });
+      ed._modelTarget = null;
     };
     c.addEventListener('pointerup', end);
     c.addEventListener('pointercancel', end);
     c.addEventListener('wheel', (e) => {
       if (!ed.doc?.mount) return;
       e.preventDefault();
+      const source = this.mode === 'move' ? this.#source() : null;
+      if (source?.place) {
+        const k = Math.pow(0.999, e.deltaY * (e.deltaMode === 1 ? 16 : 1));
+        const p = source.place;
+        const cx = p.u + p.w / 2, cy = p.v + p.h / 2;
+        const w = Math.min(1.5, Math.max(0.02, p.w * k));
+        const h = Math.min(1.5, Math.max(0.02, p.h * k));
+        source.place = { u: cx - w / 2, v: cy - h / 2, w, h };
+        reproject(source, ed);
+        return;
+      }
       this.dist *= Math.pow(1.0015, e.deltaY * (e.deltaMode === 1 ? 16 : 1));
       this.dist = Math.max(this.dist, 0.02);
       this.#request();

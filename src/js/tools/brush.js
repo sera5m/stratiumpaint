@@ -85,7 +85,7 @@ function makeBrush({ id, name, kind, key, icon }) {
     const color = colorFor(ed, e);
     return {
       layer, mode: kind === 'eraser' ? 'erase' : kind === 'clone' ? 'clone' : 'paint',
-      orig: cloneImage(layer.img), cov: new Uint8Array(layer.width * layer.height), mask: ed.doc.selection,
+      orig: cloneImage(layer.img), cov: new Uint8Array(layer.width * layer.height), mask: ed.surface().selection,
       r: size / 2, hardness: pencil ? 1 : o.hardness / 100, aa: pencil ? false : o.aa,
       step: pencil ? 1 : Math.max(1, size * 0.1), snap: pencil,
       alpha: (o.opacity / 100) * (kind === 'eraser' || kind === 'clone' ? 1 : color.a ?? 1), color,
@@ -123,7 +123,7 @@ function makeBrush({ id, name, kind, key, icon }) {
       if (!S) return;
       const s = S;
       S = null;
-      if (s.dirty) ed.doc.commitRegion(s.layer, s.dirty, cropImage(s.orig, s.dirty), name);
+      if (s.dirty) ed.surface().commitRegion(s.layer, s.dirty, cropImage(s.orig, s.dirty), name);
     },
 
     cancel() {

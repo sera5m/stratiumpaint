@@ -9,6 +9,8 @@ import { parseMeshText, demoMesh, unwrapMesh } from '../core/mesh.js';
 import { jobExt } from '../core/job.js';
 import { dropScratch, freezeScratch, jobBytes, jobFolder, openJob, scratchWhere } from './scratch.js';
 import { beginSession, joinSession, leaveSession } from './session.js';
+import { defaultPlace, dropProjection, reproject } from './place.js';
+import { faceBounds } from '../core/project.js';
 import * as dlg from './dialogs.js';
 import { putBackup, listBackups, formatWhen } from './backup.js';
 import * as platform from './platform.js';
@@ -135,6 +137,7 @@ export function createCommands({ ed, view }) {
       }
     }
     try { await dropScratch(doc); } catch (err) { console.warn('Could not remove the working copy:', err); }
+    dropProjection(doc);
     leaveSession(doc);
     ed.closeDoc(doc);
     return true;
@@ -329,7 +332,7 @@ export function createCommands({ ed, view }) {
     const host = ed.doc;
     if (!host?.mount) { ed.addDoc(doc); return; }
     const session = host.session || beginSession(host, host.mount);
-    joinSession(session, doc);
+    joinSession(session, doc, defaultPlace(doc, session.mount));
     const previous = session.members[session.members.length - 2];
     const at = ed.docs.indexOf(previous);
     if (at >= 0) ed.docs.splice(at + 1, 0, doc);
@@ -338,7 +341,8 @@ export function createCommands({ ed, view }) {
     ed.layout = ed.layout || 'split';
     ed.emit('docs');
     ed.emit('layout');
-    ed.toast(`${doc.name} is on the model. Switch tabs to edit each image on its own.`);
+    reproject(doc, ed);
+    ed.toast(`${doc.name} is on the model. Move it onto the faces you want. The picture itself is not changed.`);
   }
 
   add('addModelImage', 'Add Image to Model…', guard(async () => {
@@ -372,6 +376,20 @@ export function createCommands({ ed, view }) {
   add('modelLower', 'Lower Image on Model', () => moveOnModel(-1), {
     enabled: () => !!ed.doc?.session && ed.doc.session.members[0] !== ed.doc,
   });
+  add('limitFaces', 'Limit to Faces…', guard(async () => {
+    const doc = ed.doc;
+    if (!doc?.session || doc.atlas) { ed.toast('Open the image you want to limit.'); return; }
+    const names = await dlg.faceLimitDialog(doc.mount?.groups ?? [], doc.faces);
+    if (!names) return;
+    const all = [...new Set((doc.mount?.groups ?? []).map((g) => g.name))];
+    doc.faces = names.length === all.length ? null : names;
+    if (doc.faces) {
+      const bounds = faceBounds(doc.mount.uvs, doc.mount.groups, doc.faces);
+      if (bounds) doc.place = bounds;
+    }
+    reproject(doc, ed);
+    ed.toast(doc.faces ? `${doc.name} is drawn on ${doc.faces.join(', ')} only.` : `${doc.name} is drawn on every face it covers.`);
+  }), { enabled: () => !!ed.doc?.session && !ed.doc.atlas });
 
   const setLayout = (mode) => { ed.layout = mode; ed.emit('layout'); };
   add('layoutSplit', 'Split View', () => setLayout('split'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === 'split' });

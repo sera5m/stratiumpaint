@@ -10,6 +10,7 @@ import { encodeDocument } from '../doc/io.js';
 import { putBackup } from './backup.js';
 import { MeshView } from './meshview.js';
 import { watchScratch, dropScratch } from './scratch.js';
+import { watchPlacement } from './place.js';
 import { $, h } from './dom.js';
 
 const TEXT_INPUTS = new Set(['text', 'number', 'search', 'url', 'email', 'password', 'tel']);
@@ -145,6 +146,7 @@ export function start() {
   platform.initialFiles().then((files) => { if (files.length) openFilesInto(files); });
 
   watchScratch(ed);
+  watchPlacement(ed);
 
   // Quiet recovery copies while a document has unsaved work. File → Restore Backup reads them.
   const AUTOSAVE_MS = 60_000;
