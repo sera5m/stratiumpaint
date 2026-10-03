@@ -2,6 +2,7 @@
 // Electron shell: one window, native file dialogs, system clipboard, single instance.
 // All editing happens in the renderer (dist/); this file only touches the OS.
 const { app, BrowserWindow, Menu, ipcMain, dialog, clipboard, nativeImage, shell } = require('electron');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -100,14 +101,14 @@ ipcMain.handle('dialog:open-mesh', async () => {
   const r = await dialog.showOpenDialog(win, {
     properties: ['openFile'],
     filters: [
-      { name: 'Models', extensions: ['obj', 'json'] },
+      { name: 'Models', extensions: ['obj', 'stl', 'fbx', 'json'] },
       { name: 'All files', extensions: ['*'] },
     ],
   });
   if (r.canceled || !r.filePaths[0]) return null;
   const filePath = r.filePaths[0];
-  const text = await fs.promises.readFile(filePath, 'utf8');
-  return { name: path.basename(filePath), path: filePath, text };
+  const bytes = new Uint8Array(await fs.promises.readFile(filePath));
+  return { name: path.basename(filePath), path: filePath, bytes };
 });
 
 function assertSegment(value) {
@@ -238,5 +239,47 @@ ipcMain.handle('clipboard:write-image', (_e, bytes) => clipboardWritePng(bytes))
 ipcMain.handle('clipboard:read-image', () => clipboardReadPng());
 
 ipcMain.handle('app:initial-files', async () => readFiles(pending.splice(0)));
+function runCmd(cmd, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd: ROOT });
+    let out = '';
+    let err = '';
+    child.stdout?.on('data', (d) => { out += d; });
+    child.stderr?.on('data', (d) => { err += d; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(out.trim());
+      else reject(new Error((err || out || `${cmd} failed`).trim().slice(0, 500)));
+    });
+  });
+}
+
+ipcMain.handle('app:check-update', async () => {
+  const version = require(path.join(ROOT, 'package.json')).version;
+  try {
+    await runCmd('git', ['rev-parse', '--is-inside-work-tree']);
+  } catch {
+    return { version, mode: 'none' };
+  }
+  await runCmd('git', ['fetch', '--quiet', 'origin']);
+  let behind = '0';
+  try { behind = await runCmd('git', ['rev-list', '--count', 'HEAD..@{u}']); }
+  catch { behind = await runCmd('git', ['rev-list', '--count', 'HEAD..origin/master']); }
+  const n = parseInt(behind, 10) || 0;
+  let note = '';
+  if (n) {
+    try { note = await runCmd('git', ['log', '-1', '--pretty=%s', 'origin/master']); } catch { /* no note */ }
+  }
+  return { version, mode: 'git', behind: n, note };
+});
+
+ipcMain.handle('app:apply-update', async () => {
+  await runCmd('git', ['pull', '--ff-only']);
+  await runCmd('npm', ['run', 'build']);
+  forceClose = true;
+  app.relaunch();
+  app.quit();
+});
+
 ipcMain.handle('app:confirm-close', () => { forceClose = true; win?.close(); });
 ipcMain.handle('app:quit', () => { forceClose = true; app.quit(); });

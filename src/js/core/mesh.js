@@ -6,6 +6,7 @@
 // packed into one atlas. UVs are image-space: (0,0) is the top-left of the texture.
 
 import { clamp } from './util.js';
+import { parseFBX, parseSTL } from './meshio.js';
 
 const MAX_TRIS = 200000;
 const LSCM_MAX_VERTS = 2500;
@@ -56,6 +57,22 @@ export function demoMesh() {
   end();
 
   return finish(positions, indices, groups, null, 'Demo mine');
+}
+
+/** OBJ, JSON, STL or FBX bytes → a mesh. STL and FBX have no UVs; they get unwrapped. */
+export async function parseMeshBytes(name, bytes) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const lower = String(name || '').toLowerCase();
+  if (lower.endsWith('.stl')) return fromPlain(await Promise.resolve(parseSTL(u8, name)));
+  if (lower.endsWith('.fbx')) return fromPlain(await parseFBX(u8, name));
+  const text = new TextDecoder().decode(u8);
+  return parseMeshText(name, text);
+}
+
+function fromPlain(mesh) {
+  if (!mesh.indices.length) throw new Error('That file has no triangles.');
+  if (mesh.indices.length / 3 > MAX_TRIS) throw new Error(`That mesh has ${mesh.indices.length / 3} triangles. Export a reduced one (under ${MAX_TRIS}).`);
+  return finish(mesh.positions, mesh.indices, mesh.groups.length ? mesh.groups : [{ name: 'default', start: 0, count: mesh.indices.length / 3 }], null, mesh.name);
 }
 
 /** OBJ text, or JSON `{ positions, indices, uvs? }`. `uvs` are per corner (or per vertex), v = 0 at the bottom. */

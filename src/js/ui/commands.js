@@ -5,7 +5,7 @@ import { EFFECTS } from '../core/effects.js';
 import { Doc } from '../doc/document.js';
 import { FORMATS, formatFromName, stripExt, openDocument, decodeImage, encodeDocument, imageToPng } from '../doc/io.js';
 import { applyFilter, eraseSelection, fillSelection, extractSelection, pasteImage } from '../doc/ops.js';
-import { parseMeshText, demoMesh, unwrapMesh } from '../core/mesh.js';
+import { parseMeshBytes, demoMesh, unwrapMesh } from '../core/mesh.js';
 import { jobExt } from '../core/job.js';
 import { dropScratch, freezeScratch, jobBytes, jobFolder, openJob, scratchWhere } from './scratch.js';
 import { beginSession, joinSession, leaveSession } from './session.js';
@@ -38,8 +38,8 @@ export function createCommands({ ed, view }) {
         ed.addDoc(doc);
         continue;
       }
-      if (/\.(obj|json)$/i.test(f.name) && f.bytes) {
-        await openMeshText(f.name, new TextDecoder().decode(f.bytes));
+      if (/\.(obj|json|stl|fbx)$/i.test(f.name) && f.bytes) {
+        await openMeshBytes(f.name, f.bytes);
         continue;
       }
       const existing = f.path && ed.docs.find((d) => d.path === f.path);
@@ -303,8 +303,8 @@ export function createCommands({ ed, view }) {
     ed.toast(`${detail}${extra} Paint the image, or paint on the model.`);
   }
 
-  async function openMeshText(name, text, { ask = true } = {}) {
-    const mesh = parseMeshText(name, text);
+  async function openMeshBytes(name, bytes, { ask = true } = {}) {
+    const mesh = await parseMeshBytes(name, bytes);
     const opts = ask ? await dlg.unwrapDialog({ hasUV: mesh.hasUV }) : { angle: 66, padding: 4, resolution: 1024, pxPerM: 0, useExisting: false };
     if (!opts) return;
     mountAtlas(unwrapMesh(mesh, opts), stripExt(name));
@@ -313,7 +313,8 @@ export function createCommands({ ed, view }) {
   add('openModel', 'Open Model…', guard(async () => {
     const f = await platform.openMeshFile();
     if (!f) return;
-    await openMeshText(f.name, f.text);
+    const bytes = f.bytes || new TextEncoder().encode(f.text || '');
+    await openMeshBytes(f.name, bytes);
   }), { enabled: () => true });
 
   add('demoModel', 'Unwrap Demo', guard(() => {
@@ -437,8 +438,26 @@ export function createCommands({ ed, view }) {
 
   add('shortcuts', 'Keyboard Shortcuts', () => dlg.infoDialog('Keyboard Shortcuts', shortcutsBody(cmds, ed), 560), { shortcut: 'F1', enabled: () => true });
   add('about', 'About Stratum', () => dlg.infoDialog('About Stratum', aboutBody(), 420), { enabled: () => true });
+  add('checkUpdate', 'Check for Updates…', guard(async () => {
+    if (!platform.isNative) { ed.toast('Refresh the page. Updates install themselves only in the desktop app.'); return; }
+    ed.toast('Checking for updates…');
+    const info = await platform.checkUpdate();
+    if (!info || info.mode === 'none') {
+      ed.toast('This copy is not a git checkout, so it cannot update itself.');
+      return;
+    }
+    if (!info.behind) { ed.toast(`Stratum ${info.version} is up to date.`); return; }
+    const r = await dlg.confirmDialog({
+      title: 'Update Stratum',
+      message: `${info.behind} new commit${info.behind === 1 ? '' : 's'}.${info.note ? ` Latest: ${info.note}.` : ''} Update and restart?`,
+      buttons: [{ label: 'Update', primary: true }, { label: 'Not now', cancel: true }],
+    });
+    if (r !== 0) return;
+    ed.toast('Updating. Stratum will restart when the build finishes.');
+    await platform.applyUpdate();
+  }), { enabled: () => true });
 
-  return { cmds, openFilesInto, closeDoc, closeAll, saveDoc, openMeshText };
+  return { cmds, openFilesInto, closeDoc, closeAll, saveDoc, openMeshBytes };
 }
 
 // ---------------------------------------------------------------------- help content
@@ -471,6 +490,6 @@ function shortcutsBody(cmds, ed) {
 function aboutBody() {
   return h('div', { class: 'about' },
     h('p', null, 'Stratum is a layered raster image editor in the spirit of Paint.NET, built for Linux.'),
-    h('p', null, 'Model → Unwrap Demo (or drop an .obj) lays the surface out as a texture and mounts it beside the canvas. Paint either side; both write the same layer.'),
+    h('p', null, 'Model → Open Model reads OBJ, JSON, STL and FBX. STL and FBX have no UVs, so Stratum unwraps the triangles it finds.'),
     h('p', { class: 'dim' }, 'Runs on Electron; the editing core has no dependencies.'));
 }

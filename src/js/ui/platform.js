@@ -22,19 +22,22 @@ export async function openFiles() {
   });
 }
 
-/** → {name, text} or null. .obj, or JSON {positions, indices, uvs?}. */
+/** → {name, bytes} or null. OBJ, JSON, STL or FBX. */
 export function openMeshFile() {
   if (native?.openMesh) return native.openMesh();
   return new Promise((resolve) => {
-    const input = h('input', { type: 'file', accept: '.obj,.json,application/json,model/obj' });
+    const input = h('input', { type: 'file', accept: '.obj,.json,.stl,.fbx,application/json' });
     input.addEventListener('change', async () => {
       const f = input.files?.[0];
-      resolve(f ? { name: f.name, text: await f.text() } : null);
+      resolve(f ? { name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) } : null);
     });
     input.addEventListener('cancel', () => resolve(null));
     input.click();
   });
 }
+
+export const checkUpdate = () => (native?.checkUpdate ? native.checkUpdate() : Promise.resolve(null));
+export const applyUpdate = () => (native?.applyUpdate ? native.applyUpdate() : Promise.resolve());
 
 export const readDroppedFiles = async (fileList) => {
   const out = [];

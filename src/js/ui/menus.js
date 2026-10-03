@@ -13,7 +13,7 @@ export const MENUS = [
   ['Layers', ['layerAdd', 'layerDelete', 'layerDuplicate', 'layerMerge', '-', 'layerUp', 'layerDown', '-', 'layerProps']],
   ['Adjustments', ['wholeImage', '-', ...ADJUSTMENTS.map((s) => `adj:${s.id}`)]],
   ['Effects', ['wholeImage', '-', ...EFFECT_CATEGORIES.map((cat) => ({ label: cat, items: EFFECTS.filter((e) => e.category === cat).map((e) => `fx:${e.id}`) }))]],
-  ['Help', ['shortcuts', 'about']],
+  ['Help', ['shortcuts', 'checkUpdate', 'about']],
 ];
 
 const pretty = (s) => (s ?? '').split('|')[0];

@@ -25,7 +25,9 @@ joined while the bend between faces is under the angle you set; sharper
 edges become seams. Each chart is flattened and packed. If the file is in
 metres, pixels-per-metre sets the texel density (0 just fits the atlas).
 JSON `{ "positions": [...], "indices": [...] }` works too, with optional
-`uvs` (one pair per corner, v = 0 at the bottom). Paint the flat image or
+`uvs` (one pair per corner, v = 0 at the bottom). STL and FBX (ASCII or
+binary) are read as triangles and unwrapped, since those files have no UVs.
+Paint the flat image or
 the model — both write the active layer. Right-drag is still the secondary
 colour. Alt+drag, or Orbit, tumbles the view. Split / texture only / model
 only is in the Model menu. The mount lasts for the session; the texture
@@ -70,6 +72,10 @@ No network/npm? The bundler falls back to a system `esbuild` binary:
 STRATUM_ESBUILD_CLI=1 node scripts/bundle-standalone.mjs
 electron .
 ```
+
+On the desktop app, Help → Check for Updates fetches the git remote. If the
+checkout is behind, it fast-forwards, rebuilds, and restarts. A copy that is
+not a git checkout cannot update itself.
 
 ## Building
 

@@ -35,7 +35,7 @@ export function start() {
   ed.view = view;
   ed.meshView = new MeshView(ed, $('#pane-3d'));
 
-  const { cmds, openFilesInto, closeDoc, closeAll, openMeshText } = createCommands({ ed, view });
+  const { cmds, openFilesInto, closeDoc, closeAll, openMeshBytes } = createCommands({ ed, view });
 
   const split = $('#split');
   const pane3 = $('#pane-3d');
@@ -121,9 +121,9 @@ export function start() {
     if (!e.dataTransfer?.files?.length) return;
     e.preventDefault();
     const meshes = [], images = [];
-    for (const f of e.dataTransfer.files) (/\.(obj|json)$/i.test(f.name) ? meshes : images).push(f);
+    for (const f of e.dataTransfer.files) (/\.(obj|json|stl|fbx)$/i.test(f.name) ? meshes : images).push(f);
     for (const f of meshes) {
-      try { await openMeshText(f.name, await f.text()); }
+      try { await openMeshBytes(f.name, new Uint8Array(await f.arrayBuffer())); }
       catch (err) { console.error(err); ed.toast(err.message || String(err)); }
     }
     if (images.length) {
