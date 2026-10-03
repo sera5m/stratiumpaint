@@ -5,6 +5,13 @@ import { rectUnion, rectIntersect } from '../core/util.js';
 
 let seq = 0;
 
+export function claimLayerId(layer, id) {
+  const n = +id;
+  if (!Number.isFinite(n) || n <= 0) return;
+  layer.id = n;
+  if (n > seq) seq = n;
+}
+
 export class Layer {
   constructor(width, height, name = 'Layer') {
     this.id = ++seq;

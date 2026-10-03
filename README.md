@@ -32,6 +32,23 @@ only is in the Model menu. The mount lasts for the session; the texture
 saves like any other image. Unwrap Again opens a fresh atlas so the current
 painting is not thrown away.
 
+While a job has unsaved changes, a working copy is written about every eight
+seconds under the program's own data, not next to the picture:
+
+```text
+internal / <name-id> / <savepoint> / structure.2dlayered
+internal / <name-id> / <savepoint> / structure.3dlayered
+```
+
+Each file is a zip: `job.json`, one PNG per layer, and for a mounted model
+the mesh buffers. The last three savepoints are kept. Inactive layers drop
+their extra screen copy after a savepoint, and a very large image keeps a
+shorter undo history so old strokes are not all held in memory. Closing
+deletes that tree. The close popup is **Save unfinished work as** — save
+writes the zip out under the name you give it; discard deletes the working
+copy; cancel stays open. File → Save Unfinished Work As does the same without
+closing. Open accepts `.2dlayered` and `.3dlayered`.
+
 ## Quick start (dev)
 
 ```sh

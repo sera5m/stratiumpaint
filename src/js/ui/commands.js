@@ -6,6 +6,8 @@ import { Doc } from '../doc/document.js';
 import { FORMATS, formatFromName, stripExt, openDocument, decodeImage, encodeDocument, imageToPng } from '../doc/io.js';
 import { applyFilter, eraseSelection, fillSelection, extractSelection, pasteImage } from '../doc/ops.js';
 import { parseMeshText, demoMesh, unwrapMesh } from '../core/mesh.js';
+import { jobExt } from '../core/job.js';
+import { dropScratch, freezeScratch, jobBytes, jobFolder, openJob, scratchWhere } from './scratch.js';
 import * as dlg from './dialogs.js';
 import { putBackup, listBackups, formatWhen } from './backup.js';
 import * as platform from './platform.js';
@@ -27,6 +29,12 @@ export function createCommands({ ed, view }) {
 
   async function openFilesInto(files) {
     for (const f of files) {
+      if (/\.([23]dlayered)$/i.test(f.name) && f.bytes) {
+        const doc = await openJob(f.bytes, f.name);
+        if (doc.mount) { ed.layout = 'split'; ed.emit('layout'); }
+        ed.addDoc(doc);
+        continue;
+      }
       if (/\.(obj|json)$/i.test(f.name) && f.bytes) {
         await openMeshText(f.name, new TextDecoder().decode(f.bytes));
         continue;
@@ -103,14 +111,28 @@ export function createCommands({ ed, view }) {
 
   async function closeDoc(doc = ed.doc) {
     if (!doc) return true;
+    freezeScratch(doc);
     if (doc.modified) {
       ed.activate(doc);
-      const r = await dlg.confirmDialog({
-        title: 'Unsaved changes', message: `Save changes to "${doc.name}" before closing?`,
-        buttons: [{ label: 'Save', primary: true }, { label: "Don't Save" }, { label: 'Cancel', cancel: true }],
+      let packed;
+      try { packed = await jobBytes(doc); }
+      catch (err) { ed.toast(err.message || String(err)); doc._scratchFrozen = false; return false; }
+      try {
+        await platform.scratchWrite(jobFolder(doc), packed.savepoint, packed.kind, packed.bytes);
+        doc.scratchPoint = packed.savepoint;
+        doc.scratchKind = packed.kind;
+      } catch (err) { console.warn('Could not update the working copy:', err); }
+      const choice = await dlg.saveUnfinishedDialog({
+        name: stripExt(doc.name), kind: packed.kind, where: scratchWhere(doc),
       });
-      if (r === 0) { if (!(await saveDoc(doc))) return false; } else if (r !== 1) return false;
+      if (!choice) { doc._scratchFrozen = false; return false; }
+      if (choice.action === 'save') {
+        const saved = await platform.exportLayered(`${stripExt(choice.name)}.${packed.kind}`, packed.bytes);
+        if (!saved) { doc._scratchFrozen = false; return false; }
+        doc.markSaved();
+      }
     }
+    try { await dropScratch(doc); } catch (err) { console.warn('Could not remove the working copy:', err); }
     ed.closeDoc(doc);
     return true;
   }
@@ -131,6 +153,22 @@ export function createCommands({ ed, view }) {
   add('open', 'Open…', guard(async () => openFilesInto(await platform.openFiles())), { shortcut: 'Ctrl+O', enabled: () => true });
   add('save', 'Save', guard(() => saveDoc(ed.doc)), { shortcut: 'Ctrl+S' });
   add('saveAs', 'Save As…', guard(() => saveDoc(ed.doc, true)), { shortcut: 'Ctrl+Shift+S' });
+  add('saveUnfinished', 'Save Unfinished Work As…', guard(async () => {
+    const doc = ed.doc;
+    const choice = await dlg.saveUnfinishedDialog({
+      name: stripExt(doc.name), kind: jobExt(doc), where: scratchWhere(doc), discardable: false,
+    });
+    if (choice?.action !== 'save') return;
+    const packed = await jobBytes(doc);
+    const saved = await platform.exportLayered(`${stripExt(choice.name)}.${packed.kind}`, packed.bytes);
+    if (!saved) return;
+    try {
+      await platform.scratchWrite(jobFolder(doc), packed.savepoint, packed.kind, packed.bytes);
+      doc.scratchPoint = packed.savepoint;
+    } catch (err) { console.warn(err); }
+    doc.markSaved();
+    ed.toast('Saved. The copy inside the program is still removed when you close.');
+  }), { shortcut: 'Ctrl+Shift+U' });
   add('saveBackup', 'Save Backup', guard(async () => {
     const doc = ed.doc;
     const bytes = await encodeDocument(doc, 'ora');

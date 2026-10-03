@@ -7,6 +7,9 @@ const on = (channel) => (cb) => ipcRenderer.on(channel, (_e, ...args) => cb(...a
 contextBridge.exposeInMainWorld('stratumNative', {
   openFiles: () => ipcRenderer.invoke('dialog:open'),
   openMesh: () => ipcRenderer.invoke('dialog:open-mesh'),
+  scratchWrite: (jobId, savepoint, kind, bytes) => ipcRenderer.invoke('scratch:write', jobId, savepoint, kind, bytes),
+  scratchDrop: (jobId) => ipcRenderer.invoke('scratch:drop', jobId),
+  exportLayered: (name, bytes) => ipcRenderer.invoke('job:export', name, bytes),
   pickSavePath: (defaultName) => ipcRenderer.invoke('dialog:save', defaultName),
   writeFile: (filePath, bytes) => ipcRenderer.invoke('file:write', filePath, bytes),
   backupExisting: (filePath) => ipcRenderer.invoke('file:backup-existing', filePath),

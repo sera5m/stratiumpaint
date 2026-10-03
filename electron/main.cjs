@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
 const INDEX = path.join(ROOT, 'dist', 'index.html');
-const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.jpe', '.webp', '.gif', '.bmp', '.avif', '.ora']);
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.jpe', '.webp', '.gif', '.bmp', '.avif', '.ora', '.2dlayered', '.3dlayered']);
 const SAVE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.ora']);
 
 app.setName('stratum');
@@ -89,7 +89,7 @@ ipcMain.handle('dialog:open', async () => {
   const r = await dialog.showOpenDialog(win, {
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'ora'] },
+      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'ora', '2dlayered', '3dlayered'] },
       { name: 'All files', extensions: ['*'] },
     ],
   });
@@ -108,6 +108,45 @@ ipcMain.handle('dialog:open-mesh', async () => {
   const filePath = r.filePaths[0];
   const text = await fs.promises.readFile(filePath, 'utf8');
   return { name: path.basename(filePath), path: filePath, text };
+});
+
+function assertSegment(value) {
+  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,80}$/i.test(value)) throw new Error('Bad job name.');
+  return value;
+}
+
+ipcMain.handle('scratch:write', async (_e, jobId, savepoint, kind, bytes) => {
+  if (kind !== '2dlayered' && kind !== '3dlayered') throw new Error('Unknown job type.');
+  const dir = path.join(app.getPath('userData'), 'internal', assertSegment(jobId), assertSegment(savepoint));
+  await fs.promises.mkdir(dir, { recursive: true });
+  const dest = path.join(dir, `structure.${kind}`);
+  await fs.promises.writeFile(dest, Buffer.from(bytes));
+  const parent = path.dirname(dir);
+  const names = (await fs.promises.readdir(parent)).sort();
+  while (names.length > 3) {
+    await fs.promises.rm(path.join(parent, names.shift()), { recursive: true, force: true });
+  }
+  return dest;
+});
+
+ipcMain.handle('scratch:drop', async (_e, jobId) => {
+  const dir = path.join(app.getPath('userData'), 'internal', assertSegment(jobId));
+  await fs.promises.rm(dir, { recursive: true, force: true });
+});
+
+ipcMain.handle('job:export', async (_e, defaultName, bytes) => {
+  const name = path.basename(String(defaultName || 'job.2dlayered'));
+  const ext = path.extname(name).toLowerCase();
+  if (ext !== '.2dlayered' && ext !== '.3dlayered') throw new Error('Refusing that file type.');
+  const r = await dialog.showSaveDialog(win, {
+    defaultPath: name,
+    filters: [{ name: ext === '.3dlayered' ? 'Stratum 3D job' : 'Stratum 2D job', extensions: [ext.slice(1)] }],
+  });
+  if (r.canceled || !r.filePath) return null;
+  let dest = r.filePath;
+  if (path.extname(dest).toLowerCase() !== ext) dest += ext;
+  await fs.promises.writeFile(dest, Buffer.from(bytes));
+  return dest;
 });
 
 ipcMain.handle('dialog:save', async (_e, defaultName) => {

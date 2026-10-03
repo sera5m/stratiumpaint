@@ -1,6 +1,7 @@
 // Everything that differs between the Electron app and a plain browser tab.
 // In Electron, electron/preload.cjs exposes window.stratumNative; without it we fall back to web APIs.
 import { h } from './dom.js';
+import { safeSegment } from '../core/job.js';
 
 const native = typeof window !== 'undefined' ? window.stratumNative ?? null : null;
 
@@ -10,7 +11,7 @@ export const isNative = !!native;
 export async function openFiles() {
   if (native) return native.openFiles();
   return new Promise((resolve) => {
-    const input = h('input', { type: 'file', multiple: true, accept: 'image/*,.ora' });
+    const input = h('input', { type: 'file', multiple: true, accept: 'image/*,.ora,.2dlayered,.3dlayered' });
     input.addEventListener('change', async () => {
       const out = [];
       for (const f of input.files) out.push({ name: f.name, path: null, bytes: new Uint8Array(await f.arrayBuffer()) });
@@ -38,12 +39,59 @@ export function openMeshFile() {
 export const readDroppedFiles = async (fileList) => {
   const out = [];
   for (const f of fileList) {
-    if (/^image\//.test(f.type) || /\.(ora|png|jpe?g|webp|gif|bmp|avif)$/i.test(f.name)) {
+    if (/^image\//.test(f.type) || /\.(ora|png|jpe?g|webp|gif|bmp|avif|2dlayered|3dlayered)$/i.test(f.name)) {
       out.push({ name: f.name, path: f.path || null, bytes: new Uint8Array(await f.arrayBuffer()) });
     }
   }
   return out;
 };
+
+/** Write a working-copy zip at internal/<jobId>/<savepoint>/structure.<kind>. */
+export async function scratchWrite(jobId, savepoint, kind, bytes) {
+  const id = safeSegment(jobId);
+  const point = safeSegment(savepoint);
+  if (kind !== '2dlayered' && kind !== '3dlayered') throw new Error('Unknown job type.');
+  if (native?.scratchWrite) return native.scratchWrite(id, point, kind, bytes);
+  const folder = await opfsDir(['internal', id, point], true);
+  const fh = await folder.getFileHandle(`structure.${kind}`, { create: true });
+  const writable = await fh.createWritable();
+  await writable.write(bytes);
+  await writable.close();
+  await pruneOpfs(id, 3);
+  return `internal/${id}/${point}/structure.${kind}`;
+}
+
+/** Delete one job's internal tree. Missing is fine. */
+export async function scratchDrop(jobId) {
+  const id = safeSegment(jobId);
+  if (native?.scratchDrop) return native.scratchDrop(id);
+  try {
+    const root = await navigator.storage.getDirectory();
+    const internal = await root.getDirectoryHandle('internal');
+    await internal.removeEntry(id, { recursive: true });
+  } catch { /* already gone */ }
+}
+
+/** Save a job zip outside the internal tree. → path or filename, or null if cancelled. */
+export async function exportLayered(name, bytes) {
+  if (native?.exportLayered) return native.exportLayered(name, bytes);
+  download(name, bytes, 'application/zip');
+  return name;
+}
+
+async function opfsDir(parts, create) {
+  let dir = await navigator.storage.getDirectory();
+  for (const part of parts) dir = await dir.getDirectoryHandle(safeSegment(part), { create });
+  return dir;
+}
+
+async function pruneOpfs(jobId, keep) {
+  const parent = await opfsDir(['internal', jobId], true);
+  const names = [];
+  for await (const [name, handle] of parent.entries()) if (handle.kind === 'directory') names.push(name);
+  names.sort();
+  while (names.length > keep) await parent.removeEntry(names.shift(), { recursive: true });
+}
 
 /** Native only: ask where to save. → path or null */
 export const pickSavePath = (defaultName) => native.pickSavePath(defaultName);

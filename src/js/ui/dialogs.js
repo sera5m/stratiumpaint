@@ -131,6 +131,28 @@ export function formDialog({ title, fields, values, okLabel = 'OK', width = 380,
   });
 }
 
+export function saveUnfinishedDialog({ name, kind, where, discardable = true }) {
+  const values = { name };
+  return new Promise((resolve) => {
+    const body = h('div', null,
+      h('p', { class: 'msg' }, 'The working copy lives only inside the program. It is deleted when you close, unless you save it out.'),
+      h('p', { class: 'dim' }, where),
+      buildFields([{ id: 'name', label: 'Save as', type: 'text' }], values),
+      h('p', { class: 'dim' }, `Saved as a .${kind} file, which is a zip of the layers${kind === '3dlayered' ? ' and the model' : ''}.`),
+    );
+    const buttons = [{ label: 'Cancel', cancel: true }];
+    if (discardable) buttons.push({ label: 'Discard', onClick: () => resolve({ action: 'discard' }) });
+    buttons.push({
+      label: 'Save', primary: true, onClick: () => {
+        const n = String(values.name ?? '').trim();
+        if (!n) { alert('Name the file first.'); return false; }
+        resolve({ action: 'save', name: n });
+      },
+    });
+    modal({ title: 'Save unfinished work as', width: 480, body, buttons, onCancel: () => resolve(null) });
+  });
+}
+
 export function confirmDialog({ title, message, buttons }) {
   return new Promise((resolve) => {
     modal({
