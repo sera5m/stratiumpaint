@@ -103,7 +103,7 @@ ipcMain.handle('dialog:open-mesh', async () => {
   const r = await dialog.showOpenDialog(win, {
     properties: ['openFile'],
     filters: [
-      { name: 'Models', extensions: ['obj', 'stl', 'fbx', 'json'] },
+      { name: 'Models', extensions: ['obj', 'stl', 'fbx', 'glb', 'gltf', 'json'] },
       { name: 'All files', extensions: ['*'] },
     ],
   });

@@ -121,7 +121,7 @@ export function start() {
     if (!e.dataTransfer?.files?.length) return;
     e.preventDefault();
     const meshes = [], images = [];
-    for (const f of e.dataTransfer.files) (/\.(obj|json|stl|fbx)$/i.test(f.name) ? meshes : images).push(f);
+    for (const f of e.dataTransfer.files) (/\.(obj|json|stl|fbx|glb|gltf)$/i.test(f.name) ? meshes : images).push(f);
     for (const f of meshes) {
       try { await openMeshBytes(f.name, new Uint8Array(await f.arrayBuffer())); }
       catch (err) { console.error(err); ed.toast(err.message || String(err)); }

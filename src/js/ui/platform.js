@@ -22,11 +22,11 @@ export async function openFiles() {
   });
 }
 
-/** → {name, bytes} or null. OBJ, JSON, STL or FBX. */
+/** → {name, bytes} or null. OBJ, JSON, STL, FBX or GLB. */
 export function openMeshFile() {
   if (native?.openMesh) return native.openMesh();
   return new Promise((resolve) => {
-    const input = h('input', { type: 'file', accept: '.obj,.json,.stl,.fbx,application/json' });
+    const input = h('input', { type: 'file', accept: '.obj,.json,.stl,.fbx,.glb,.gltf,model/gltf-binary,model/gltf+json' });
     input.addEventListener('change', async () => {
       const f = input.files?.[0];
       resolve(f ? { name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) } : null);

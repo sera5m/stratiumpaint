@@ -38,7 +38,7 @@ export function createCommands({ ed, view }) {
         ed.addDoc(doc);
         continue;
       }
-      if (/\.(obj|json|stl|fbx)$/i.test(f.name) && f.bytes) {
+      if (/\.(obj|json|stl|fbx|glb|gltf)$/i.test(f.name) && f.bytes) {
         await openMeshBytes(f.name, f.bytes);
         continue;
       }
@@ -501,6 +501,6 @@ function shortcutsBody(cmds, ed) {
 function aboutBody() {
   return h('div', { class: 'about' },
     h('p', null, 'Stratum is a layered raster image editor in the spirit of Paint.NET, built for Linux.'),
-    h('p', null, 'Model → Open Model reads OBJ, JSON, STL and FBX. STL and FBX have no UVs, so Stratum unwraps the triangles it finds. Help → Check for Updates keeps the desktop app current.'),
+    h('p', null, 'Model → Open Model reads OBJ, JSON, STL, FBX and GLB. STL and FBX have no UVs, so Stratum unwraps the triangles it finds. A GLB keeps the UVs it already has. Help → Check for Updates keeps the desktop app current.'),
     h('p', { class: 'dim' }, 'Runs on Electron; the editing core has no dependencies.'));
 }

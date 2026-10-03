@@ -29,7 +29,9 @@ JSON `{ "positions": [...], "indices": [...] }` works too, with optional
 binary) are read as triangles and unwrapped, since those files have no UVs.
 A binary STL may start with the word `solid` and may have a short trailer
 after the triangles; both still count. Curves and NURBS in an FBX are
-skipped.
+skipped. GLB (and a glTF that does not point at a separate file) is read
+the same way: parts stay where the scene put them, and existing UVs can be
+kept. A Draco or meshopt GLB has to be exported as a plain GLB first.
 Paint the flat image or
 the model — both write the active layer. Right-drag is still the secondary
 colour. Alt+drag, or Orbit, tumbles the view. Split / texture only / model
