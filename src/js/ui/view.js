@@ -214,7 +214,7 @@ export class View {
     c.strokeRect(this.ox - 0.5, this.oy - 0.5, doc.width * z + 1, doc.height * z + 1);
 
     if (ed.opts.grid && z >= 8) this.#paintGrid(c, doc);
-    if (doc.mount && doc.mount.showWires !== false) this.#paintWires(c, doc);
+    if (doc.atlas && doc.mount && doc.mount.showWires !== false) this.#paintWires(c, doc);
     if (doc.selection) this.#paintAnts(c, doc.selection);
     ed.tool.overlay?.(c, ed, this);
 

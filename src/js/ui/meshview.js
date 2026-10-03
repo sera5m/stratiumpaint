@@ -2,6 +2,7 @@
 // Left-drag paints the active layer (a brush dab lands on the UV under the cursor).
 // Alt-drag or Orbit mode tumbles the view. Scroll zooms. Middle-drag pans.
 import { buildBVH, raycastMesh } from '../core/mesh.js';
+import { placeToPixel } from './session.js';
 import { h } from './dom.js';
 
 const VS = `
@@ -49,7 +50,7 @@ export class MeshView {
       h('div', { class: 'seg' },
         h('button', { type: 'button', class: 'seg-btn on', onClick: () => this.#mode('paint') }, 'Paint'),
         h('button', { type: 'button', class: 'seg-btn', onClick: () => this.#mode('orbit') }, 'Orbit')),
-      h('span', null, 'Alt+drag orbits · scroll zooms · a stroke paints the active layer'));
+      h('span', null, 'Alt+drag orbits · scroll zooms · a stroke paints this tab'));
     pane.append(this.canvas, this.hud);
     this.gl = this.canvas.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: true });
     if (this.gl) {
@@ -159,7 +160,7 @@ export class MeshView {
     if (!gl || !mount || this.pane.hidden || !this.canvas.width) return;
     if (this._texDirty) {
       this._texDirty = false;
-      const src = doc.composite();
+      const src = this.#stackedTexture(doc);
       const pixels = src.getContext('2d').getImageData(0, 0, src.width, src.height);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
@@ -207,6 +208,29 @@ export class MeshView {
     return { origin: eye, dir };
   }
 
+  /** Every image tab on this mesh, bottom to top, drawn into the atlas. */
+  #stackedTexture(doc) {
+    const members = doc.session?.members?.length ? doc.session.members : [doc];
+    const mount = doc.mount;
+    const w = mount.width || doc.width;
+    const h = mount.height || doc.height;
+    if (members.length === 1 && doc.width === w && doc.height === h && !(doc.place && (doc.place.u || doc.place.v || doc.place.w !== 1 || doc.place.h !== 1))) {
+      return doc.composite();
+    }
+    if (!this._stack || this._stack.width !== w || this._stack.height !== h) {
+      this._stack = document.createElement('canvas');
+      this._stack.width = w;
+      this._stack.height = h;
+    }
+    const ctx = this._stack.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    for (const member of members) {
+      const p = member.place || { u: 0, v: 0, w: 1, h: 1 };
+      ctx.drawImage(member.composite(), p.u * w, p.v * h, p.w * w, p.h * h);
+    }
+    return this._stack;
+  }
+
   #hitDoc(e) {
     if (!this.bvh) return null;
     const { origin, dir } = this.#ray(e);
@@ -218,7 +242,7 @@ export class MeshView {
     const b0 = 1 - hit.u - hit.v, b1 = hit.u, b2 = hit.v;
     const u = b0 * mount.uvs[i * 2] + b1 * mount.uvs[(i + 1) * 2] + b2 * mount.uvs[(i + 2) * 2];
     const v = b0 * mount.uvs[i * 2 + 1] + b1 * mount.uvs[(i + 1) * 2 + 1] + b2 * mount.uvs[(i + 2) * 2 + 1];
-    return { x: u * doc.width, y: v * doc.height };
+    return placeToPixel(doc, u, v);
   }
 
   #bind() {

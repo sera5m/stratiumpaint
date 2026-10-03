@@ -125,7 +125,10 @@ export function start() {
       try { await openMeshText(f.name, await f.text()); }
       catch (err) { console.error(err); ed.toast(err.message || String(err)); }
     }
-    if (images.length) openFilesInto(await platform.readDroppedFiles(images));
+    if (images.length) {
+      const ontoModel = !!e.target.closest?.('#pane-3d') && !!ed.doc?.mount;
+      openFilesInto(await platform.readDroppedFiles(images), { ontoModel });
+    }
   });
 
   // ---------------------------------------------------------------- errors nobody caught

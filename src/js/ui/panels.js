@@ -136,7 +136,8 @@ export function buildTabs(root, ed, closeDoc) {
     clear(root);
     for (const doc of ed.docs) {
       const tab = h('div', {
-        class: `tab${doc === ed.doc ? ' active' : ''}`, role: 'tab', title: doc.path ?? doc.name,
+        class: `tab${doc === ed.doc ? ' active' : ''}${doc.session ? ' on-model' : ''}`, role: 'tab',
+        title: doc.session ? `${doc.name} — on the model` : (doc.path ?? doc.name),
         onPointerdown: (e) => { if (e.button === 1) { e.preventDefault(); closeDoc(doc); } else if (e.button === 0) ed.activate(doc); },
       },
       h('span', { class: 'tab-name' }, doc.name), doc.modified ? h('span', { class: 'tab-dot', title: 'Unsaved changes' }, '•') : null,

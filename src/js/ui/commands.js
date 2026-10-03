@@ -8,6 +8,7 @@ import { applyFilter, eraseSelection, fillSelection, extractSelection, pasteImag
 import { parseMeshText, demoMesh, unwrapMesh } from '../core/mesh.js';
 import { jobExt } from '../core/job.js';
 import { dropScratch, freezeScratch, jobBytes, jobFolder, openJob, scratchWhere } from './scratch.js';
+import { beginSession, joinSession, leaveSession } from './session.js';
 import * as dlg from './dialogs.js';
 import { putBackup, listBackups, formatWhen } from './backup.js';
 import * as platform from './platform.js';
@@ -27,7 +28,7 @@ export function createCommands({ ed, view }) {
 
   // ------------------------------------------------------------------ files
 
-  async function openFilesInto(files) {
+  async function openFilesInto(files, { ontoModel = false } = {}) {
     for (const f of files) {
       if (/\.([23]dlayered)$/i.test(f.name) && f.bytes) {
         const doc = await openJob(f.bytes, f.name);
@@ -45,7 +46,8 @@ export function createCommands({ ed, view }) {
         const doc = await openDocument(f.bytes, f.name);
         doc.rename(f.name, f.path ?? null);
         doc.format = formatFromName(f.name);
-        ed.addDoc(doc);
+        if (ontoModel && ed.doc?.mount) addOntoModel(doc);
+        else ed.addDoc(doc);
       } catch (err) {
         console.error(err);
         ed.toast(`Could not open ${f.name}: ${err.message}`);
@@ -133,6 +135,7 @@ export function createCommands({ ed, view }) {
       }
     }
     try { await dropScratch(doc); } catch (err) { console.warn('Could not remove the working copy:', err); }
+    leaveSession(doc);
     ed.closeDoc(doc);
     return true;
   }
@@ -286,7 +289,7 @@ export function createCommands({ ed, view }) {
 
   function mountAtlas(atlas, name) {
     const doc = new Doc(atlas.width, atlas.height, { name, background: { r: 196, g: 198, b: 204, a: 1 } });
-    doc.mount = atlas;
+    beginSession(doc, atlas);
     ed.layout = 'split';
     ed.addDoc(doc);
     ed.emit('layout');
@@ -322,6 +325,54 @@ export function createCommands({ ed, view }) {
     mountAtlas(unwrapMesh(mesh, opts), stripExt(ed.doc.name));
   }), { enabled: () => !!ed.doc?.mount?.mesh });
 
+  function addOntoModel(doc) {
+    const host = ed.doc;
+    if (!host?.mount) { ed.addDoc(doc); return; }
+    const session = host.session || beginSession(host, host.mount);
+    joinSession(session, doc);
+    const previous = session.members[session.members.length - 2];
+    const at = ed.docs.indexOf(previous);
+    if (at >= 0) ed.docs.splice(at + 1, 0, doc);
+    else ed.docs.push(doc);
+    ed.activate(doc);
+    ed.layout = ed.layout || 'split';
+    ed.emit('docs');
+    ed.emit('layout');
+    ed.toast(`${doc.name} is on the model. Switch tabs to edit each image on its own.`);
+  }
+
+  add('addModelImage', 'Add Image to Model…', guard(async () => {
+    await openFilesInto(await platform.openFiles(), { ontoModel: true });
+  }), { enabled: () => !!ed.doc?.mount });
+
+  add('newModelImage', 'New Image on Model…', guard(async () => {
+    const mount = ed.doc.mount;
+    const r = await dlg.newImageDialog(ed, { width: mount.width, height: mount.height, background: 'transparent' });
+    if (!r) return;
+    const background = r.background === 'white' ? { r: 255, g: 255, b: 255, a: 1 }
+      : r.background === 'primary' ? ed.primary : r.background === 'secondary' ? ed.secondary : null;
+    const n = (ed.doc.session?.members.length ?? 1) + 1;
+    addOntoModel(new Doc(r.width, r.height, { name: `Image ${n}`, background }));
+  }), { enabled: () => !!ed.doc?.mount });
+
+  function moveOnModel(dir) {
+    const session = ed.doc?.session;
+    if (!session) return;
+    const i = session.members.indexOf(ed.doc);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= session.members.length) return;
+    const order = session.members;
+    [order[i], order[j]] = [order[j], order[i]];
+    ed.doc.emit('render');
+    ed.emit('docs');
+  }
+  add('modelRaise', 'Raise Image on Model', () => moveOnModel(1), {
+    enabled: () => !!ed.doc?.session && ed.doc.session.members.at(-1) !== ed.doc,
+  });
+  add('modelLower', 'Lower Image on Model', () => moveOnModel(-1), {
+    enabled: () => !!ed.doc?.session && ed.doc.session.members[0] !== ed.doc,
+  });
+
   const setLayout = (mode) => { ed.layout = mode; ed.emit('layout'); };
   add('layoutSplit', 'Split View', () => setLayout('split'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === 'split' });
   add('layout2d', 'Texture Only', () => setLayout('2d'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === '2d' });
@@ -333,7 +384,9 @@ export function createCommands({ ed, view }) {
     ed.requestOverlay();
   }, { enabled: () => !!ed.doc?.mount, checked: () => !!ed.doc?.mount && ed.doc.mount.showWires !== false });
   add('unmount', 'Unmount Model', () => {
-    if (ed.doc) delete ed.doc.mount;
+    const session = ed.doc?.session;
+    if (session) for (const d of [...session.members]) leaveSession(d);
+    else if (ed.doc) delete ed.doc.mount;
     ed.emit('layout');
     ed.requestOverlay();
   }, { enabled: () => !!ed.doc?.mount });

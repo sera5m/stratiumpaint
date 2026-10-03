@@ -10,6 +10,7 @@ import { Doc } from '../doc/document.js';
 import { Layer, claimLayerId } from '../doc/layer.js';
 import { clamp } from '../core/util.js';
 import * as platform from './platform.js';
+import { beginSession } from './session.js';
 
 const timers = new WeakMap();
 
@@ -130,7 +131,7 @@ export async function openJob(bytes, name) {
   doc.setLayers(layers);
   doc.selectLayer(clamp(job.active ?? layers.length - 1, 0, layers.length - 1));
   if (job.mesh) {
-    doc.mount = {
+    beginSession(doc, {
       mesh: {
         name: job.name, positions: job.mesh.positions, indices: job.mesh.indices,
         groups: job.mesh.groups, cornerUV: null, hasUV: false,
@@ -144,7 +145,7 @@ export async function openJob(bytes, name) {
       width: job.width,
       height: job.height,
       showWires: job.mesh.showWires !== false,
-    };
+    });
     doc.layoutHint = 'split';
   }
   return doc;

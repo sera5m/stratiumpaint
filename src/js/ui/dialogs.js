@@ -213,8 +213,8 @@ export function unwrapDialog({ hasUV }) {
   });
 }
 
-export function newImageDialog(ed) {
-  const values = { width: 1280, height: 720, background: 'white' };
+export function newImageDialog(ed, defaults = {}) {
+  const values = { width: 1280, height: 720, background: 'white', ...defaults };
   const presets = [['1280 × 720', 1280, 720], ['1920 × 1080', 1920, 1080], ['800 × 600', 800, 600], ['512 × 512', 512, 512], ['64 × 64', 64, 64]];
   return new Promise((resolve) => {
     const grid = buildFields([

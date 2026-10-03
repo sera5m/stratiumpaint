@@ -32,6 +32,13 @@ only is in the Model menu. The mount lasts for the session; the texture
 saves like any other image. Unwrap Again opens a fresh atlas so the current
 painting is not thrown away.
 
+Several images can sit on the same model. Model → Add Image to Model, Model →
+New Image on Model, or dropping a file on the model pane adds another tab.
+Each tab is still its own image, with its own layers. The model shows them
+stacked, bottom to top, and a stroke on the model paints whichever tab is
+open. Raise and Lower change that order. Closing one image leaves the model
+on the tabs that remain. Unmount takes the model off all of them.
+
 While a job has unsaved changes, a working copy is written about every eight
 seconds under the program's own data, not next to the picture:
 
