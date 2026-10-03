@@ -32,6 +32,35 @@ endsolid tri
   assert.equal(b.hasUV, false);
 });
 
+test('binary STL with a solid header and a trailer still has its triangle', () => {
+  const bin = new Uint8Array(84 + 50 + 8);
+  const view = new DataView(bin.buffer);
+  const hdr = enc.encode('solid named-export');
+  bin.set(hdr);
+  view.setUint32(80, 1, true);
+  const verts = [0, 0, 0, 1, 0, 0, 0, 1, 0];
+  verts.forEach((v, i) => view.setFloat32(84 + 12 + i * 4, v, true));
+  const mesh = parseSTL(bin, 'tri.stl');
+  assert.equal(mesh.indices.length, 3);
+  assert.equal(mesh.positions[3], 1);
+});
+
+test('uppercase and comma-separated ASCII STL', () => {
+  const text = `SOLID TRI
+FACET NORMAL 0 0 1
+  OUTER LOOP
+    VERTEX 0, 0, 0
+    VERTEX 1, 0, 0
+    VERTEX 0, 1, 0
+  ENDLOOP
+ENDFACET
+ENDSOLID TRI
+`;
+  const mesh = parseSTL(enc.encode(text), 'tri.stl');
+  assert.equal(mesh.indices.length, 3);
+  assert.equal(mesh.groups[0].name, 'TRI');
+});
+
 test('ASCII FBX polygon end-marker becomes one triangle', async () => {
   const text = `FBXHeaderExtension:  {\n}
 Geometry: 1, "Geometry::head", "Mesh" {
@@ -47,6 +76,34 @@ Geometry: 1, "Geometry::head", "Mesh" {
   assert.deepEqual(Array.from(mesh.indices), [0, 1, 2]);
   assert.equal(mesh.groups[0].name, 'head');
   assert.equal(mesh.positions[7], 3);
+});
+
+test('ASCII FBX ignores the properties that follow the index list', async () => {
+  const text = `Geometry: 1, "Geometry::head", "Mesh" {
+Vertices: 0,0,0,1,0,0
+,0,1,0
+PolygonVertexIndex: 0,1,-3
+Edges:
+GeometryVersion: 124
+LayerElementNormal: 0 {
+Normals: 0,0,1, 0,1,0, 1,0,0, -1,0,0
+}
+}
+`;
+  const mesh = await parseFBX(enc.encode(text), 'head.fbx');
+  assert.equal(mesh.indices.length / 3, 1);
+  assert.equal(mesh.positions.length / 3, 3);
+  assert.equal(mesh.groups[0].name, 'head');
+});
+
+test('FBX triangles written without the negative end marker', async () => {
+  const text = `Geometry: 9, "Geometry::panel", "Mesh" {
+Vertices: *9 { a: 0,0,0, 2,0,0, 0,3,0 }
+PolygonVertexIndex: *3 { a: 0,1,2 }
+}
+`;
+  const mesh = await parseFBX(enc.encode(text), 'panel.fbx');
+  assert.deepEqual(Array.from(mesh.indices), [0, 1, 2]);
 });
 
 test('binary FBX geometry, including a compressed array, triangulates', async () => {
@@ -76,7 +133,7 @@ async function fbxBinary(version = 7400) {
   const compressed = await deflate(new Uint8Array(new Int32Array([0, 1, ~2]).buffer.slice(0)));
   const propD = concat([enc.encode('d'), u32(9), u32(0), u32(vertBytes.length), vertBytes]);
   const propI = concat([enc.encode('i'), u32(3), u32(1), u32(compressed.length), compressed]);
-  const box = enc.encode('Geometry::box');
+  const box = enc.encode('Geometry::box\0\u0001Geometry');
   const mesh = enc.encode('Mesh');
   const propS = (b) => concat([enc.encode('S'), u32(b.length), b]);
   const id = new Uint8Array(8);

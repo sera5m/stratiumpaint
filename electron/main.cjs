@@ -4,6 +4,8 @@
 const { app, BrowserWindow, Menu, ipcMain, dialog, clipboard, nativeImage, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
+const https = require('node:https');
+const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
@@ -254,27 +256,103 @@ function runCmd(cmd, args) {
   });
 }
 
+function fetchBuf(url, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'Stratum', Accept: '*/*' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (redirects > 5) { reject(new Error('Update server redirected too many times.')); return; }
+        resolve(fetchBuf(new URL(res.headers.location, url).href, redirects + 1));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`Update server returned ${res.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => req.destroy(new Error('The update server took too long.')));
+  });
+}
+
+function cmpVer(a, b) {
+  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  return 0;
+}
+
+async function githubVersion() {
+  const buf = await fetchBuf('https://raw.githubusercontent.com/sera5m/stratiumpaint/master/package.json');
+  return String(JSON.parse(buf.toString('utf8')).version || '');
+}
+
+async function downloadUpdate() {
+  await fs.promises.access(path.join(ROOT, 'package.json'), fs.constants.W_OK);
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'stratum-upd-'));
+  try {
+    const tarPath = path.join(tmp, 'src.tar.gz');
+    await fs.promises.writeFile(tarPath, await fetchBuf('https://codeload.github.com/sera5m/stratiumpaint/tar.gz/refs/heads/master'));
+    await runCmd('tar', ['-xzf', tarPath, '-C', tmp]);
+    const top = (await fs.promises.readdir(tmp)).find((n) => n.startsWith('stratiumpaint'));
+    if (!top) throw new Error('The download did not contain Stratum.');
+    const srcRoot = path.join(tmp, top);
+    for (const dir of ['src', 'electron', 'scripts', 'packaging', 'assets', 'test']) {
+      const from = path.join(srcRoot, dir);
+      try { await fs.promises.access(from); } catch { continue; }
+      await fs.promises.cp(from, path.join(ROOT, dir), { recursive: true, force: true });
+    }
+    for (const file of ['package.json', 'README.md', 'LICENSE']) {
+      try { await fs.promises.copyFile(path.join(srcRoot, file), path.join(ROOT, file)); } catch { /* optional */ }
+    }
+  } finally {
+    await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 ipcMain.handle('app:check-update', async () => {
   const version = require(path.join(ROOT, 'package.json')).version;
+  let git = false;
   try {
     await runCmd('git', ['rev-parse', '--is-inside-work-tree']);
+    git = true;
+  } catch { /* installed copy, not a checkout */ }
+  if (git) {
+    try {
+      await runCmd('git', ['fetch', '--quiet', 'origin']);
+      let behind = '0';
+      try { behind = await runCmd('git', ['rev-list', '--count', 'HEAD..@{u}']); }
+      catch { behind = await runCmd('git', ['rev-list', '--count', 'HEAD..origin/master']); }
+      const n = parseInt(behind, 10) || 0;
+      let note = '';
+      if (n) { try { note = await runCmd('git', ['log', '-1', '--pretty=%s', 'origin/master']); } catch { /* no note */ } }
+      return { version, mode: 'git', behind: n, note };
+    } catch { /* origin missing or offline — try the version on GitHub */ }
+  }
+  try {
+    const remoteVersion = await githubVersion();
+    const behind = cmpVer(remoteVersion, version) > 0 ? 1 : 0;
+    return { version, mode: git ? 'git' : 'download', behind, note: remoteVersion, remoteVersion };
   } catch {
-    return { version, mode: 'none' };
+    return { version, mode: 'offline', behind: 0 };
   }
-  await runCmd('git', ['fetch', '--quiet', 'origin']);
-  let behind = '0';
-  try { behind = await runCmd('git', ['rev-list', '--count', 'HEAD..@{u}']); }
-  catch { behind = await runCmd('git', ['rev-list', '--count', 'HEAD..origin/master']); }
-  const n = parseInt(behind, 10) || 0;
-  let note = '';
-  if (n) {
-    try { note = await runCmd('git', ['log', '-1', '--pretty=%s', 'origin/master']); } catch { /* no note */ }
-  }
-  return { version, mode: 'git', behind: n, note };
 });
 
-ipcMain.handle('app:apply-update', async () => {
-  await runCmd('git', ['pull', '--ff-only']);
+ipcMain.handle('app:apply-update', async (_e, mode) => {
+  if (mode === 'download') {
+    await downloadUpdate();
+  } else {
+    try {
+      await runCmd('git', ['pull', '--ff-only']);
+    } catch (err) {
+      if (/not a git repository/i.test(String(err.message))) await downloadUpdate();
+      else throw new Error(`${err.message} Local changes were left as they are.`);
+    }
+  }
   await runCmd('npm', ['run', 'build']);
   forceClose = true;
   app.relaunch();

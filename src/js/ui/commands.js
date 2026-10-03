@@ -438,23 +438,34 @@ export function createCommands({ ed, view }) {
 
   add('shortcuts', 'Keyboard Shortcuts', () => dlg.infoDialog('Keyboard Shortcuts', shortcutsBody(cmds, ed), 560), { shortcut: 'F1', enabled: () => true });
   add('about', 'About Stratum', () => dlg.infoDialog('About Stratum', aboutBody(), 420), { enabled: () => true });
-  add('checkUpdate', 'Check for Updates…', guard(async () => {
-    if (!platform.isNative) { ed.toast('Refresh the page. Updates install themselves only in the desktop app.'); return; }
-    ed.toast('Checking for updates…');
-    const info = await platform.checkUpdate();
-    if (!info || info.mode === 'none') {
-      ed.toast('This copy is not a git checkout, so it cannot update itself.');
+  add('checkUpdate', 'Check for Updates…', guard(async (auto) => {
+    if (!platform.isNative) {
+      if (!auto) ed.toast('Refresh the page. Updates install themselves only in the desktop app.');
       return;
     }
-    if (!info.behind) { ed.toast(`Stratum ${info.version} is up to date.`); return; }
+    if (!auto) ed.toast('Checking for updates…');
+    let info;
+    try { info = await platform.checkUpdate(); }
+    catch (err) { if (!auto) throw err; return; }
+    if (!info || info.mode === 'offline') {
+      if (!auto) ed.toast('Could not reach the update server.');
+      return;
+    }
+    if (!info.behind) {
+      if (!auto) ed.toast(`Stratum ${info.version} is up to date.`);
+      return;
+    }
+    const newer = info.remoteVersion && info.remoteVersion !== info.version
+      ? `Stratum ${info.remoteVersion} is available (you have ${info.version}).`
+      : `${info.behind} new commit${info.behind === 1 ? '' : 's'}.${info.note ? ` Latest: ${info.note}.` : ''}`;
     const r = await dlg.confirmDialog({
       title: 'Update Stratum',
-      message: `${info.behind} new commit${info.behind === 1 ? '' : 's'}.${info.note ? ` Latest: ${info.note}.` : ''} Update and restart?`,
+      message: `${newer} Download it, rebuild, and restart?`,
       buttons: [{ label: 'Update', primary: true }, { label: 'Not now', cancel: true }],
     });
     if (r !== 0) return;
     ed.toast('Updating. Stratum will restart when the build finishes.');
-    await platform.applyUpdate();
+    await platform.applyUpdate(info.mode);
   }), { enabled: () => true });
 
   return { cmds, openFilesInto, closeDoc, closeAll, saveDoc, openMeshBytes };
@@ -490,6 +501,6 @@ function shortcutsBody(cmds, ed) {
 function aboutBody() {
   return h('div', { class: 'about' },
     h('p', null, 'Stratum is a layered raster image editor in the spirit of Paint.NET, built for Linux.'),
-    h('p', null, 'Model → Open Model reads OBJ, JSON, STL and FBX. STL and FBX have no UVs, so Stratum unwraps the triangles it finds.'),
+    h('p', null, 'Model → Open Model reads OBJ, JSON, STL and FBX. STL and FBX have no UVs, so Stratum unwraps the triangles it finds. Help → Check for Updates keeps the desktop app current.'),
     h('p', { class: 'dim' }, 'Runs on Electron; the editing core has no dependencies.'));
 }

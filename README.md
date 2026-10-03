@@ -27,6 +27,9 @@ metres, pixels-per-metre sets the texel density (0 just fits the atlas).
 JSON `{ "positions": [...], "indices": [...] }` works too, with optional
 `uvs` (one pair per corner, v = 0 at the bottom). STL and FBX (ASCII or
 binary) are read as triangles and unwrapped, since those files have no UVs.
+A binary STL may start with the word `solid` and may have a short trailer
+after the triangles; both still count. Curves and NURBS in an FBX are
+skipped.
 Paint the flat image or
 the model — both write the active layer. Right-drag is still the secondary
 colour. Alt+drag, or Orbit, tumbles the view. Split / texture only / model
@@ -73,9 +76,11 @@ STRATUM_ESBUILD_CLI=1 node scripts/bundle-standalone.mjs
 electron .
 ```
 
-On the desktop app, Help → Check for Updates fetches the git remote. If the
-checkout is behind, it fast-forwards, rebuilds, and restarts. A copy that is
-not a git checkout cannot update itself.
+On the desktop app, Help → Check for Updates looks for a newer version a
+moment after launch as well. A git checkout is fast-forwarded. Any other
+writable copy downloads the latest source, rebuilds, and restarts. A
+read-only install (for example under `/usr`) has to be updated the same way
+it was installed. A copy that is not the desktop app just needs a refresh.
 
 ## Building
 

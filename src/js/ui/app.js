@@ -148,6 +148,9 @@ export function start() {
   watchScratch(ed);
   watchPlacement(ed);
 
+  // Desktop only: ask once per launch when a newer version is sitting on GitHub.
+  if (platform.isNative) setTimeout(() => cmds.get('checkUpdate').run(true), 1500);
+
   // Quiet recovery copies while a document has unsaved work. File → Restore Backup reads them.
   const AUTOSAVE_MS = 60_000;
   setInterval(() => {

@@ -70,7 +70,7 @@ export async function parseMeshBytes(name, bytes) {
 }
 
 function fromPlain(mesh) {
-  if (!mesh.indices.length) throw new Error('That file has no triangles.');
+  if (!mesh.indices.length) throw new Error('That file has no triangles. Curves and NURBS are skipped — export a polygon mesh.');
   if (mesh.indices.length / 3 > MAX_TRIS) throw new Error(`That mesh has ${mesh.indices.length / 3} triangles. Export a reduced one (under ${MAX_TRIS}).`);
   return finish(mesh.positions, mesh.indices, mesh.groups.length ? mesh.groups : [{ name: 'default', start: 0, count: mesh.indices.length / 3 }], null, mesh.name);
 }

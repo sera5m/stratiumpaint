@@ -22,5 +22,5 @@ contextBridge.exposeInMainWorld('stratumNative', {
   confirmClose: () => ipcRenderer.invoke('app:confirm-close'),
   quit: () => ipcRenderer.invoke('app:quit'),
   checkUpdate: () => ipcRenderer.invoke('app:check-update'),
-  applyUpdate: () => ipcRenderer.invoke('app:apply-update'),
+  applyUpdate: (mode) => ipcRenderer.invoke('app:apply-update', mode),
 });

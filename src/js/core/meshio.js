@@ -14,13 +14,28 @@ function viewOf(u8) {
 
 export function parseSTL(bytes, name = 'Model') {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  return isBinarySTL(u8) ? parseSTLBinary(u8, name) : parseSTLAscii(dec.decode(u8), name);
+  const binary = isBinarySTL(u8);
+  const mesh = binary ? parseSTLBinary(u8, name) : parseSTLAscii(dec.decode(u8), name);
+  if (mesh.indices.length || !binary) return mesh;
+  // A binary header that was really text (rare) still gets a second look.
+  const ascii = parseSTLAscii(dec.decode(u8), name);
+  return ascii.indices.length ? ascii : mesh;
 }
 
 function isBinarySTL(u8) {
   if (u8.length < 84) return false;
   const count = viewOf(u8).getUint32(80, true);
-  return count > 0 && count < 5e7 && 84 + count * 50 === u8.length;
+  const expected = 84 + count * 50;
+  const slack = u8.length - expected;
+  // Exporters often append a comment or a colour block. A few kilobytes of
+  // trailing bytes used to make the whole file look empty.
+  const countOk = count > 0 && count < 5e7 && slack >= 0 && slack <= 65536;
+  const sample = dec.decode(u8.subarray(0, Math.min(u8.length, 8192)));
+  const asciiBody = /facet\s+normal/i.test(sample) && /vertex/i.test(sample);
+  if (asciiBody && slack !== 0) return false;
+  if (countOk && !asciiBody) return true;
+  if (countOk && slack === 0) return true;
+  return false;
 }
 
 function parseSTLAscii(text, name) {
@@ -29,7 +44,8 @@ function parseSTLAscii(text, name) {
   let solid = '';
   const solidLine = /^solid\s+(.*)$/im.exec(text);
   if (solidLine) solid = solidLine[1].trim();
-  const re = /vertex\s+([+-eE\d.]+)\s+([+-eE\d.]+)\s+([+-eE\d.]+)/g;
+  const num = String.raw`[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?`;
+  const re = new RegExp(String.raw`vertex\s+(${num})[\s,]+(${num})[\s,]+(${num})`, 'gi');
   const verts = [];
   let m;
   while ((m = re.exec(text))) verts.push(+m[1], +m[2], +m[3]);
@@ -43,7 +59,7 @@ function parseSTLAscii(text, name) {
 
 function parseSTLBinary(u8, name) {
   const view = viewOf(u8);
-  const count = view.getUint32(80, true);
+  const count = Math.min(view.getUint32(80, true), Math.max(0, Math.floor((u8.length - 84) / 50)));
   const positions = [];
   const indices = [];
   let p = 84;
@@ -75,6 +91,7 @@ function parseFBXAscii(text, name) {
   let mode = null;
   let nums = [];
   let geomIndex = 0;
+  let pendingVerts = null;
 
   const flush = () => {
     if (mode === 'v') pendingVerts = nums.slice();
@@ -85,22 +102,36 @@ function parseFBXAscii(text, name) {
     mode = null;
     nums = [];
   };
-  let pendingVerts = null;
+  // A new property (Normals:, Edges:, …) ends the array. `a:` is the data line, not a property.
+  const keyword = (line) => /^[A-Za-z_][\w]*\s*:/.test(line) && !/^a\s*:/.test(line);
 
-  for (const raw of lines) {
-    const line = raw.trim();
-    const geo = /^Geometry:\s*\d+,\s*"([^"]*)"/.exec(line);
-    if (geo) {
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li].trim();
+    if (!line || line.startsWith(';')) continue;
+    if (/^Geometry:/.test(line)) {
       flush();
-      geom = geo[1].replace(/^Geometry::/, '') || geom;
+      const quoted = /"([^"]*)"/.exec(line);
+      geom = cleanName(quoted?.[1] || '') || geom;
       continue;
     }
-    if (/^Vertices:/.test(line)) { flush(); mode = 'v'; nums = numbers(line); if (line.includes('}')) flush(); continue; }
-    if (/^PolygonVertexIndex:/.test(line)) { if (mode) flush(); mode = 'i'; nums = numbers(line); if (line.includes('}')) flush(); continue; }
-    if (mode) {
-      nums.push(...numbers(line));
+    if (/^Vertices:/.test(line)) {
+      flush();
+      mode = 'v';
+      nums = numbers(line);
       if (line.includes('}')) flush();
+      continue;
     }
+    if (/^PolygonVertexIndex:/.test(line)) {
+      flush();
+      mode = 'i';
+      nums = numbers(line);
+      if (line.includes('}')) flush();
+      continue;
+    }
+    if (!mode) continue;
+    if (keyword(line)) { flush(); li -= 1; continue; }
+    nums.push(...numbers(line));
+    if (line.includes('}')) flush();
   }
   flush();
   return { positions, indices, groups: groups.filter((g) => g.count > 0), name: strip(name) };
@@ -136,7 +167,7 @@ async function parseFBXBinary(u8, name) {
       const verts = node.children.find((c) => c.name === 'Vertices');
       const polys = node.children.find((c) => c.name === 'PolygonVertexIndex');
       if (verts?.props[0] && polys?.props[0]) {
-        const label = String(node.props[1] || `mesh ${++n}`).replace(/^Geometry::/, '');
+        const label = cleanName(node.props[1] || '') || `mesh ${++n}`;
         addGeometry(positions, indices, groups, verts.props[0], polys.props[0], label);
       }
     }
@@ -154,17 +185,25 @@ async function readNode(u8, view, offset, large) {
   const end = readWord(offset);
   if (!end) return null;
   const numProps = readWord(offset + word);
+  const propListLen = readWord(offset + word * 2);
   const nameLen = u8[offset + word * 3];
   let p = offset + word * 3 + 1;
   const name = dec.decode(u8.subarray(p, p + nameLen));
   p += nameLen;
   const props = [];
-  for (let i = 0; i < numProps; i++) {
-    const type = String.fromCharCode(u8[p]);
-    p += 1;
-    const got = await readProp(u8, view, type, p);
-    props.push(got.value);
-    p = got.next;
+  const propsStart = p;
+  try {
+    for (let i = 0; i < numProps; i++) {
+      const type = String.fromCharCode(u8[p]);
+      p += 1;
+      const got = await readProp(u8, view, type, p);
+      props.push(got.value);
+      p = got.next;
+    }
+  } catch {
+    // An unfamiliar property used to abort the whole file, including the mesh
+    // that sits next to it. Skip the rest of this property list and keep going.
+    p = Math.min(end, propsStart + propListLen);
   }
   const children = [];
   while (p + word <= end) {
@@ -211,18 +250,30 @@ async function readProp(u8, view, type, p) {
 function addGeometry(positions, indices, groups, verts, polys, groupName) {
   const base = positions.length / 3;
   const start = indices.length / 3;
-  for (let i = 0; i < verts.length; i++) positions.push(+verts[i]);
-  let poly = [];
-  for (let i = 0; i < polys.length; i++) {
-    const raw = +polys[i];
-    if (raw < 0) {
-      poly.push(~raw);
-      for (let k = 1; k < poly.length - 1; k++) indices.push(base + poly[0], base + poly[k], base + poly[k + 1]);
-      poly = [];
-    } else poly.push(raw);
+  const num = (n) => typeof n === 'bigint' ? Number(n) : +n;
+  for (let i = 0; i < verts.length; i++) positions.push(num(verts[i]));
+  const list = [];
+  for (let i = 0; i < polys.length; i++) list.push(num(polys[i]));
+  const ended = list.some((n) => n < 0);
+  const fan = (poly) => {
+    for (let k = 1; k < poly.length - 1; k++) indices.push(base + poly[0], base + poly[k], base + poly[k + 1]);
+  };
+  if (!ended && list.length >= 3 && list.length % 3 === 0) {
+    for (let i = 0; i < list.length; i += 3) indices.push(base + list[i], base + list[i + 1], base + list[i + 2]);
+  } else {
+    let poly = [];
+    for (const raw of list) {
+      if (raw < 0) { poly.push(~raw); fan(poly); poly = []; }
+      else poly.push(raw);
+    }
+    if (poly.length >= 3) fan(poly);
   }
   const count = indices.length / 3 - start;
-  if (count > 0) groups.push({ name: groupName || 'mesh', start, count });
+  if (count > 0) groups.push({ name: cleanName(groupName) || 'mesh', start, count });
+}
+
+function cleanName(s) {
+  return String(s || '').replace(/^Geometry::/, '').replace(/\0[\s\S]*$/, '').trim();
 }
 
 function packed(positions, indices, group, name) {
