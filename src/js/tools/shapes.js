@@ -1,7 +1,7 @@
 // Line, rectangle, rounded rectangle and ellipse. The shape is drawn live into the layer while
 // dragging (so what you see is what you get) and recorded as one history step on release.
 import { cloneImage, cropImage, stampImage } from '../core/image.js';
-import { rectUnion, rectIntersect } from '../core/util.js';
+import { rectUnion, rectIntersect, rectGrow } from '../core/util.js';
 import { paintImage, rasterize, hardenAlpha } from '../doc/raster.js';
 import { layerRect, rgbaCss } from './common.js';
 
@@ -49,24 +49,52 @@ function makeShape({ id, name, kind, key }) {
     // Read colour live rather than what was captured at mousedown, so changing the primary/secondary
     // colour mid-drag (e.g. via a keyboard shortcut) updates the shape before it's released.
     const stroke = s.swap ? ed.secondary : ed.primary, fill = s.swap ? ed.primary : ed.secondary;
-    if (s.prev) { // put back what the previous frame covered
-      stampImage(layer.img, cropImage(orig, s.prev), s.prev.x, s.prev.y);
-    }
+    if (s.prev) stampImage(layer.img, cropImage(orig, s.prev), s.prev.x, s.prev.y);
     const pad = Math.ceil(o.size / 2) + 3;
-    const region = rectIntersect({
-      x: Math.floor(Math.min(g.x0, g.x1)) - pad, y: Math.floor(Math.min(g.y0, g.y1)) - pad,
-      w: Math.ceil(Math.abs(g.x1 - g.x0)) + pad * 2, h: Math.ceil(Math.abs(g.y1 - g.y0)) + pad * 2,
-    }, layerRect(layer));
+    // A drag that crossed a weld carries one piece per lip: the shape lives in
+    // continuous pixels and each piece shifts a copy back onto that lip.
+    const pieces = s.wrap?.pieces?.length ? s.wrap.pieces : [{ dx: 0, dy: 0 }];
+    let region = null;
+    for (const piece of pieces) {
+      const dx = piece.dx || 0, dy = piece.dy || 0;
+      let b = {
+        x: Math.floor(Math.min(g.x0, g.x1) - dx) - pad,
+        y: Math.floor(Math.min(g.y0, g.y1) - dy) - pad,
+        w: Math.ceil(Math.abs(g.x1 - g.x0)) + pad * 2,
+        h: Math.ceil(Math.abs(g.y1 - g.y0)) + pad * 2,
+      };
+      const grown = piece.clip ? rectGrow(piece.clip, pad) : null;
+      if (grown) b = rectIntersect(b, grown);
+      if (b) {
+        const x0 = Math.floor(b.x), y0 = Math.floor(b.y);
+        const x1 = Math.ceil(b.x + b.w), y1 = Math.ceil(b.y + b.h);
+        b = x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
+      }
+      b = b && rectIntersect(b, layerRect(layer));
+      if (b) region = region ? rectUnion(region, b) : b;
+    }
     if (!region) { s.prev = null; return; }
-    const img = rasterize(region.w, region.h, (ctx) => {
-      ctx.translate(-region.x, -region.y);
-      tracePath(ctx, kind, g.x0, g.y0, g.x1, g.y1, o.radius);
+    const paint = (ctx) => {
       ctx.lineWidth = Math.max(1, o.size);
       ctx.lineCap = 'round';
       ctx.lineJoin = kind === 'rect' ? 'miter' : 'round';
       if (kind === 'line' || o.shape === 'outline') { ctx.strokeStyle = rgbaCss(stroke); ctx.stroke(); }
       else if (o.shape === 'fill') { ctx.fillStyle = rgbaCss(stroke); ctx.fill(); }
       else { ctx.fillStyle = rgbaCss(fill); ctx.fill(); ctx.strokeStyle = rgbaCss(stroke); ctx.stroke(); }
+    };
+    const img = rasterize(region.w, region.h, (ctx) => {
+      ctx.translate(-region.x, -region.y);
+      for (const piece of pieces) {
+        ctx.save();
+        if (piece.clip) {
+          const c = rectGrow(piece.clip, pad);
+          ctx.beginPath(); ctx.rect(c.x, c.y, c.w, c.h); ctx.clip();
+        }
+        ctx.translate(-(piece.dx || 0), -(piece.dy || 0));
+        tracePath(ctx, kind, g.x0, g.y0, g.x1, g.y1, o.radius);
+        paint(ctx);
+        ctx.restore();
+      }
     });
     if (!o.aa) hardenAlpha(img);
     paintImage(layer.img, img, region.x, region.y, ed.doc.selection, o.opacity / 100);
@@ -86,12 +114,13 @@ function makeShape({ id, name, kind, key }) {
       S = {
         layer, orig: cloneImage(layer.img), x0: e.x, y0: e.y, x1: e.x, y1: e.y, shift: e.shift,
         swap: e.button === 2,
-        prev: null, all: null, moved: false,
+        prev: null, all: null, moved: false, wrap: e.wrap || null,
       };
     },
     move(e, ed) {
       if (!S) return;
       S.x1 = e.x; S.y1 = e.y; S.shift = e.shift; S.moved = true;
+      if (e.wrap) S.wrap = e.wrap;
       draw(ed, S);
     },
     // Redraw immediately if the colour changes mid-drag, so you don't have to nudge the mouse to

@@ -41,7 +41,10 @@ on the others. Parts that were already laid out apart are left where they
 are. Scroll zooms, the middle button slides the view, and Alt-drag turns it.
 The cube in the corner of the model snaps to Front, Back, Left, Right, Top
 or Bottom (drag the cube to orbit). Solid shows the shape. Flat lays the
-same triangles out as the unwrap.
+same triangles out as the unwrap. A rectangle, ellipse or line dragged
+across a seam on the model continues over that weld, from one lip of the
+unwrap to the other, instead of stretching the long way across the chart.
+The flat sheet stays flat and does not wrap.
 Right-drag is still the secondary
 colour. Alt+drag still turns the view. Split / texture only / model
 only is in the Model menu. The mount lasts for the session; the texture

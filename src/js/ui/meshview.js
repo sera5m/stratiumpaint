@@ -2,6 +2,7 @@
 // Paint draws on the solid or on the flat unwrap. Scroll zooms, middle-drag
 // slides, Alt-drag turns. The corner cube snaps the view to a side.
 import { buildBVH, raycastMesh } from '../core/mesh.js';
+import { seamStep, uvCharts } from '../core/seam.js';
 import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
 
@@ -309,8 +310,8 @@ export class MeshView {
     return { origin: eye, dir };
   }
 
-  /** UV under the cursor, v down, or null. */
-  #hitUV(e) {
+  /** Hit under the cursor: UV (v down), the 3D point, or null. */
+  #hit(e) {
     if (!this.bvh || !this.ed.doc?.mount) return null;
     const bvh = this.shape === 'flat' ? this.flatBvh : this.bvh;
     if (!bvh) return null;
@@ -323,14 +324,83 @@ export class MeshView {
     return {
       u: b0 * mount.uvs[i * 2] + b1 * mount.uvs[(i + 1) * 2] + b2 * mount.uvs[(i + 2) * 2],
       v: b0 * mount.uvs[i * 2 + 1] + b1 * mount.uvs[(i + 1) * 2 + 1] + b2 * mount.uvs[(i + 2) * 2 + 1],
+      p3: [origin[0] + dir[0] * hit.t, origin[1] + dir[1] * hit.t, origin[2] + dir[2] * hit.t],
+      face: hit.tri,
     };
   }
 
-  #hitDoc(e) {
-    const uv = this.#hitUV(e);
-    if (!uv) return null;
+  /** 3D distance under which a UV jump is the weld, not a hop across the model. Flat never wraps. */
+  #gap() {
+    if (this.shape === 'flat') return 0;
+    const mount = this.ed.doc?.mount;
+    if (!mount?.positions) return 0;
+    if (this._gapMount !== mount) {
+      this._gapMount = mount;
+      const box = bounds(mount.positions);
+      const diag = Math.hypot(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]) || 1;
+      this._gap = diag * 0.3;
+    }
+    return this._gap;
+  }
+
+  #charts() {
+    const mount = this.ed.doc?.mount;
+    if (!mount?.uvs) return null;
+    if (this._chartMount !== mount) {
+      this._chartMount = mount;
+      this._charts = uvCharts(mount.indices, mount.uvs);
+    }
+    return this._charts;
+  }
+
+  /** Follow a drag across a UV cut so a shape wraps the weld instead of the chart. */
+  #track(hit) {
+    if (!this.stroke) {
+      this.stroke = { u: hit.u, v: hit.v, offU: 0, offV: 0, wrapped: false, p3: hit.p3, face: hit.face, visits: [] };
+      this.#visit(hit);
+      return;
+    }
+    const step = seamStep(this.stroke, hit, this.#gap(), this.shape === 'flat' ? null : this.ed.doc?.mount);
+    if (step.wrapped) {
+      this.stroke.wrapped = true;
+      this.stroke.offU = step.offU;
+      this.stroke.offV = step.offV;
+      this.#visit(hit);
+    }
+    this.stroke.u = hit.u;
+    this.stroke.v = hit.v;
+    this.stroke.p3 = hit.p3;
+    this.stroke.face = hit.face;
+  }
+
+  #visit(hit) {
+    const box = this.#charts()?.[hit.face] || null;
+    const dx = this.stroke.offU, dy = this.stroke.offV;
+    const visits = this.stroke.visits;
+    if (visits.some((v) => Math.abs(v.dx - dx) < 0.02 && Math.abs(v.dy - dy) < 0.02)) return;
+    visits.push({ dx, dy, box });
+  }
+
+  #docPoint(hit, { shape = false } = {}) {
     const atlas = atlasOf(this.ed.doc) || this.ed.doc;
-    return { x: uv.u * atlas.width, y: uv.v * atlas.height };
+    const u = shape ? hit.u + (this.stroke?.offU || 0) : hit.u;
+    const v = shape ? hit.v + (this.stroke?.offV || 0) : hit.v;
+    const p = { x: u * atlas.width, y: v * atlas.height };
+    if (shape && this.stroke?.wrapped && this.stroke.visits?.length) {
+      const W = atlas.width, H = atlas.height;
+      p.wrap = {
+        pieces: this.stroke.visits.map((v) => ({
+          dx: v.dx * W,
+          dy: v.dy * H,
+          clip: v.box ? {
+            x: v.box.umin * W, y: v.box.vmin * H,
+            w: Math.max(1, (v.box.umax - v.box.umin) * W),
+            h: Math.max(1, (v.box.vmax - v.box.vmin) * H),
+          } : null,
+        })),
+      };
+    }
+    return p;
   }
 
   #source() {
@@ -350,15 +420,19 @@ export class MeshView {
       }
       if (this.mode === 'move' && e.button === 0) {
         const source = this.#source();
-        const uv = this.#hitUV(e);
+        const uv = this.#hit(e);
         if (!source) { ed.toast('Open the image tab you want to move.'); return; }
         if (!uv) return;
         this.moving = { source, u: uv.u, v: uv.v, place: { ...source.place } };
         return;
       }
       if (e.button !== 0 && e.button !== 2) return;
-      const p = this.#hitDoc(e);
-      if (!p) return;
+      const hit = this.#hit(e);
+      if (!hit) return;
+      this.stroke = null;
+      this.#track(hit);
+      const shape = ed.tool?.group === 'shape';
+      const p = this.#docPoint(hit, { shape });
       const atlas = atlasOf(ed.doc);
       if (atlas) {
         ed._modelTarget = atlas;
@@ -382,7 +456,7 @@ export class MeshView {
         return;
       }
       if (this.moving) {
-        const uv = this.#hitUV(e);
+        const uv = this.#hit(e);
         if (!uv) return;
         const s = this.moving;
         const p = s.place;
@@ -391,15 +465,19 @@ export class MeshView {
         return;
       }
       if (!this.painting) return;
-      const p = this.#hitDoc(e);
-      if (!p) return;
-      ed.hover = p;
+      const hit = this.#hit(e);
+      if (!hit) return;
+      this.#track(hit);
+      const shape = ed.tool?.group === 'shape';
+      const p = this.#docPoint(hit, { shape });
+      ed.hover = { x: hit.u * (atlasOf(ed.doc)?.width || ed.doc.width), y: hit.v * (atlasOf(ed.doc)?.height || ed.doc.height) };
       ed.pointer('move', { ...p, sx: 0, sy: 0, button: this.paintButton === 2 ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: false });
       ed.requestOverlay();
     });
     const end = () => {
       this.dragging = null;
       this.moving = null;
+      this.stroke = null;
       if (!this.painting) return;
       this.painting = false;
       const p = ed.hover || { x: 0, y: 0 };
