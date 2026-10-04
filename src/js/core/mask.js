@@ -113,6 +113,28 @@ export function translateMask(m, dx, dy) {
   return out;
 }
 
+/**
+ * Map the coverage inside `src` onto `dst` (nearest). Used when a selection is scaled
+ * with the pixels it encloses. Coverage outside `dst` stays empty.
+ */
+export function scaleMask(m, src, dst) {
+  const out = createMask(m.width, m.height);
+  if (!(src.w > 0) || !(src.h > 0) || !(dst.w > 0) || !(dst.h > 0)) return out;
+  const x0 = Math.max(0, Math.floor(dst.x)), y0 = Math.max(0, Math.floor(dst.y));
+  const x1 = Math.min(m.width, Math.ceil(dst.x + dst.w)), y1 = Math.min(m.height, Math.ceil(dst.y + dst.h));
+  for (let y = y0; y < y1; y++) {
+    const v = Math.floor(((y + 0.5 - dst.y) / dst.h) * src.h + src.y);
+    if (v < 0 || v >= m.height) continue;
+    const row = y * m.width;
+    for (let x = x0; x < x1; x++) {
+      const u = Math.floor(((x + 0.5 - dst.x) / dst.w) * src.w + src.x);
+      if (u < 0 || u >= m.width) continue;
+      out.data[row + x] = m.data[v * m.width + u];
+    }
+  }
+  return out;
+}
+
 /** Tight bounds of pixels with coverage >= threshold, or null when empty. */
 export function maskBounds(m, threshold = 1) {
   const { width: w, height: h, data } = m;

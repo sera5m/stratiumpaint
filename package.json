@@ -1,7 +1,7 @@
 {
   "name": "stratum",
   "productName": "Stratum",
-  "version": "2.10.2",
+  "version": "2.10.3",
   "description": "Layered raster image editor in the spirit of Paint.NET, for Linux",
   "main": "electron/main.cjs",
   "license": "MIT",

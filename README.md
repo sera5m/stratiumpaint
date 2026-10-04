@@ -19,6 +19,11 @@ interval on each channel and deletes or replaces every pixel inside it.
 Left-click sets colour A, right-click sets colour B and opens the dialog.
 Primary and secondary are the starting ends.
 
+Move Selected Pixels (M) drags what you selected, or the whole layer when
+nothing is. A box with corner and edge handles scales it, and the scroll
+wheel scales it from the centre. Shift on a handle keeps the proportions.
+Enter or a right-click sets it down; Esc puts it back.
+
 Model → Unwrap Demo, Model → Open Model, or dropping an `.obj` lays the
 surface out as one texture and mounts it beside the canvas. Charts stay
 joined while the bend between faces is under the angle you set; sharper

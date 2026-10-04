@@ -47,7 +47,7 @@ export class View {
     ed.on('doc:size', () => { const s = ed.doc?.viewState; if (s) s.fitted = true; this.fit(); });
     ed.on('doc:selection', () => this.requestOverlay());
     ed.on('overlay', () => this.requestOverlay());
-    ed.on('tool', () => this.#updateCursor());
+    ed.on('tool', () => { this.#updateCursor(); this.requestOverlay(); });
     ed.on('opts', () => this.requestOverlay());
 
     setInterval(() => { // animate the marching ants (skipped for huge outlines)
@@ -269,10 +269,17 @@ export class View {
   #paintAnts(c, mask) {
     const segs = outlineFor(mask), z = this.zoom, off = this.ed.marchOffset ?? { dx: 0, dy: 0 };
     if (!segs.length) return;
+    const map = off.from && off.to && off.from.w && off.from.h
+      ? (x, y) => [
+        off.to.x + ((x - off.from.x) * off.to.w) / off.from.w,
+        off.to.y + ((y - off.from.y) * off.to.h) / off.from.h,
+      ]
+      : (x, y) => [x + (off.dx || 0), y + (off.dy || 0)];
     c.beginPath();
     for (let i = 0; i < segs.length; i += 4) {
-      c.moveTo(this.ox + (segs[i] + off.dx) * z + 0.5, this.oy + (segs[i + 1] + off.dy) * z + 0.5);
-      c.lineTo(this.ox + (segs[i + 2] + off.dx) * z + 0.5, this.oy + (segs[i + 3] + off.dy) * z + 0.5);
+      const a = map(segs[i], segs[i + 1]), b = map(segs[i + 2], segs[i + 3]);
+      c.moveTo(this.ox + a[0] * z + 0.5, this.oy + a[1] * z + 0.5);
+      c.lineTo(this.ox + b[0] * z + 0.5, this.oy + b[1] * z + 0.5);
     }
     c.lineWidth = 1;
     c.setLineDash([]);
@@ -300,7 +307,7 @@ export class View {
   #toolEvent(e) {
     const r = this.stage.getBoundingClientRect();
     const sx = e.clientX - r.left, sy = e.clientY - r.top, p = this.toDoc(sx, sy);
-    return { x: p.x, y: p.y, sx, sy, button: e.button === 2 || (e.buttons & 2) ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey };
+    return { x: p.x, y: p.y, sx, sy, zoom: this.zoom, ox: this.ox, oy: this.oy, button: e.button === 2 || (e.buttons & 2) ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey };
   }
 
   #bindPointer() {
@@ -345,6 +352,9 @@ export class View {
       const t = this.#toolEvent(e);
       ed.hover = { x: t.x, y: t.y };
       ed.emit('cursor', t.x, t.y);
+      if (!this.panning && !this.spaceDown) {
+        this.overlay.style.cursor = ed.tool.cursorAt?.(t, ed) || ed.tool.cursor || 'crosshair';
+      }
       if (ed.tool.ring) this.requestOverlay();
     });
 
@@ -373,6 +383,8 @@ export class View {
       const r = this.stage.getBoundingClientRect();
       if (e.ctrlKey || e.metaKey) {
         this.zoomAt(Math.pow(1.0018, -e.deltaY * (e.deltaMode === 1 ? 16 : 1)), e.clientX - r.left, e.clientY - r.top);
+      } else if (this.ed.tool.wheel?.(e, this.ed, this)) {
+        /* the tool used the wheel — Move scales a selection instead of sliding the canvas */
       } else {
         const k = e.deltaMode === 1 ? 16 : 1;
         if (e.shiftKey) this.panBy(-(e.deltaY || e.deltaX) * k, 0);

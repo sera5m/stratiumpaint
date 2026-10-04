@@ -318,7 +318,7 @@ export function buildStatusbar(root, ed, view) {
     'ellipse-select': 'Drag to select. Ctrl adds, Alt subtracts, Shift makes a circle.',
     lasso: 'Drag to draw a free-form selection.',
     wand: 'Click to select similar colours.',
-    'move-pixels': 'Drag to move the selected pixels (or the whole layer). Enter or right-click sets it down; Esc cancels.',
+    'move-pixels': 'Drag inside to move. Drag a corner or edge to scale, or scroll. Shift keeps proportions. Enter or right-click sets it down; Esc cancels.',
     'move-selection': 'Drag to move the selection outline only. Enter or right-click sets it down; Esc cancels.',
     zoom: 'Click to zoom in, right-click to zoom out, drag a box to zoom to it.',
     pan: 'Drag to pan. You can also hold Space with any tool.',

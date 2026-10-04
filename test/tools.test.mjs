@@ -440,6 +440,50 @@ test('move selection: Escape after releasing leaves the selection exactly where 
   assert.deepEqual(doc.selection.data, before);
 });
 
+test('a corner handle scales the selected pixels, and undo restores them', () => {
+  const { ed, doc } = session(20, 20);
+  for (let y = 2; y < 6; y++) for (let x = 2; x < 6; x++) doc.layer.img.data.set([255, 0, 0, 255], (y * 20 + x) * 4);
+  doc.setSelection(rectMask(20, 20, 2, 2, 6, 6));
+  const before = doc.history.entries().length;
+  ed.setTool('move-pixels');
+  // SE corner of the 4×4 box is document (6, 6). At zoom 10 that is screen (60, 60).
+  const view = { zoom: 10, ox: 0, oy: 0 };
+  const at = (docX, docY) => ev(docX, docY, { sx: docX * 10, sy: docY * 10, ...view });
+  ed.pointer('down', at(6, 6));
+  ed.pointer('move', at(10, 10));
+  ed.pointer('up', at(10, 10));
+  assert.equal(doc.history.entries().length, before, 'still floating');
+  assert.deepEqual(px(doc.layer, 7, 3), [255, 0, 0, 255], 'the block grew past its old edge');
+  assert.equal(doc.selection.data[3 * 20 + 3], 255, 'the outline itself waits until it is set down');
+  assert.equal(doc.selection.data[3 * 20 + 7], 0);
+
+  ed.commitTool();
+  assert.equal(doc.history.entries().length, before + 1);
+  assert.equal(doc.selection.data[3 * 20 + 7], 255);
+  assert.equal(doc.selection.data[3 * 20 + 10], 0, 'the selection grew with the pixels, and no further');
+  doc.undo();
+  assert.equal(alphaAt(doc.layer, 7, 3), 0);
+  assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255]);
+  assert.equal(doc.selection.data[3 * 20 + 3], 255);
+  assert.equal(doc.selection.data[3 * 20 + 7], 0);
+});
+
+test('scroll in move mode scales the selection from its centre', () => {
+  const { ed, doc } = session(20, 20);
+  for (let y = 8; y < 12; y++) for (let x = 8; x < 12; x++) doc.layer.img.data.set([0, 180, 0, 255], (y * 20 + x) * 4);
+  doc.setSelection(rectMask(20, 20, 8, 8, 12, 12));
+  const before = doc.history.entries().length;
+  ed.setTool('move-pixels');
+  const used = ed.tool.wheel({ deltaY: -400, deltaMode: 0, ctrlKey: false, metaKey: false }, ed);
+  assert.equal(used, true);
+  assert.equal(doc.history.entries().length, before, 'the scale is still floating');
+  assert.ok(alphaAt(doc.layer, 7, 10) > 200, 'it grew sideways from the centre');
+  assert.deepEqual(px(doc.layer, 10, 10), [0, 180, 0, 255]);
+  ed.cancelTool();
+  assert.equal(alphaAt(doc.layer, 7, 10), 0, 'escape puts the original block back');
+  assert.deepEqual(px(doc.layer, 9, 9), [0, 180, 0, 255]);
+});
+
 test('colour picker takes the pixel under the cursor', () => {
   const { ed, doc } = session();
   doc.layer.img.data.set([12, 34, 56, 255], (4 * 40 + 6) * 4);
