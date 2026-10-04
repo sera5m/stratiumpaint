@@ -32,10 +32,14 @@ after the triangles; both still count. Curves and NURBS in an FBX are
 skipped. GLB (and a glTF that does not point at a separate file) is read
 the same way: parts stay where the scene put them, and existing UVs can be
 kept. A Draco or meshopt GLB has to be exported as a plain GLB first.
-Paint the flat image or
-the model — both write the active layer. On the model, Pan, Zoom and Rotate
-move the view (scroll still zooms, and the middle button still slides it).
-Solid shows the shape. Flat lays the same triangles out as the unwrap.
+Paint the flat image or the model — both write the active layer. A GLB often
+puts every object on the same 0–1 texture square; when those squares overlap,
+each object is given its own patch, so a stroke on one part does not appear
+on the others. Parts that were already laid out apart are left where they
+are. Scroll zooms, the middle button slides the view, and Alt-drag turns it.
+The cube in the corner of the model snaps to Front, Back, Left, Right, Top
+or Bottom (drag the cube to orbit). Solid shows the shape. Flat lays the
+same triangles out as the unwrap.
 Right-drag is still the secondary
 colour. Alt+drag still turns the view. Split / texture only / model
 only is in the Model menu. The mount lasts for the session; the texture

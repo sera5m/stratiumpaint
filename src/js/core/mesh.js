@@ -112,6 +112,7 @@ export function parseOBJ(text, name = 'Model') {
   const begin = (n) => {
     const name = n || 'default';
     if (open && indices.length / 3 === open.start) { open.name = name; group = name; return; }
+    if (open) open.count = indices.length / 3 - open.start;
     open = { name, start: indices.length / 3, count: 0 };
     groups.push(open);
     group = name;
@@ -217,7 +218,7 @@ export function unwrapMesh(mesh, opts = {}) {
   if (opts.useExisting && mesh.hasUV) return adoptUVs(mesh, resolution);
 
   const angle = clamp(+opts.angle || 66, 1, 180) * Math.PI / 180;
-  const { charts, seams } = segment(mesh.positions, mesh.indices, angle);
+  const { charts, seams } = segment(mesh.positions, mesh.indices, angle, mesh.groups);
   const islands = [];
   let projected = 0;
   for (const faces of charts) {
@@ -258,6 +259,7 @@ export function unwrapMesh(mesh, opts = {}) {
     height: atlas.height,
     islandRects,
     showWires: true,
+    separated: 0,
   };
 }
 
@@ -282,17 +284,90 @@ function adoptUVs(mesh, resolution) {
   } else {
     uvs.set(img);
   }
+  const separated = separateObjects(uvs, mesh.groups);
   return {
     mesh, positions: mesh.positions, indices: mesh.indices, groups: mesh.groups,
     uvs, wires: allWires(mesh.indices, uvs), charts: 0, seams: 0, projected: 0,
     width: resolution, height: resolution, islandRects: [], showWires: true, keptUVs: true,
+    separated,
   };
+}
+
+// Objects in a glTF each bring their own 0–1 UV square on one shared image.
+// Where those squares overlap, give every object its own cell so a stroke
+// cannot land on the others. Layout inside an object is kept. Already-separate
+// UVs (and a single object) are left exactly where they are.
+function separateObjects(uvs, groups) {
+  const nF = uvs.length / 6;
+  const owner = faceOwner(nF, groups);
+  if (!owner) return 0;
+  const boxes = new Map();
+  for (let f = 0; f < nF; f++) {
+    const id = owner[f];
+    let b = boxes.get(id);
+    if (!b) boxes.set(id, b = { id, minU: Infinity, minV: Infinity, maxU: -Infinity, maxV: -Infinity });
+    for (let k = 0; k < 3; k++) {
+      const o = (f * 3 + k) * 2;
+      const u = uvs[o], v = uvs[o + 1];
+      if (u < b.minU) b.minU = u; if (v < b.minV) b.minV = v;
+      if (u > b.maxU) b.maxU = u; if (v > b.maxV) b.maxV = v;
+    }
+  }
+  const list = [...boxes.values()];
+  if (list.length < 2) return 0;
+  const overlaps = (a, b) => a.minU < b.maxU - 1e-4 && b.minU < a.maxU - 1e-4
+    && a.minV < b.maxV - 1e-4 && b.minV < a.maxV - 1e-4;
+  let stacked = false;
+  for (let i = 0; i < list.length && !stacked; i++) {
+    for (let j = i + 1; j < list.length; j++) if (overlaps(list[i], list[j])) { stacked = true; break; }
+  }
+  if (!stacked) return 0;
+  const cols = Math.ceil(Math.sqrt(list.length));
+  const rows = Math.ceil(list.length / cols);
+  list.forEach((b, i) => {
+    const col = i % cols, row = (i / cols) | 0;
+    const cellW = 1 / cols, cellH = 1 / rows;
+    const du = Math.max(b.maxU - b.minU, 1e-6);
+    const dv = Math.max(b.maxV - b.minV, 1e-6);
+    const s = Math.min(cellW * 0.92 / du, cellH * 0.92 / dv);
+    const w = du * s, h = dv * s;
+    b.ox = col * cellW + (cellW - w) / 2;
+    b.oy = row * cellH + (cellH - h) / 2;
+    b.s = s;
+  });
+  for (let f = 0; f < nF; f++) {
+    const b = boxes.get(owner[f]);
+    if (!b) continue;
+    for (let k = 0; k < 3; k++) {
+      const o = (f * 3 + k) * 2;
+      uvs[o] = b.ox + (uvs[o] - b.minU) * b.s;
+      uvs[o + 1] = b.oy + (uvs[o + 1] - b.minV) * b.s;
+    }
+  }
+  return list.length;
+}
+
+function faceOwner(nF, groups) {
+  if (!groups || groups.length < 2) return null;
+  const ids = new Int32Array(nF);
+  ids.fill(-1);
+  let n = 0;
+  for (let gi = 0; gi < groups.length; gi++) {
+    const g = groups[gi];
+    const end = Math.min(nF, (g.start | 0) + (g.count | 0));
+    const start = Math.max(0, g.start | 0);
+    if (end <= start) continue;
+    n++;
+    for (let f = start; f < end; f++) ids[f] = gi;
+  }
+  return n >= 2 ? ids : null;
 }
 
 // ---------------------------------------------------------------- charts
 
-function segment(positions, indices, angle) {
+function segment(positions, indices, angle, groups) {
   const nF = indices.length / 3;
+  const owner = faceOwner(nF, groups);
   const normals = new Float32Array(nF * 3);
   const edges = new Map();
   for (let f = 0; f < nF; f++) {
@@ -311,6 +386,7 @@ function segment(positions, indices, angle) {
   for (const list of edges.values()) {
     if (list.length !== 2) { seams++; continue; }
     const f0 = list[0], f1 = list[1];
+    if (owner && owner[f0] !== owner[f1]) { seams++; continue; }
     const d = normals[f0 * 3] * normals[f1 * 3] + normals[f0 * 3 + 1] * normals[f1 * 3 + 1] + normals[f0 * 3 + 2] * normals[f1 * 3 + 2];
     if (Math.acos(clamp(d, -1, 1)) > angle) { seams++; continue; }
     adj[f0].push(f1); adj[f1].push(f0);

@@ -301,7 +301,9 @@ export function createCommands({ ed, view }) {
     ed.addDoc(doc);
     ed.emit('layout');
     const detail = atlas.keptUVs
-      ? `Kept the UVs already in the file. Atlas ${atlas.width}×${atlas.height}.`
+      ? (atlas.separated > 1
+        ? `Split ${atlas.separated} objects onto their own parts of the texture, so paint on one stays off the others. Atlas ${atlas.width}×${atlas.height}.`
+        : `Kept the UVs already in the file. Atlas ${atlas.width}×${atlas.height}.`)
       : `Unwrapped ${atlas.charts} chart${atlas.charts === 1 ? '' : 's'} into ${atlas.width}×${atlas.height}.`;
     const extra = atlas.projected ? ` ${atlas.projected} chart${atlas.projected === 1 ? '' : 's'} were projected instead of solved.` : '';
     ed.toast(`${detail}${extra} Paint the image, or paint on the model.`);
@@ -505,6 +507,6 @@ function shortcutsBody(cmds, ed) {
 function aboutBody() {
   return h('div', { class: 'about' },
     h('p', null, 'Stratum is a layered raster image editor in the spirit of Paint.NET, built for Linux.'),
-    h('p', null, 'Model → Open Model reads OBJ, JSON, STL, FBX and GLB. STL and FBX have no UVs, so Stratum unwraps the triangles it finds. A GLB keeps the UVs it already has. Help → Check for Updates keeps the desktop app current.'),
+    h('p', null, 'Model → Open Model reads OBJ, JSON, STL, FBX and GLB. STL and FBX have no UVs, so Stratum unwraps the triangles it finds. A GLB keeps the UVs it already has, and objects that shared one texture are split apart so paint on one does not show on the others. The cube on the model snaps the view. Help → Check for Updates keeps the desktop app current.'),
     h('p', { class: 'dim' }, 'Runs on Electron; the editing core has no dependencies.'));
 }

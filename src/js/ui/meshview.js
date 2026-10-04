@@ -1,6 +1,6 @@
 // The mounted mesh. Left pane stays the texture; this pane shows it on the model.
-// Paint draws on the solid or on the flat unwrap. Pan, Zoom and Rotate move the view.
-// Alt-drag still turns it, middle-drag still slides it, and scroll still zooms.
+// Paint draws on the solid or on the flat unwrap. Scroll zooms, middle-drag
+// slides, Alt-drag turns. The corner cube snaps the view to a side.
 import { buildBVH, raycastMesh } from '../core/mesh.js';
 import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
@@ -49,13 +49,24 @@ export class MeshView {
 
     const tool = (mode, label) => h('button', { type: 'button', class: `seg-btn${mode === 'paint' ? ' on' : ''}`, 'data-mode': mode, onClick: () => this.#tool(mode) }, label);
     const shape = (id, label) => h('button', { type: 'button', class: `seg-btn${id === 'solid' ? ' on' : ''}`, 'data-shape': id, onClick: () => this.#shape(id) }, label);
-    this.hint = h('span', null, 'Paint on the model · scroll zooms');
+    const view = (id, label) => h('button', { type: 'button', class: 'vc-label', 'data-view': id, onClick: () => this.#look(id) }, label);
+    this.hint = h('span', { class: 'mesh-hint' }, 'Scroll zooms · middle-drag slides · Alt-drag turns');
     this.canvas = h('canvas', { class: 'mesh-canvas' });
-    this.hud = h('div', { class: 'mesh-hud' },
-      h('div', { class: 'seg tools' }, tool('paint', 'Paint'), tool('move', 'Move'), tool('pan', 'Pan'), tool('zoom', 'Zoom'), tool('rotate', 'Rotate')),
+    this.hud = h('div', { class: 'mesh-tools' },
+      h('div', { class: 'seg tools' }, tool('paint', 'Paint'), tool('move', 'Move')),
       h('div', { class: 'seg shape' }, shape('solid', 'Solid'), shape('flat', 'Flat')),
       this.hint);
-    pane.append(this.canvas, this.hud);
+    const face = (id, label) => h('div', { class: `vc-face ${id}`, 'data-view': id }, label);
+    this.cube = h('div', { class: 'vc-cube' },
+      face('front', 'Front'), face('back', 'Back'), face('right', 'Right'),
+      face('left', 'Left'), face('top', 'Top'), face('bottom', 'Bottom'));
+    this.cubeScene = h('div', { class: 'vc-scene', title: 'Drag to turn. Click a face to jump there.' }, this.cube);
+    this.cubeWidget = h('div', { class: 'viewcube' },
+      view('top', 'Top'),
+      h('div', { class: 'vc-mid' }, view('left', 'Left'), this.cubeScene, view('right', 'Right')),
+      view('bottom', 'Bottom'),
+      h('div', { class: 'vc-fb' }, view('front', 'Front'), view('back', 'Back')));
+    pane.append(this.canvas, this.hud, this.cubeWidget);
     this.gl = this.canvas.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: true });
     if (this.gl) {
       try { this.#initGL(); } catch (err) { console.error(err); this.gl = null; }
@@ -74,13 +85,9 @@ export class MeshView {
   #tool(mode) {
     this.mode = mode;
     for (const b of this.hud.querySelectorAll('.seg.tools .seg-btn')) b.classList.toggle('on', b.dataset.mode === mode);
-    this.hint.textContent = {
-      paint: 'Paint on the model · scroll zooms',
-      move: 'Drag the open image · scroll sizes it',
-      pan: 'Drag to slide the view',
-      zoom: 'Drag up or down to zoom · scroll zooms too',
-      rotate: 'Drag to turn the view',
-    }[mode] || '';
+    this.hint.textContent = mode === 'move'
+      ? 'Drag the open image · scroll sizes it'
+      : 'Scroll zooms · middle-drag slides · Alt-drag turns';
   }
 
   #shape(shape) {
@@ -138,6 +145,7 @@ export class MeshView {
   }
 
   #frame(mount) {
+    cancelAnimationFrame(this._lookRAF);
     const src = this.shape === 'flat' ? (this.#ensureFlat(mount), this.flatPos) : mount.positions;
     const box = bounds(src);
     this.target = [(box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, (box.min[2] + box.max[2]) / 2];
@@ -218,6 +226,7 @@ export class MeshView {
   #draw() {
     const gl = this.gl, doc = this.ed.doc, mount = doc?.mount;
     if (!gl || !mount || this.pane.hidden || !this.canvas.width) return;
+    this.#syncCube();
     if (this._texDirty) {
       this._texDirty = false;
       const atlas = atlasOf(doc) || doc;
@@ -243,6 +252,37 @@ export class MeshView {
     bind(this.loc.nrm, this.buf.nrm, 3);
     bind(this.loc.uv, this.buf.uv, 2);
     gl.drawArrays(gl.TRIANGLES, 0, this.count);
+  }
+
+  #look(name) {
+    const view = VIEWS[name];
+    if (!view || !this.ed.doc?.mount) return;
+    cancelAnimationFrame(this._lookRAF);
+    const fromY = this.yaw, fromP = this.pitch;
+    const toY = fromY + angDiff(view[0], fromY);
+    const toP = view[1];
+    const t0 = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / 220);
+      const e = t * t * (3 - 2 * t);
+      this.yaw = fromY + (toY - fromY) * e;
+      this.pitch = fromP + (toP - fromP) * e;
+      this.#syncCube();
+      this.#request();
+      if (t < 1) this._lookRAF = requestAnimationFrame(step);
+    };
+    this._lookRAF = requestAnimationFrame(step);
+  }
+
+  #syncCube() {
+    if (!this.cube) return;
+    this.cube.style.transform = `rotateX(${-this.pitch * 180 / Math.PI}deg) rotateY(${this.yaw * 180 / Math.PI}deg)`;
+    let best = null, bestD = 0.28;
+    for (const [name, [y, p]] of Object.entries(VIEWS)) {
+      const d = Math.hypot(angDiff(this.yaw, y), this.pitch - p);
+      if (d < bestD) { best = name; bestD = d; }
+    }
+    for (const b of this.cubeWidget.querySelectorAll('.vc-label')) b.classList.toggle('on', b.dataset.view === best);
   }
 
   #eye() {
@@ -304,10 +344,8 @@ export class MeshView {
     c.addEventListener('pointerdown', (e) => {
       if (!ed.doc?.mount) return;
       c.setPointerCapture(e.pointerId);
-      const nav = this.mode === 'pan' || this.mode === 'zoom' || this.mode === 'rotate';
-      if ((e.button === 0 && (nav || e.altKey)) || e.button === 1) {
-        const mode = e.altKey ? 'rotate' : e.button === 1 ? 'pan' : this.mode;
-        this.dragging = { x: e.clientX, y: e.clientY, mode };
+      if ((e.button === 0 && e.altKey) || e.button === 1) {
+        this.dragging = { x: e.clientX, y: e.clientY, mode: e.altKey ? 'rotate' : 'pan' };
         return;
       }
       if (this.mode === 'move' && e.button === 0) {
@@ -388,6 +426,37 @@ export class MeshView {
       this.dist = Math.max(this.dist, 0.02);
       this.#request();
     }, { passive: false });
+    const scene = this.cubeScene;
+    scene.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || !ed.doc?.mount) return;
+      e.preventDefault();
+      e.stopPropagation();
+      cancelAnimationFrame(this._lookRAF);
+      scene.setPointerCapture(e.pointerId);
+      this.cubeDrag = { x: e.clientX, y: e.clientY, ox: e.clientX, oy: e.clientY, moved: false, id: e.pointerId };
+    });
+    scene.addEventListener('pointermove', (e) => {
+      const d = this.cubeDrag;
+      if (!d || e.pointerId !== d.id) return;
+      if (Math.hypot(e.clientX - d.ox, e.clientY - d.oy) > 3) d.moved = true;
+      if (!d.moved) return;
+      const dx = e.clientX - d.x, dy = e.clientY - d.y;
+      d.x = e.clientX; d.y = e.clientY;
+      this.yaw += dx * 0.01;
+      this.pitch = Math.max(-1.35, Math.min(1.35, this.pitch + dy * 0.01));
+      this.#syncCube();
+      this.#request();
+    });
+    const endCube = (e) => {
+      const d = this.cubeDrag;
+      if (!d || e.pointerId !== d.id) return;
+      this.cubeDrag = null;
+      if (d.moved) return;
+      const face = e.target.closest?.('[data-view]');
+      if (face) this.#look(face.dataset.view);
+    };
+    scene.addEventListener('pointerup', endCube);
+    scene.addEventListener('pointercancel', endCube);
   }
 
   #pan(dx, dy) {
@@ -398,6 +467,22 @@ export class MeshView {
     const k = this.dist * 0.0015;
     this.target = add(this.target, add(scale(right, -dx * k), scale(up, dy * k)));
   }
+}
+
+const VIEWS = {
+  front: [0, 0],
+  back: [Math.PI, 0],
+  right: [Math.PI / 2, 0],
+  left: [-Math.PI / 2, 0],
+  top: [0, 1.2],
+  bottom: [0, -1.2],
+};
+
+function angDiff(a, b) {
+  let d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }
 
 function bounds(p) {
