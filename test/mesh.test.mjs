@@ -157,6 +157,35 @@ f 2 4 3
   assert.equal(atlas.charts, 2);
 });
 
+test('unwrap turns a chart so the top of the texture is up', () => {
+  const obj = `
+v -1 -1 0
+v 1 -1 0
+v 1 1 0
+v -1 1 0
+f 1 2 3 4
+`;
+  const atlas = unwrapMesh(parseOBJ(obj), { padding: 0, resolution: 128 });
+  let top = 0, bot = 0, nt = 0, nb = 0;
+  for (let c = 0; c < atlas.indices.length; c++) {
+    const y = atlas.positions[atlas.indices[c] * 3 + 1];
+    const v = atlas.uvs[c * 2 + 1];
+    if (y > 0.5) { top += v; nt++; }
+    else if (y < -0.5) { bot += v; nb++; }
+  }
+  assert.ok(nt && nb);
+  assert.ok(top / nt < bot / nb - 0.2, `top v ${top / nt} bottom v ${bot / nb}`);
+  let left = 0, right = 0, nl = 0, nr = 0;
+  for (let c = 0; c < atlas.indices.length; c++) {
+    const x = atlas.positions[atlas.indices[c] * 3];
+    const u = atlas.uvs[c * 2];
+    if (x > 0.5) { right += u; nr++; }
+    else if (x < -0.5) { left += u; nl++; }
+  }
+  assert.ok(nl && nr);
+  assert.ok(right / nr > left / nl + 0.2, `left u ${left / nl} right u ${right / nr}`);
+});
+
 test('demo mine unwraps and a ray hits the body', () => {
   const mesh = demoMesh();
   assert.ok(mesh.groups.some((g) => g.name === 'pull tab'));

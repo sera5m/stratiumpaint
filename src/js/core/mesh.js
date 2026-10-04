@@ -208,14 +208,17 @@ function finish(positions, indices, groups, cornerUV, name) {
 
 /**
  * Build an atlas for `mesh`.
- * opts: { angle=66, padding=4, resolution=1024, pxPerM=0, useExisting=false }
- * UVs on the result are per corner, image-space (v down).
+ * opts: { angle=66, padding=64, resolution=1024, pxPerM=0, useExisting=false }
+ * UVs on the result are per corner, image-space (v down). Charts are turned so
+ * the top of the texture is up on the model.
  */
 export function unwrapMesh(mesh, opts = {}) {
   const resolution = clamp(Math.round(+opts.resolution || 1024), 64, 4096);
-  const padding = clamp(Math.round(+opts.padding || 0), 0, 128);
+  let padding = opts.padding == null || opts.padding === '' ? 64 : +opts.padding;
+  if (!Number.isFinite(padding)) padding = 64;
+  padding = clamp(Math.round(padding), 0, 512);
   const pxPerM = Math.max(0, +opts.pxPerM || 0);
-  if (opts.useExisting && mesh.hasUV) return adoptUVs(mesh, resolution);
+  if (opts.useExisting && mesh.hasUV) return adoptUVs(mesh, resolution, padding);
 
   const angle = clamp(+opts.angle || 66, 1, 180) * Math.PI / 180;
   const { charts, seams } = segment(mesh.positions, mesh.indices, angle, mesh.groups);
@@ -263,7 +266,7 @@ export function unwrapMesh(mesh, opts = {}) {
   };
 }
 
-function adoptUVs(mesh, resolution) {
+function adoptUVs(mesh, resolution, padding) {
   const n = mesh.indices.length;
   const raw = mesh.cornerUV;
   let minU = Infinity, minV = Infinity, maxU = -Infinity, maxV = -Infinity;
@@ -284,7 +287,7 @@ function adoptUVs(mesh, resolution) {
   } else {
     uvs.set(img);
   }
-  const separated = separateObjects(uvs, mesh.groups);
+  const separated = separateObjects(uvs, mesh.groups, resolution, padding);
   return {
     mesh, positions: mesh.positions, indices: mesh.indices, groups: mesh.groups,
     uvs, wires: allWires(mesh.indices, uvs), charts: 0, seams: 0, projected: 0,
@@ -297,7 +300,7 @@ function adoptUVs(mesh, resolution) {
 // Where those squares overlap, give every object its own cell so a stroke
 // cannot land on the others. Layout inside an object is kept. Already-separate
 // UVs (and a single object) are left exactly where they are.
-function separateObjects(uvs, groups) {
+function separateObjects(uvs, groups, resolution, padding) {
   const nF = uvs.length / 6;
   const owner = faceOwner(nF, groups);
   if (!owner) return 0;
@@ -329,7 +332,8 @@ function separateObjects(uvs, groups) {
     const cellW = 1 / cols, cellH = 1 / rows;
     const du = Math.max(b.maxU - b.minU, 1e-6);
     const dv = Math.max(b.maxV - b.minV, 1e-6);
-    const s = Math.min(cellW * 0.92 / du, cellH * 0.92 / dv);
+    const sep = Math.min((padding > 0 ? padding : 0) / Math.max(resolution, 1), Math.min(cellW, cellH) * 0.45);
+    const s = Math.min((cellW - sep) / du, (cellH - sep) / dv);
     const w = du * s, h = dv * s;
     b.ox = col * cellW + (cellW - w) / 2;
     b.oy = row * cellH + (cellH - h) / 2;
@@ -438,6 +442,7 @@ function flattenChart(positions, indices, faces) {
   let projected = false;
   if (!uv) { uv = project(positions, locals, faceLocal); projected = true; }
   fitIsland(uv, faceLocal, positions, locals);
+  alignChartUp(uv, positions, locals, faceLocal);
   let minU = Infinity, minV = Infinity, maxU = -Infinity, maxV = -Infinity;
   for (let i = 0; i < locals.length; i++) {
     const u = uv[i * 2], v = uv[i * 2 + 1];
@@ -467,6 +472,60 @@ function fitIsland(uv, faceLocal, positions, locals) {
   }
   const s = Math.sqrt(a3 / a2);
   for (let i = 0; i < uv.length; i++) uv[i] *= s;
+}
+
+// Turn the chart so world-up runs toward the top of the texture. A flat floor
+// has no in-plane up, and is left as the solve produced it. Rotation keeps
+// the winding, so a letter stays a letter instead of a mirror image.
+function alignChartUp(uv, positions, locals, faceLocal) {
+  const delta = (wx, wy, wz) => {
+    let du = 0, dv = 0, wsum = 0;
+    for (const [i, j, k] of faceLocal) {
+      const pi = locals[i] * 3, pj = locals[j] * 3, pk = locals[k] * 3;
+      const e1x = positions[pj] - positions[pi];
+      const e1y = positions[pj + 1] - positions[pi + 1];
+      const e1z = positions[pj + 2] - positions[pi + 2];
+      const e2x = positions[pk] - positions[pi];
+      const e2y = positions[pk + 1] - positions[pi + 1];
+      const e2z = positions[pk + 2] - positions[pi + 2];
+      const a11 = e1x * e1x + e1y * e1y + e1z * e1z;
+      const a12 = e1x * e2x + e1y * e2y + e1z * e2z;
+      const a22 = e2x * e2x + e2y * e2y + e2z * e2z;
+      const det = a11 * a22 - a12 * a12;
+      if (Math.abs(det) < 1e-18) continue;
+      const b1 = e1x * wx + e1y * wy + e1z * wz;
+      const b2 = e2x * wx + e2y * wy + e2z * wz;
+      const a = (b1 * a22 - b2 * a12) / det;
+      const b = (b2 * a11 - b1 * a12) / det;
+      const area = Math.hypot(e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x);
+      du += (a * (uv[j * 2] - uv[i * 2]) + b * (uv[k * 2] - uv[i * 2])) * area;
+      dv += (a * (uv[j * 2 + 1] - uv[i * 2 + 1]) + b * (uv[k * 2 + 1] - uv[i * 2 + 1])) * area;
+      wsum += area;
+    }
+    return { du, dv, wsum };
+  };
+  const up = delta(0, 1, 0);
+  const len = Math.hypot(up.du, up.dv);
+  if (!(len > 1e-8) || !(up.wsum > 0)) return;
+  const ux = up.du / len, uy = up.dv / len;
+  const cos = -uy, sin = -ux;
+  for (let i = 0; i < uv.length; i += 2) {
+    const u = uv[i], v = uv[i + 1];
+    uv[i] = cos * u - sin * v;
+    uv[i + 1] = sin * u + cos * v;
+  }
+  let nx = 0, ny = 0, nz = 0;
+  for (const [i, j, k] of faceLocal) {
+    const n = faceNormal(positions, locals[i], locals[j], locals[k]);
+    const area = triArea3(positions, locals[i], locals[j], locals[k]);
+    nx += n[0] * area; ny += n[1] * area; nz += n[2] * area;
+  }
+  // Right-hand side when looking at the outside of the face. If the texture
+  // runs the other way, mirror it so a letter is not backwards.
+  const right = delta(nz, 0, -nx);
+  if (right.du < 0) {
+    for (let i = 0; i < uv.length; i += 2) uv[i] = -uv[i];
+  }
 }
 
 function triArea3(p, a, b, c) {

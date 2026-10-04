@@ -22,7 +22,9 @@ Primary and secondary are the starting ends.
 Model → Unwrap Demo, Model → Open Model, or dropping an `.obj` lays the
 surface out as one texture and mounts it beside the canvas. Charts stay
 joined while the bend between faces is under the angle you set; sharper
-edges become seams. Each chart is flattened and packed. If the file is in
+edges become seams. Each chart is turned so the top of the texture is up
+on the model, which keeps text upright. Areas and objects are separated by
+64 pixels unless you change that. If the file is in
 metres, pixels-per-metre sets the texel density (0 just fits the atlas).
 JSON `{ "positions": [...], "indices": [...] }` works too, with optional
 `uvs` (one pair per corner, v = 0 at the bottom). STL and FBX (ASCII or

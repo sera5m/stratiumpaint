@@ -311,7 +311,7 @@ export function createCommands({ ed, view }) {
 
   async function openMeshBytes(name, bytes, { ask = true } = {}) {
     const mesh = await parseMeshBytes(name, bytes);
-    const opts = ask ? await dlg.unwrapDialog({ hasUV: mesh.hasUV }) : { angle: 66, padding: 4, resolution: 1024, pxPerM: 0, useExisting: false };
+    const opts = ask ? await dlg.unwrapDialog({ hasUV: mesh.hasUV }) : { angle: 66, padding: 64, resolution: 1024, pxPerM: 0, useExisting: false };
     if (!opts) return;
     mountAtlas(unwrapMesh(mesh, opts), stripExt(name));
   }

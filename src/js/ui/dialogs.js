@@ -194,10 +194,10 @@ export function effectDialog(ed, spec) {
 // ---------------------------------------------------------------------- image dialogs
 
 export function unwrapDialog({ hasUV }) {
-  const values = { angle: 66, padding: 4, resolution: '1024', pxPerM: 0, useExisting: !!hasUV };
+  const values = { angle: 66, padding: 64, resolution: '1024', pxPerM: 0, useExisting: !!hasUV };
   const fields = [
     { id: 'angle', label: 'Cut where the surface bends more than (°)', type: 'number', min: 1, max: 180 },
-    { id: 'padding', label: 'Padding between islands (px)', type: 'number', min: 0, max: 64 },
+    { id: 'padding', label: 'Pixel separation between areas or objects', type: 'number', min: 0, max: 512 },
     { id: 'resolution', label: 'Longest side', type: 'select', options: [['512', '512'], ['1024', '1024'], ['2048', '2048'], ['4096', '4096']] },
     { id: 'pxPerM', label: 'Pixels per metre (0 fits the atlas)', type: 'number', min: 0, max: 8192, step: 1 },
   ];
@@ -206,7 +206,7 @@ export function unwrapDialog({ hasUV }) {
     title: 'Unwrap model', okLabel: 'Unwrap', width: 460, fields, values,
     validate(v) {
       if (!(+v.angle >= 1 && +v.angle <= 180)) return 'Angle must be between 1 and 180.';
-      if (!(+v.padding >= 0 && +v.padding <= 64)) return 'Padding must be between 0 and 64.';
+      if (!(+v.padding >= 0 && +v.padding <= 512)) return 'Separation must be between 0 and 512 pixels.';
       if (!(+v.pxPerM >= 0 && +v.pxPerM <= 8192)) return 'Pixels per metre must be between 0 and 8192.';
       return null;
     },
