@@ -25,7 +25,11 @@ export function createCommands({ ed, view }) {
   const add = (id, label, run, extra = {}) => cmds.set(id, { id, label, run, enabled: extra.enabled ?? has, ...extra });
 
   const guard = (fn) => async (...a) => {
-    try { return await fn(...a); } catch (err) { console.error(err); ed.toast(err.message || String(err)); }
+    try { return await fn(...a); } catch (err) {
+      console.error(err);
+      const msg = String(err?.message || err).replace(/^Error invoking remote method '[^']+':\s*/i, '').replace(/^Error:\s*/, '');
+      ed.toast(msg);
+    }
   };
 
   // ------------------------------------------------------------------ files
@@ -460,7 +464,7 @@ export function createCommands({ ed, view }) {
       : `${info.behind} new commit${info.behind === 1 ? '' : 's'}.${info.note ? ` Latest: ${info.note}.` : ''}`;
     const r = await dlg.confirmDialog({
       title: 'Update Stratum',
-      message: `${newer} Download it, rebuild, and restart?`,
+      message: `${newer} It will be installed in your home folder if this copy cannot write to its own folder, then Stratum restarts.`,
       buttons: [{ label: 'Update', primary: true }, { label: 'Not now', cancel: true }],
     });
     if (r !== 0) return;

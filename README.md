@@ -33,8 +33,11 @@ skipped. GLB (and a glTF that does not point at a separate file) is read
 the same way: parts stay where the scene put them, and existing UVs can be
 kept. A Draco or meshopt GLB has to be exported as a plain GLB first.
 Paint the flat image or
-the model — both write the active layer. Right-drag is still the secondary
-colour. Alt+drag, or Orbit, tumbles the view. Split / texture only / model
+the model — both write the active layer. On the model, Pan, Zoom and Rotate
+move the view (scroll still zooms, and the middle button still slides it).
+Solid shows the shape. Flat lays the same triangles out as the unwrap.
+Right-drag is still the secondary
+colour. Alt+drag still turns the view. Split / texture only / model
 only is in the Model menu. The mount lasts for the session; the texture
 saves like any other image. Unwrap Again opens a fresh atlas so the current
 painting is not thrown away.
@@ -79,10 +82,10 @@ electron .
 ```
 
 On the desktop app, Help → Check for Updates looks for a newer version a
-moment after launch as well. A git checkout is fast-forwarded. Any other
-writable copy downloads the latest source, rebuilds, and restarts. A
-read-only install (for example under `/usr`) has to be updated the same way
-it was installed. A copy that is not the desktop app just needs a refresh.
+moment after launch as well. A git checkout is fast-forwarded. A copy
+installed somewhere it cannot write, such as `/usr/lib/stratum`, is updated
+into the home folder (`~/.local/share/stratum/app`) and the app menu opens
+that copy afterwards. A browser tab just needs a refresh.
 
 ## Building
 

@@ -215,6 +215,35 @@ test('History: push / undo / redo / jump / limits', () => {
   assert.equal(h.entries()[0].name, 'b');
 });
 
+test('History keeps a side branch after an edit replaces it', () => {
+  const h = new History();
+  let v = 0;
+  const cmd = (name, d) => { v += d; return { name, undo: () => (v -= d), redo: () => (v += d) }; };
+  h.push(cmd('paint', 1));
+  h.push(cmd('erase', 10));
+  h.undo();
+  h.push(cmd('fill', 100));
+  const names = [];
+  const walk = (n) => { if (n.name !== 'Initial state') names.push(n.name); for (const c of n.children) walk(c); };
+  walk(h.tree());
+  assert.deepEqual(names, ['paint', 'erase', 'fill']);
+  assert.equal(v, 101);
+  const erase = find(h.tree(), 'erase');
+  h.goTo(erase.id);
+  assert.equal(v, 11);
+  h.goTo(find(h.tree(), 'fill').id);
+  assert.equal(v, 101);
+});
+
+function find(node, name) {
+  if (node.name === name) return node;
+  for (const child of node.children) {
+    const hit = find(child, name);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 test('zip round-trip (stored) and crc32', async () => {
   assert.equal(crc32(new TextEncoder().encode('123456789')), 0xcbf43926);
   const files = [{ name: 'a.txt', data: new TextEncoder().encode('hello') }, { name: 'dir/b.bin', data: Uint8Array.from([1, 2, 3, 250]) }];

@@ -1,6 +1,6 @@
 // The mounted mesh. Left pane stays the texture; this pane shows it on the model.
-// Left-drag paints the active layer (a brush dab lands on the UV under the cursor).
-// Alt-drag or Orbit mode tumbles the view. Scroll zooms. Middle-drag pans.
+// Paint draws on the solid or on the flat unwrap. Pan, Zoom and Rotate move the view.
+// Alt-drag still turns it, middle-drag still slides it, and scroll still zooms.
 import { buildBVH, raycastMesh } from '../core/mesh.js';
 import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
@@ -36,22 +36,25 @@ export class MeshView {
     this.ed = ed;
     this.pane = pane;
     this.mode = 'paint';
+    this.shape = 'solid';
     this.yaw = 0.6;
     this.pitch = 0.4;
     this.dist = 1;
     this.target = [0, 0, 0];
+    this.cam = { solid: null, flat: null };
     this.dragging = null;
     this.painting = false;
     this._texDirty = true;
     this._geomKey = null;
 
+    const tool = (mode, label) => h('button', { type: 'button', class: `seg-btn${mode === 'paint' ? ' on' : ''}`, 'data-mode': mode, onClick: () => this.#tool(mode) }, label);
+    const shape = (id, label) => h('button', { type: 'button', class: `seg-btn${id === 'solid' ? ' on' : ''}`, 'data-shape': id, onClick: () => this.#shape(id) }, label);
+    this.hint = h('span', null, 'Paint on the model · scroll zooms');
     this.canvas = h('canvas', { class: 'mesh-canvas' });
     this.hud = h('div', { class: 'mesh-hud' },
-      h('div', { class: 'seg' },
-        h('button', { type: 'button', class: 'seg-btn on', onClick: () => this.#mode('paint') }, 'Paint'),
-        h('button', { type: 'button', class: 'seg-btn', onClick: () => this.#mode('move') }, 'Move'),
-        h('button', { type: 'button', class: 'seg-btn', onClick: () => this.#mode('orbit') }, 'Orbit')),
-      h('span', null, 'Move drags the open image · scroll sizes it · Paint stays on the object'));
+      h('div', { class: 'seg tools' }, tool('paint', 'Paint'), tool('move', 'Move'), tool('pan', 'Pan'), tool('zoom', 'Zoom'), tool('rotate', 'Rotate')),
+      h('div', { class: 'seg shape' }, shape('solid', 'Solid'), shape('flat', 'Flat')),
+      this.hint);
     pane.append(this.canvas, this.hud);
     this.gl = this.canvas.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: true });
     if (this.gl) {
@@ -68,9 +71,32 @@ export class MeshView {
     this.#attach();
   }
 
-  #mode(mode) {
+  #tool(mode) {
     this.mode = mode;
-    for (const b of this.hud.querySelectorAll('.seg-btn')) b.classList.toggle('on', b.textContent.toLowerCase() === mode);
+    for (const b of this.hud.querySelectorAll('.seg.tools .seg-btn')) b.classList.toggle('on', b.dataset.mode === mode);
+    this.hint.textContent = {
+      paint: 'Paint on the model · scroll zooms',
+      move: 'Drag the open image · scroll sizes it',
+      pan: 'Drag to slide the view',
+      zoom: 'Drag up or down to zoom · scroll zooms too',
+      rotate: 'Drag to turn the view',
+    }[mode] || '';
+  }
+
+  #shape(shape) {
+    if (shape === this.shape) return;
+    this.cam[this.shape] = { yaw: this.yaw, pitch: this.pitch, dist: this.dist, target: this.target.slice() };
+    this.shape = shape;
+    for (const b of this.hud.querySelectorAll('.seg.shape .seg-btn')) b.classList.toggle('on', b.dataset.shape === shape);
+    const mount = this.ed.doc?.mount;
+    if (!mount) return;
+    if (shape === 'flat') this.#ensureFlat(mount);
+    this.#uploadGeom(mount);
+    const saved = this.cam[shape];
+    if (saved) {
+      this.yaw = saved.yaw; this.pitch = saved.pitch; this.dist = saved.dist; this.target = saved.target.slice();
+    } else this.#frame(mount);
+    this.#request();
   }
 
   #initGL() {
@@ -101,17 +127,42 @@ export class MeshView {
     const key = mount;
     if (key !== this._geomKey) {
       this._geomKey = key;
-      this.#uploadGeom(mount);
+      this.flatBvh = null;
+      this.cam = { solid: null, flat: null };
       this.bvh = buildBVH(mount.positions, mount.indices);
-      const box = bounds(mount.positions);
-      this.target = [(box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, (box.min[2] + box.max[2]) / 2];
-      const r = Math.hypot(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]) || 1;
-      this.dist = r * 1.4;
-      this.yaw = 0.7;
-      this.pitch = 0.35;
-    }
+      this.#frame(mount);
+      this.#uploadGeom(mount);
+    } else if (this.shape === 'flat') this.#ensureFlat(mount);
     this._texDirty = true;
     this.#resize();
+  }
+
+  #frame(mount) {
+    const src = this.shape === 'flat' ? (this.#ensureFlat(mount), this.flatPos) : mount.positions;
+    const box = bounds(src);
+    this.target = [(box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, (box.min[2] + box.max[2]) / 2];
+    const r = Math.hypot(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]) || 1;
+    this.dist = r * (this.shape === 'flat' ? 1.15 : 1.4);
+    if (this.shape === 'flat') { this.yaw = 0; this.pitch = 1.2; }
+    else { this.yaw = 0.7; this.pitch = 0.35; }
+  }
+
+  #ensureFlat(mount) {
+    if (this.flatBvh && this._flatKey === mount) return this.flatPos;
+    const n = mount.indices.length;
+    const pos = new Float32Array(n * 3);
+    const idx = new Uint32Array(n);
+    const span = 2;
+    for (let i = 0; i < n; i++) {
+      pos[i * 3] = ((mount.uvs[i * 2] ?? 0) - 0.5) * span;
+      pos[i * 3 + 1] = 0;
+      pos[i * 3 + 2] = ((mount.uvs[i * 2 + 1] ?? 0) - 0.5) * span;
+      idx[i] = i;
+    }
+    this.flatPos = pos;
+    this.flatBvh = buildBVH(pos, idx);
+    this._flatKey = mount;
+    return pos;
   }
 
   #uploadGeom(mount) {
@@ -121,14 +172,21 @@ export class MeshView {
     const pos = new Float32Array(n * 9);
     const nrm = new Float32Array(n * 9);
     const uv = new Float32Array(n * 6);
+    const flat = this.shape === 'flat';
     for (let t = 0; t < n; t++) {
       const ia = indices[t * 3], ib = indices[t * 3 + 1], ic = indices[t * 3 + 2];
-      const p = [ia, ib, ic].map((i) => [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]]);
+      const p = flat
+        ? [0, 1, 2].map((k) => {
+          const c = t * 3 + k;
+          return [((uvs[c * 2] ?? 0) - 0.5) * 2, 0, ((uvs[c * 2 + 1] ?? 0) - 0.5) * 2];
+        })
+        : [ia, ib, ic].map((i) => [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]]);
       const e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
       const e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
       let nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2], nz = e1[0] * e2[1] - e1[1] * e2[0];
       const len = Math.hypot(nx, ny, nz) || 1;
       nx /= len; ny /= len; nz /= len;
+      if (flat) { nx = 0; ny = 1; nz = 0; }
       for (let k = 0; k < 3; k++) {
         pos[(t * 3 + k) * 3] = p[k][0]; pos[(t * 3 + k) * 3 + 1] = p[k][1]; pos[(t * 3 + k) * 3 + 2] = p[k][2];
         nrm[(t * 3 + k) * 3] = nx; nrm[(t * 3 + k) * 3 + 1] = ny; nrm[(t * 3 + k) * 3 + 2] = nz;
@@ -214,8 +272,10 @@ export class MeshView {
   /** UV under the cursor, v down, or null. */
   #hitUV(e) {
     if (!this.bvh || !this.ed.doc?.mount) return null;
+    const bvh = this.shape === 'flat' ? this.flatBvh : this.bvh;
+    if (!bvh) return null;
     const { origin, dir } = this.#ray(e);
-    const hit = raycastMesh(this.bvh, origin, dir);
+    const hit = raycastMesh(bvh, origin, dir);
     if (!hit) return null;
     const mount = this.ed.doc.mount;
     const i = hit.tri * 3;
@@ -244,9 +304,10 @@ export class MeshView {
     c.addEventListener('pointerdown', (e) => {
       if (!ed.doc?.mount) return;
       c.setPointerCapture(e.pointerId);
-      const orbit = e.button === 1 || e.altKey || (e.button === 0 && this.mode === 'orbit');
-      if (orbit && e.button !== 2) {
-        this.dragging = { x: e.clientX, y: e.clientY, button: e.button, alt: e.altKey };
+      const nav = this.mode === 'pan' || this.mode === 'zoom' || this.mode === 'rotate';
+      if ((e.button === 0 && (nav || e.altKey)) || e.button === 1) {
+        const mode = e.altKey ? 'rotate' : e.button === 1 ? 'pan' : this.mode;
+        this.dragging = { x: e.clientX, y: e.clientY, mode };
         return;
       }
       if (this.mode === 'move' && e.button === 0) {
@@ -276,7 +337,8 @@ export class MeshView {
       if (this.dragging) {
         const dx = e.clientX - this.dragging.x, dy = e.clientY - this.dragging.y;
         this.dragging.x = e.clientX; this.dragging.y = e.clientY;
-        if (this.dragging.button === 1) this.#pan(dx, dy);
+        if (this.dragging.mode === 'pan') this.#pan(dx, dy);
+        else if (this.dragging.mode === 'zoom') this.dist = Math.max(0.02, this.dist * Math.pow(1.008, dy));
         else { this.yaw += dx * 0.01; this.pitch = Math.max(-1.35, Math.min(1.35, this.pitch + dy * 0.01)); }
         this.#request();
         return;

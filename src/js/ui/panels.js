@@ -219,10 +219,14 @@ export function buildLayersPanel(root, ed, cmds) {
 // ---------------------------------------------------------------------- history
 
 export function buildHistoryPanel(root, ed) {
-  const list = h('div', { class: 'history-list', role: 'listbox', 'aria-label': 'History' });
+  const list = h('div', { class: 'history-list', role: 'tree', 'aria-label': 'History' });
   const undo = h('button', { class: 'icon-btn', type: 'button', title: 'Undo', 'aria-label': 'Undo', onClick: () => ed.doc?.undo() }, icon('undo', 16));
   const redo = h('button', { class: 'icon-btn', type: 'button', title: 'Redo', 'aria-label': 'Redo', onClick: () => ed.doc?.redo() }, icon('redo', 16));
-  root.append(h('h3', null, 'History'), list, h('div', { class: 'panel-buttons' }, undo, redo));
+  root.append(
+    h('h3', { title: 'Every edit, including ones you undid and replaced' }, 'History'),
+    list,
+    h('div', { class: 'panel-buttons' }, undo, redo),
+  );
 
   const render = () => {
     clear(list);
@@ -230,13 +234,19 @@ export function buildHistoryPanel(root, ed) {
     undo.disabled = !doc?.history.canUndo;
     redo.disabled = !doc?.history.canRedo;
     if (!doc) return;
-    const cur = doc.history.index;
-    const row = (label, i, applied) => h('div', {
-      class: `history-row${i === cur ? ' current' : ''}${applied ? '' : ' undone'}`, role: 'option', 'aria-selected': String(i === cur),
-      onClick: () => doc.history.jumpTo(i),
-    }, label);
-    list.append(row('Initial state', -1, true));
-    doc.history.entries().forEach((e, i) => list.append(row(e.name, i, e.applied)));
+    const flat = [];
+    const walk = (node) => { flat.push(node); for (const child of node.children) walk(child); };
+    walk(doc.history.tree());
+    for (const node of flat) {
+      list.append(h('div', {
+        class: `history-row${node.current ? ' current' : ''}${node.future ? ' undone' : ''}${node.side ? ' side' : ''}`,
+        role: 'treeitem',
+        'aria-selected': String(node.current),
+        style: { paddingLeft: `${8 + node.depth * 14}px` },
+        title: node.side ? 'Another branch of edits' : node.name,
+        onClick: () => doc.history.goTo(node.id),
+      }, node.depth ? node.name : node.name));
+    }
     list.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
   };
   ed.on('doc', render);

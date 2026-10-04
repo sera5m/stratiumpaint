@@ -13,6 +13,38 @@ const INDEX = path.join(ROOT, 'dist', 'index.html');
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.jpe', '.webp', '.gif', '.bmp', '.avif', '.ora', '.2dlayered', '.3dlayered']);
 const SAVE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.ora']);
 
+function userAppDir() {
+  const base = process.env.XDG_DATA_HOME || path.join(app.getPath('home'), '.local', 'share');
+  return path.join(base, 'stratum', 'app');
+}
+
+function versionOf(dir) {
+  try { return require(path.join(dir, 'package.json')).version; } catch { return '0'; }
+}
+
+function cmpVer(a, b) {
+  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  return 0;
+}
+
+// A packaged copy lives in /usr and cannot write there. A newer copy in the
+// home folder (from Check for Updates) is the one that should open.
+function newerUserCopy() {
+  const dest = userAppDir();
+  if (path.resolve(dest) === path.resolve(ROOT)) return null;
+  if (!fs.existsSync(path.join(dest, 'dist', 'index.html'))) return null;
+  return cmpVer(versionOf(dest), versionOf(ROOT)) > 0 ? dest : null;
+}
+
+const userCopy = newerUserCopy();
+if (userCopy) {
+  spawn(process.execPath, [userCopy], { detached: true, stdio: 'ignore' }).unref();
+  app.exit(0);
+  return;
+}
+
 app.setName('stratum');
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto'); // native Wayland when available
 
@@ -241,9 +273,9 @@ ipcMain.handle('clipboard:write-image', (_e, bytes) => clipboardWritePng(bytes))
 ipcMain.handle('clipboard:read-image', () => clipboardReadPng());
 
 ipcMain.handle('app:initial-files', async () => readFiles(pending.splice(0)));
-function runCmd(cmd, args) {
+function runCmd(cmd, args, cwd = ROOT) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: ROOT });
+    const child = spawn(cmd, args, { cwd });
     let out = '';
     let err = '';
     child.stdout?.on('data', (d) => { out += d; });
@@ -279,20 +311,26 @@ function fetchBuf(url, redirects = 0) {
   });
 }
 
-function cmpVer(a, b) {
-  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
-  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
-  return 0;
-}
-
 async function githubVersion() {
   const buf = await fetchBuf('https://raw.githubusercontent.com/sera5m/stratiumpaint/master/package.json');
   return String(JSON.parse(buf.toString('utf8')).version || '');
 }
 
-async function downloadUpdate() {
-  await fs.promises.access(path.join(ROOT, 'package.json'), fs.constants.W_OK);
+async function canWrite(dir) {
+  try { await fs.promises.access(dir, fs.constants.W_OK); return true; }
+  catch { return false; }
+}
+
+/** Where an update is allowed to land. A /usr install is redirected to the home folder. */
+async function updateDest() {
+  if (await canWrite(ROOT)) return ROOT;
+  const dest = userAppDir();
+  await fs.promises.mkdir(dest, { recursive: true });
+  if (!(await canWrite(dest))) throw new Error('Stratum could not find a folder it is allowed to write the update into.');
+  return dest;
+}
+
+async function downloadUpdate(dest) {
   const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'stratum-upd-'));
   try {
     const tarPath = path.join(tmp, 'src.tar.gz');
@@ -300,18 +338,68 @@ async function downloadUpdate() {
     await runCmd('tar', ['-xzf', tarPath, '-C', tmp]);
     const top = (await fs.promises.readdir(tmp)).find((n) => n.startsWith('stratiumpaint'));
     if (!top) throw new Error('The download did not contain Stratum.');
-    const srcRoot = path.join(tmp, top);
-    for (const dir of ['src', 'electron', 'scripts', 'packaging', 'assets', 'test']) {
-      const from = path.join(srcRoot, dir);
-      try { await fs.promises.access(from); } catch { continue; }
-      await fs.promises.cp(from, path.join(ROOT, dir), { recursive: true, force: true });
-    }
-    for (const file of ['package.json', 'README.md', 'LICENSE']) {
-      try { await fs.promises.copyFile(path.join(srcRoot, file), path.join(ROOT, file)); } catch { /* optional */ }
-    }
+    await fs.promises.cp(path.join(tmp, top), dest, {
+      recursive: true,
+      force: true,
+      filter: (src) => {
+        const base = path.basename(src);
+        return base !== '.git' && base !== 'node_modules';
+      },
+    });
   } finally {
     await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+async function buildAt(dir) {
+  try {
+    await runCmd('npm', ['run', 'build'], dir);
+  } catch (err) {
+    try {
+      await runCmd('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], dir);
+      await runCmd('npm', ['run', 'build'], dir);
+    } catch {
+      throw new Error(`The update downloaded, but it did not build. ${String(err.message || err).slice(0, 300)}`);
+    }
+  }
+}
+
+function quoteDesktop(s) {
+  return /[\s"]/.test(s) ? `"${String(s).replace(/"/g, '\\"')}"` : String(s);
+}
+
+/** Point the app menu and ~/.local/bin/stratum at the home copy. */
+function writeUserLauncher(dir) {
+  const home = app.getPath('home');
+  const desktopDir = path.join(home, '.local', 'share', 'applications');
+  const binDir = path.join(home, '.local', 'bin');
+  fs.mkdirSync(desktopDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  const exec = `${quoteDesktop(process.execPath)} ${quoteDesktop(dir)} %F`;
+  fs.writeFileSync(path.join(desktopDir, 'stratum.desktop'), `[Desktop Entry]
+Type=Application
+Name=Stratum
+GenericName=Image Editor
+Comment=Layered raster image editor
+Exec=${exec}
+Icon=stratum
+Terminal=false
+Categories=Graphics;RasterGraphics;2DGraphics;
+StartupWMClass=stratum
+`);
+  fs.writeFileSync(path.join(binDir, 'stratum'), `#!/bin/sh\nexec ${quoteDesktop(process.execPath)} ${quoteDesktop(dir)} "$@"\n`, { mode: 0o755 });
+}
+
+function relaunchAt(dir) {
+  forceClose = true;
+  app.releaseSingleInstanceLock();
+  if (path.resolve(dir) === path.resolve(ROOT)) {
+    app.relaunch();
+  } else {
+    writeUserLauncher(dir);
+    spawn(process.execPath, [dir], { detached: true, stdio: 'ignore' }).unref();
+  }
+  app.quit();
 }
 
 ipcMain.handle('app:check-update', async () => {
@@ -343,20 +431,19 @@ ipcMain.handle('app:check-update', async () => {
 });
 
 ipcMain.handle('app:apply-update', async (_e, mode) => {
-  if (mode === 'download') {
-    await downloadUpdate();
-  } else {
+  const dest = await updateDest();
+  if (mode !== 'download' && dest === ROOT) {
     try {
       await runCmd('git', ['pull', '--ff-only']);
     } catch (err) {
-      if (/not a git repository/i.test(String(err.message))) await downloadUpdate();
+      if (/not a git repository/i.test(String(err.message))) await downloadUpdate(dest);
       else throw new Error(`${err.message} Local changes were left as they are.`);
     }
+  } else {
+    await downloadUpdate(dest);
   }
-  await runCmd('npm', ['run', 'build']);
-  forceClose = true;
-  app.relaunch();
-  app.quit();
+  await buildAt(dest);
+  relaunchAt(dest);
 });
 
 ipcMain.handle('app:confirm-close', () => { forceClose = true; win?.close(); });
