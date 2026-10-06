@@ -14,6 +14,11 @@ import { extractCommands, ollamaEndpoint, repairPrompt, runCommands, taskPrompt,
 import { ollamaGenerate } from './platform.js';
 import { h } from './dom.js';
 
+function uiAccent() {
+  if (typeof document === 'undefined') return '#4c9dff';
+  return getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#4c9dff';
+}
+
 const TAGS = ['', '#6aa2ff', '#7dba5a', '#e2a24a', '#e06a6a', '#d46ad4', '#8a84e0'];
 
 export class NodeView {
@@ -62,6 +67,7 @@ export class NodeView {
     ed.on('nodes', () => this.schedule());
     ed.on('script-in', (info) => this.#scriptPulse(info));
     ed.on('surface', () => { if (ed.surfaceMode === 'nodes') this.show(); });
+    window.addEventListener('stratum-accent', () => this.draw());
   }
 
   show() {
@@ -1036,7 +1042,7 @@ export class NodeView {
       const node = scope.nodes.find((n) => n.id === d.node);
       if (node) {
         const p = socketXY(node, d.dir, d.sock);
-        this.#wire(ctx, d.dir === 'out' ? p.x : d.x, d.dir === 'out' ? p.y : d.y, d.dir === 'out' ? d.x : p.x, d.dir === 'out' ? d.y : p.y, '#9ec1ff');
+        this.#wire(ctx, d.dir === 'out' ? p.x : d.x, d.dir === 'out' ? p.y : d.y, d.dir === 'out' ? d.x : p.x, d.dir === 'out' ? d.y : p.y, uiAccent());
       }
     }
     if (d?.kind === 'cut') {
@@ -1044,9 +1050,13 @@ export class NodeView {
       ctx.beginPath(); ctx.moveTo(d.x0, d.y0); ctx.lineTo(d.x1, d.y1); ctx.stroke(); ctx.setLineDash([]);
     }
     if (d?.kind === 'box') {
-      ctx.strokeStyle = '#4c9dff'; ctx.fillStyle = 'rgba(76,157,255,.12)'; ctx.lineWidth = 1;
+      const accent = uiAccent();
+      ctx.strokeStyle = accent; ctx.fillStyle = accent; ctx.lineWidth = 1;
       const x = Math.min(d.x0, d.x1), y = Math.min(d.y0, d.y1);
+      ctx.save();
+      ctx.globalAlpha = 0.12;
       ctx.fillRect(x, y, Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
+      ctx.restore();
       ctx.strokeRect(x, y, Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
     }
     ctx.restore();
@@ -1086,7 +1096,7 @@ export class NodeView {
     const b = nodeBox(n);
     const on = g.selected.includes(n.id);
     ctx.fillStyle = 'rgba(255,255,255,.03)';
-    ctx.strokeStyle = n.color || (on ? '#4c9dff' : '#3c424c');
+    ctx.strokeStyle = n.color || (on ? uiAccent() : '#3c424c');
     ctx.lineWidth = on ? 2 : 1;
     roundRect(ctx, n.x, n.y, b.w, b.h, 8);
     ctx.fill(); ctx.stroke();
@@ -1102,7 +1112,7 @@ export class NodeView {
       ctx.arc(n.x + 8, n.y + 8, 7, 0, Math.PI * 2);
       ctx.fillStyle = n.color || '#9aa3b2';
       ctx.fill();
-      if (on) { ctx.strokeStyle = '#4c9dff'; ctx.lineWidth = 2; ctx.stroke(); }
+      if (on) { ctx.strokeStyle = uiAccent(); ctx.lineWidth = 2; ctx.stroke(); }
       return;
     }
     const b = nodeBox(n);
@@ -1111,7 +1121,7 @@ export class NodeView {
     const head = rgb ? null : (n.color || categoryColor(spec?.category));
     const on = g.selected.includes(n.id);
     ctx.fillStyle = '#23262d';
-    ctx.strokeStyle = this.errors.some((e) => e.id === n.id) ? '#ff6b6b' : (on ? '#4c9dff' : '#3a404a');
+    ctx.strokeStyle = this.errors.some((e) => e.id === n.id) ? '#ff6b6b' : (on ? uiAccent() : '#3a404a');
     ctx.lineWidth = on ? 2 : 1;
     roundRect(ctx, n.x, n.y, b.w, b.h, 7);
     ctx.fill(); ctx.stroke();

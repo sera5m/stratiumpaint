@@ -1,7 +1,7 @@
 # Local PKGBUILD: builds from this checkout, no tarball needed.
 #   cd packaging/arch && makepkg -si
 pkgname=stratum
-pkgver=2.12.1
+pkgver=2.12.2
 pkgrel=1
 pkgdesc='Layered raster image editor in the spirit of Paint.NET'
 arch=('any')

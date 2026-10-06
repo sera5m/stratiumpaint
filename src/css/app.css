@@ -8,7 +8,9 @@
   --text: #dde0e6;
   --dim: #8a909c;
   --accent: #4c9dff;
+  --accent: AccentColor;
   --accent-dim: #2b5f9e;
+  --accent-dim: color-mix(in srgb, var(--accent) 62%, black);
   --danger: #ff6b6b;
   --radius: 6px;
   font: 13px/1.4 "Inter", "Cantarell", "Noto Sans", "DejaVu Sans", system-ui, sans-serif;
@@ -17,6 +19,7 @@
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: #3b414b transparent; }
 html, body { height: 100%; margin: 0; background: var(--bg-1); color: var(--text); overflow: hidden; }
 button, input, select, textarea { font: inherit; color: inherit; }
+input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color: var(--accent); }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .4; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -109,7 +112,7 @@ h3 { margin: 0; padding: 8px 10px 6px; font-size: 11px; font-weight: 600; letter
 .nodes-agent-src { color: var(--dim); }
 .nodes-agent-bar { height: 3px; margin-top: 6px; background: #2a2e36; border-radius: 2px; overflow: hidden; }
 .nodes-agent-bar[hidden] { display: none; }
-.nodes-agent-bar i { display: block; height: 100%; width: 35%; background: #6aa2ff; animation: nodes-agent-run 0.9s ease-in-out infinite; }
+.nodes-agent-bar i { display: block; height: 100%; width: 35%; background: var(--accent); animation: nodes-agent-run 0.9s ease-in-out infinite; }
 @keyframes nodes-agent-run { from { transform: translateX(-120%); } to { transform: translateX(320%); } }
 .node-color-body { position: absolute; z-index: 3; display: flex; flex-direction: column; gap: 3px; transform-origin: 0 0; background: rgba(20, 22, 27, .92); padding: 2px; border-radius: 4px; }
 .node-color-body[hidden] { display: none !important; }

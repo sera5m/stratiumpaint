@@ -7,6 +7,18 @@ const native = typeof window !== 'undefined' ? window.stratumNative ?? null : nu
 
 export const isNative = !!native;
 
+/** Follow the desktop accent. A browser tab uses the CSS AccentColor instead. */
+export function watchAccent() {
+  if (!native?.accentColor) return;
+  const apply = (hex) => {
+    if (typeof hex !== 'string' || !/^#[0-9a-f]{6}$/i.test(hex)) return;
+    document.documentElement.style.setProperty('--accent', hex);
+    window.dispatchEvent(new Event('stratum-accent'));
+  };
+  native.accentColor().then(apply).catch(() => {});
+  native.onAccentColor?.(apply);
+}
+
 export function onScriptExec(cb) { native?.onScriptExec?.(cb); }
 export function scriptResult(id, result) { native?.scriptResult?.(id, result); }
 export function scriptReady() { native?.scriptReady?.(); }

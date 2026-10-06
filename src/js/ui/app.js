@@ -31,6 +31,7 @@ function comboOf(e) {
 }
 
 export function start() {
+  platform.watchAccent();
   const ed = new Editor();
   const stage = $('#pane-2d');
   const view = new View(ed, stage);

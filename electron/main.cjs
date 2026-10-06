@@ -1,13 +1,15 @@
 'use strict';
 // Electron shell: one window, native file dialogs, system clipboard, single instance.
 // All editing happens in the renderer (dist/); this file only touches the OS.
-const { app, BrowserWindow, Menu, ipcMain, dialog, clipboard, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, clipboard, nativeImage, shell, systemPreferences } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const https = require('node:https');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+
+const { readDesktopAccent } = require('./accent.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const INDEX = path.join(ROOT, 'dist', 'index.html');
@@ -629,9 +631,55 @@ function pipeStdin() {
 }
 
 app.on('will-quit', () => {
+  try { accentMonitor?.kill(); } catch { /* already gone */ }
   if (!ownsScriptPort) return;
   try { fs.unlinkSync(scriptPortFile()); } catch { /* already gone */ }
 });
+
+let accentNow = '';
+let accentRead = Promise.resolve('');
+let accentMonitor = null;
+
+function publishAccent(color) {
+  accentNow = color || '';
+  if (!accentNow) return;
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send('app:accent', accentNow);
+  }
+}
+
+function refreshAccent() {
+  accentRead = readDesktopAccent(systemPreferences).then((color) => {
+    const next = color || '';
+    if (next !== accentNow) publishAccent(next);
+    return accentNow;
+  }).catch(() => accentNow);
+  return accentRead;
+}
+
+ipcMain.handle('app:accent', () => accentRead);
+
+function watchAccent() {
+  refreshAccent();
+  let timer = null;
+  const kick = () => { clearTimeout(timer); timer = setTimeout(() => refreshAccent(), 150); };
+  const home = app.getPath('home');
+  for (const file of [
+    path.join(home, '.config', 'kdeglobals'),
+    path.join(home, '.config', 'gtk-4.0', 'gtk.css'),
+    path.join(home, '.config', 'gtk-3.0', 'gtk.css'),
+  ]) {
+    try { fs.watch(file, { persistent: false }, kick); } catch { /* that desktop is not in use */ }
+  }
+  try {
+    accentMonitor = spawn('gsettings', ['monitor', 'org.gnome.desktop.interface', 'accent-color'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    accentMonitor.stdout.on('data', kick);
+    accentMonitor.on('error', () => {});
+  } catch { /* no gsettings */ }
+  try { systemPreferences.on('accent-color-changed', kick); } catch { /* not Windows */ }
+}
 
 async function launch() {
   if (SCRIPT_MODE) {
@@ -657,6 +705,7 @@ async function launch() {
     return;
   }
   app.whenReady().then(async () => {
+    watchAccent();
     createWindow();
     try { await startScriptServer(); } catch (err) { console.error('Script port failed:', err.message); }
     if (SCRIPT_MODE) pipeStdin();

@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('stratumNative', {
   onCloseRequest: on('app:request-close'),
   confirmClose: () => ipcRenderer.invoke('app:confirm-close'),
   quit: () => ipcRenderer.invoke('app:quit'),
+  accentColor: () => ipcRenderer.invoke('app:accent'),
+  onAccentColor: on('app:accent'),
   checkUpdate: () => ipcRenderer.invoke('app:check-update'),
   applyUpdate: (mode) => ipcRenderer.invoke('app:apply-update', mode),
   onScriptExec: (cb) => ipcRenderer.on('script:exec', (_e, payload) => cb(payload)),

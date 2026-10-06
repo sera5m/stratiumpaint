@@ -2,7 +2,9 @@
 
 A layered raster image editor in the spirit of Paint.NET — layers, selections,
 undo history, adjustments, effects, and OpenRaster (.ora) support. Built for
-Linux (Electron), with a standalone browser build as a bonus.
+Linux (Electron), with a standalone browser build as a bonus. The highlight
+colour follows the system accent: GNOME and KDE on Linux, and the system
+colour on Windows and macOS.
 
 Saving keeps the previous file (a `.bak` copy plus timestamped files in
 `.stratum-backups/` next to it, and a copy in the browser). File → Save Backup
