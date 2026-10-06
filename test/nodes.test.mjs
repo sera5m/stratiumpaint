@@ -7,7 +7,7 @@ import { ensureGraph, linkSockets, groupNodes, graphForSave } from '../src/js/no
 import { evaluateGraph, makeContext, primaryOutput, summarize } from '../src/js/nodes/eval.js';
 import { executeLine } from '../src/js/nodes/script.js';
 import { encodeJob, decodeJob } from '../src/js/core/job.js';
-import { extractCommands, ollamaEndpoint, runCommands, taskPrompt, checkModelName, agentReadout } from '../src/js/nodes/agent.js';
+import { extractCommands, ollamaEndpoint, runCommands, taskPrompt, checkModelName, agentReadout, formatAgentDebug } from '../src/js/nodes/agent.js';
 
 test('latex formulas compile and evaluate', () => {
   const env = formulaEnv({ u: 1, v: 0, x: 0, y: 0, r: 0, g: 0, b: 0, a: 1, A: 0, B: 0, C: 0, t: 0, W: 1, H: 1 });
@@ -139,6 +139,7 @@ test('a model completion becomes commands, and thinking text is ignored', () => 
   assert.ok(ed.doc.nodeGraph.nodes.some((n) => n.id === 'red'));
   assert.match(taskPrompt('red waves', ed.doc), /red waves/);
   assert.match(taskPrompt('red waves', ed.doc), /"id":"comp"/);
+  assert.match(taskPrompt('red waves', ed.doc), /"in":\["image"\]/);
   assert.equal(checkModelName('qwen2.5-coder:7b'), 'qwen2.5-coder:7b');
   assert.throws(() => checkModelName(''));
   assert.equal(ollamaEndpoint('http://127.0.0.1:11434'), 'http://127.0.0.1:11434/api/generate');
@@ -209,4 +210,28 @@ test('shapes cover their interior and a formula can count pixels', () => {
 test('the agent readout names the model, the token rate, and the harness', () => {
   const text = agentReadout({ model: 'bonsai', token: 'add', tokens: 12, tps: 9.13, commands: 2, source: 'Ollama' });
   assert.equal(text, '[agent: bonsai [12 add][9.1 tok/s] [2 commands]]\n[Ollama]');
+});
+
+test('a reply can hold several commands on one line, and a cut-off tail is kept', () => {
+  const oneLine = '{"cmd":"add","type":"rgb","id":"a"} {"cmd":"link","source":"a","output":"image","target":"comp","input":"picture"}';
+  const cmds = extractCommands(oneLine);
+  assert.equal(cmds.length, 2);
+  assert.equal(cmds[1].cmd, 'link');
+  assert.equal(cmds[1].from, 'a');
+  assert.equal(cmds[1].to, 'comp');
+  assert.equal(cmds[1].out, 'image');
+  assert.deepEqual(extractCommands('{"commands":[{"cmd":"apply"},{"cmd":"info"}]}').map((c) => c.cmd), ['apply', 'info']);
+  assert.deepEqual(extractCommands('{"cmd":"apply"}\n{"cmd":"add","type":"rgb"').map((c) => c.cmd), ['apply']);
+  assert.deepEqual(extractCommands('{"cmd":"apply",}').map((c) => c.cmd), ['apply']);
+  const ed = new Editor();
+  executeLine(ed, { cmd: 'new', width: 4, height: 4 });
+  executeLine(ed, { cmd: 'add', type: 'rgb', id: 'red' });
+  const linked = executeLine(ed, { cmd: 'link', from: 'red', output: 'image', to: 'comp', input: 'picture' });
+  assert.equal(linked.ok, true, linked.error);
+  assert.equal(linked.link.out, 'color');
+  assert.equal(linked.link.in, 'image');
+  const debug = formatAgentDebug({ model: 'bonsai', output: oneLine, commands: cmds, doneReason: 'length', prompt: 'task' });
+  assert.match(debug, /stop: length/);
+  assert.match(debug, /raw output/);
+  assert.match(debug, /"id":"a"/);
 });

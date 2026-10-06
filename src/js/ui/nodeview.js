@@ -10,7 +10,7 @@ import {
 } from '../nodes/graph.js';
 import { applyToLayer, evaluateGraph, makeContext, previewSize, primaryOutput } from '../nodes/eval.js';
 import { compileFormula, drawFormula } from '../nodes/formula.js';
-import { extractCommands, ollamaEndpoint, repairPrompt, runCommands, taskPrompt, checkModelName, agentReadout } from '../nodes/agent.js';
+import { extractCommands, ollamaEndpoint, repairPrompt, runCommands, taskPrompt, checkModelName, agentReadout, formatAgentDebug, graphBrief } from '../nodes/agent.js';
 import { ollamaGenerate } from './platform.js';
 import { h } from './dom.js';
 
@@ -681,7 +681,7 @@ export class NodeView {
     this.modelBtn.disabled = true;
     this.modelLog.hidden = false;
     const source = 'Ollama';
-    let tokens = 0, tps = 0, token = '', commands = 0, textSoFar = '';
+    let tokens = 0, tps = 0, token = '', commands = 0, textSoFar = '', doneReason = '';
     const paint = (live) => this.#showAgent({ model, token, tokens, tps, commands, source, live });
     paint(true);
     const url = ollamaEndpoint('http://127.0.0.1:11434');
@@ -691,47 +691,73 @@ export class NodeView {
       if (Number.isFinite(info.tps)) tps = info.tps;
       if (info.token) token = info.token;
       if (info.text) textSoFar = info.text;
+      if (info.doneReason) doneReason = info.doneReason;
       const now = performance.now();
       if (!info.done && now - (this._agentAt || 0) < 80) return;
       this._agentAt = now;
       commands = extractCommands(textSoFar).length;
       paint(true);
     };
+    const asText = (reply) => (typeof reply === 'string' ? reply : String(reply?.text || ''));
+    let prompt = '';
+    let raw = '';
     try {
       ensureGraph(doc);
-      let text = await ollamaGenerate({ url, model, prompt: taskPrompt(task, doc), onProgress: watch });
+      prompt = taskPrompt(task, doc);
+      let reply = await ollamaGenerate({ url, model, prompt, onProgress: watch });
+      if (reply?.doneReason) doneReason = reply.doneReason;
+      if (reply?.tokens) tokens = reply.tokens;
+      let text = asText(reply);
       textSoFar = text || textSoFar;
+      raw = textSoFar;
       let commandsList = extractCommands(textSoFar);
       commands = commandsList.length;
       paint(true);
       if (!commandsList.length) {
-        this.modelLog.textContent = 'No commands came back. The pipe still accepts JSON lines if you would rather send them yourself.\n' + String(text || '').slice(0, 600);
+        this.#keepAgentLog(doc, { model, source, tokens, tps, doneReason, prompt, output: raw, commands: [], results: [] });
+        const why = doneReason === 'length' ? 'The reply was cut off before a command.\n' : '';
+        this.modelLog.textContent = `${why}No commands came back. The full reply is agent.txt inside the saved job.\n${String(text || '').slice(-2000)}`;
         paint(false);
         return;
       }
       let results = runCommands(this.ed, commandsList);
       commands = results.length;
       this.#changed();
-      paint(this.modelRetry.checked && results.some((r) => !r.ok));
       if (this.modelRetry.checked && results.some((r) => !r.ok)) {
         this.modelLog.textContent = 'A command failed. Asking once more…';
-        text = await ollamaGenerate({ url, model, prompt: repairPrompt(task, doc, results), onProgress: watch });
+        paint(true);
+        const again = repairPrompt(task, doc, results);
+        reply = await ollamaGenerate({ url, model, prompt: again, onProgress: watch });
+        if (reply?.doneReason) doneReason = reply.doneReason;
+        text = asText(reply);
+        raw += `\n\n--- repair prompt ---\n${again}\n\n--- repair output ---\n${text}`;
         const more = extractCommands(text);
-        if (more.length) results = results.concat(runCommands(this.ed, more));
+        if (more.length) {
+          commandsList = commandsList.concat(more);
+          results = results.concat(runCommands(this.ed, more));
+        }
         commands = results.length;
         this.#changed();
       }
-      this.modelLog.textContent = results.map((r) => JSON.stringify(r)).join('\n');
+      this.#keepAgentLog(doc, { model, source, tokens, tps, doneReason, prompt, output: raw, commands: commandsList, results });
+      const cut = doneReason === 'length' ? 'The reply hit the token limit and stopped early.\n' : '';
+      this.modelLog.textContent = `${cut}Full transcript is agent.txt inside the saved job.\n${results.map((r) => JSON.stringify(r)).join('\n')}`;
       paint(false);
       const bad = results.filter((r) => !r.ok).length;
       this.ed.toast(bad ? `${bad} command${bad > 1 ? 's' : ''} failed.` : 'The model updated the graph.');
     } catch (err) {
+      this.#keepAgentLog(doc, { model, source, tokens, tps, doneReason: doneReason || 'error', prompt, output: `${raw}\n\n${err.message || err}`, commands: extractCommands(textSoFar), results: [] });
       this.modelLog.textContent = err.message || String(err);
       paint(false);
       this.ed.toast(err.message || String(err));
     } finally {
       this.modelBtn.disabled = false;
     }
+  }
+
+  #keepAgentLog(doc, info) {
+    doc.agentLog = formatAgentDebug({ ...info, time: new Date().toISOString(), graph: graphBrief(doc) });
+    markGraph(doc);
   }
 
   #syncBar() {

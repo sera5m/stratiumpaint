@@ -4,8 +4,8 @@
 import { Doc } from '../doc/document.js';
 import { NODE_TYPES, socketsOf } from './types.js';
 import {
-  addNode, currentScope, deleteNodes, duplicateNodes, ensureGraph, enterGroup, exitGroup,
-  frameNodes, groupNodes, linkSockets, markGraph, setCollapsed, setColor, setMuted, setParam,
+  addNode, currentScope, deleteNodes, duplicateNodes, ensureGraph, enterGroup, exitGroup, findNode,
+  frameNodes, groupNodes, linkSockets, markGraph, matchSocket, setCollapsed, setColor, setMuted, setParam,
   unlinkSockets, ungroupNode,
 } from './graph.js';
 import { applyToLayer, evaluateGraph, makeContext, previewSize, primaryOutput, summarize } from './eval.js';
@@ -83,7 +83,26 @@ export function executeLine(ed, line) {
   catch (err) { return { ok: false, error: err.message || String(err) }; }
 }
 
+const firstOf = (obj, keys) => keys.map((k) => obj[k]).find((v) => v != null && v !== '');
+
+/** Models rarely use the same field names. Fold the common ones onto cmd/from/out/to/in. */
+export function normalizeCommand(msg) {
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return msg;
+  const out = { ...msg };
+  const cmd = out.cmd || out.command || out.action || out.op;
+  if (cmd) out.cmd = cmd === 'connect' || cmd === 'edge' ? 'link' : (cmd === 'create' || cmd === 'node' ? 'add' : cmd);
+  if (out.cmd === 'link') {
+    out.from = firstOf(out, ['from', 'fromId', 'from_id', 'src', 'source', 'sourceId', 'a']);
+    out.to = firstOf(out, ['to', 'toId', 'to_id', 'dst', 'dest', 'target', 'b']);
+    out.out = firstOf(out, ['out', 'output', 'fromSocket', 'from_socket', 'socketOut', 'srcSocket']);
+    out.in = firstOf(out, ['in', 'input', 'toSocket', 'to_socket', 'socketIn', 'dstSocket']);
+  }
+  if (out.cmd === 'add' && !out.type) out.type = firstOf(out, ['type', 'node', 'kind']);
+  return out;
+}
+
 function run(ed, msg) {
+  msg = normalizeCommand(msg);
   const cmd = msg.cmd || msg.op;
   if (!cmd || cmd === 'help') return { ok: true, ...SCRIPT_HELP };
   if (cmd === 'types') {
@@ -133,9 +152,18 @@ function run(ed, msg) {
   }
   if (cmd === 'link') {
     const g = needDoc(ed);
-    const link = linkSockets(g, msg.from, msg.out, msg.to, msg.in);
+    const from = findNode(g, msg.from);
+    const to = findNode(g, msg.to);
+    if (!from || !to) throw new Error('Unknown node.');
+    const out = matchSocket(from.node, 'out', msg.out);
+    const inn = matchSocket(to.node, 'in', msg.in);
+    const link = linkSockets(g, msg.from, out, msg.to, inn);
     changed(ed);
-    return { ok: true, link: { from: link.from, out: link.out, to: link.to, in: link.in } };
+    return {
+      ok: true,
+      link: { from: link.from, out: link.out, to: link.to, in: link.in },
+      coerced: out !== msg.out || inn !== msg.in ? { out, in: inn } : undefined,
+    };
   }
   if (cmd === 'unlink') {
     needDoc(ed);

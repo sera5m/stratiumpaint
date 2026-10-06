@@ -71,14 +71,19 @@ language in the browser. `{"cmd":"types"}` lists every node and socket.
 The node editor also has a short Ask row. Type an Ollama model name
 (`qwen2.5-coder:7b`, or a small thinking model such as a DeepSeek distill)
 and a sentence. Stratum calls `http://127.0.0.1:11434` and runs the JSON
-lines that come back. While it waits, a small box shows the model, the
-token just produced, tokens per second, how many commands have arrived,
-and the harness name (`Ollama`, or `script pipe` when something writes
-the pipe). The model stays in Ollama, so its video memory is not
-Stratum's. Retry asks one more time if a line fails; leave it off when
-the model spends a long time thinking. Any other harness can still pipe
-into `stratum --script` instead of using Ask. A line may include
-`"source":"my harness"` to put that name on the second line of the box.
+lines that come back. The current graph is listed with each node's socket ids, and a
+close name (`image`, `color`, `out`, `in`) still connects when the node has
+one matching socket. Generation is not cut off at a short token cap. While
+it waits, a small box shows the model, the token just produced, tokens per
+second, how many commands have arrived, and the harness name (`Ollama`, or
+`script pipe` when something writes the pipe). The whole prompt, the raw
+reply, the commands, and the errors are written to `agent.txt` inside the
+saved job (the `.2dlayered` zip). Unzip that and the text is there to copy.
+The model stays in Ollama, so its video memory is not Stratum's. Retry asks
+one more time if a line fails; leave it off when the model spends a long
+time thinking. Any other harness can still pipe into `stratum --script`
+instead of using Ask. A line may include `"source":"my harness"` to put
+that name on the second line of the box.
 
 Model → Unwrap Demo, Model → Open Model, or dropping an `.obj` lays the
 surface out as one texture and mounts it beside the canvas. Charts stay

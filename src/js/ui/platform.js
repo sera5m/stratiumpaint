@@ -17,7 +17,9 @@ export async function ollamaGenerate({ url, model, prompt, onProgress }) {
   if (native?.ollamaGenerate) {
     if (onProgress && native.onOllamaProgress) native.onOllamaProgress(onProgress);
     try {
-      return await native.ollamaGenerate({ url, model, prompt, stream: !!onProgress });
+      const result = await native.ollamaGenerate({ url, model, prompt, stream: !!onProgress });
+      if (typeof result === 'string') return { text: result, doneReason: '', tokens: 0 };
+      return result;
     } finally {
       native.offOllamaProgress?.();
     }
@@ -25,18 +27,36 @@ export async function ollamaGenerate({ url, model, prompt, onProgress }) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, prompt, stream: !!onProgress, options: { num_ctx: 8192, temperature: 0.2 } }),
+    body: JSON.stringify({ model, prompt, stream: !!onProgress, options: { num_ctx: 8192, num_predict: -1, temperature: 0.2 } }),
   });
   if (!res.ok) throw new Error(`The local model returned ${res.status}. Is Ollama running?`);
   if (!onProgress || !res.body?.getReader) {
     const data = await res.json();
-    return String(data.response || '');
+    return { text: String(data.response || ''), doneReason: data.done_reason || '', tokens: data.eval_count || 0 };
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  let buf = '', text = '', tokens = 0;
+  let buf = '', text = '', tokens = 0, doneReason = '';
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now)();
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const take = (line) => {
+    if (!line) return;
+    let data;
+    try { data = JSON.parse(line); } catch { return; }
+    if (data.error) throw new Error(String(data.error));
+    if (data.response) {
+      text += data.response;
+      tokens += 1;
+      const sec = Math.max(0.001, (now() - t0) / 1000);
+      onProgress({ tokens, tps: tokens / sec, token: data.response, text, done: false, doneReason });
+    }
+    if (data.done) {
+      if (data.eval_count) tokens = data.eval_count;
+      doneReason = data.done_reason || doneReason;
+      const sec = data.eval_duration ? data.eval_duration / 1e9 : Math.max(0.001, (now() - t0) / 1000);
+      onProgress({ tokens, tps: tokens / Math.max(sec, 0.001), token: '', text, done: true, doneReason });
+    }
+  };
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -45,24 +65,11 @@ export async function ollamaGenerate({ url, model, prompt, onProgress }) {
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
-      if (!line) continue;
-      let data;
-      try { data = JSON.parse(line); } catch { continue; }
-      if (data.error) throw new Error(String(data.error));
-      if (data.response) {
-        text += data.response;
-        tokens += 1;
-        const sec = Math.max(0.001, (now() - t0) / 1000);
-        onProgress({ tokens, tps: tokens / sec, token: data.response, text, done: false });
-      }
-      if (data.done) {
-        if (data.eval_count) tokens = data.eval_count;
-        const sec = data.eval_duration ? data.eval_duration / 1e9 : Math.max(0.001, (now() - t0) / 1000);
-        onProgress({ tokens, tps: tokens / Math.max(sec, 0.001), token: '', text, done: true });
-      }
+      take(line);
     }
   }
-  return text;
+  take(buf.trim());
+  return { text, doneReason, tokens };
 }
 
 /** → [{name, path, bytes}] */

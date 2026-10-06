@@ -22,6 +22,18 @@ test('a 2d job round-trips layers inside a zip', async () => {
   assert.equal(job.layers[1].visible, false);
   assert.deepEqual(job.layers[0].png, png);
   assert.equal(job.mesh, null);
+  assert.equal(job.agentLog, '');
+});
+
+test('a job keeps the agent transcript as agent.txt', async () => {
+  const bytes = encodeJob({
+    id: 'pic-ab12', name: 'Pic', width: 2, height: 2, active: 0, savepoint: 't',
+    layers: [{ id: 1, name: 'Background', png }],
+    agentLog: 'Stratum agent debug\nstop: length\n{"cmd":"apply"}\n',
+  });
+  const job = await decodeJob(bytes);
+  assert.match(job.agentLog, /stop: length/);
+  assert.match(job.agentLog, /"cmd":"apply"/);
 });
 
 test('a 3d job keeps the mesh buffers', async () => {

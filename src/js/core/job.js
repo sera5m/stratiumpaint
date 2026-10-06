@@ -65,6 +65,7 @@ export function encodeJob(job) {
       { name: 'mesh/wires.f32', data: copyBytes(job.mesh.wires ?? new Float32Array()) },
     );
   }
+  if (job.agentLog) files.push({ name: 'agent.txt', data: enc.encode(String(job.agentLog)) });
   return zipStore(files);
 }
 
@@ -93,7 +94,8 @@ export async function decodeJob(bytes) {
       wires: typedFrom(files.get(f.wires || 'mesh/wires.f32'), Float32Array),
     };
   }
-  return { ...meta, layers, mesh };
+  const agentTxt = files.get('agent.txt');
+  return { ...meta, layers, mesh, agentLog: agentTxt ? dec.decode(agentTxt) : '' };
 }
 
 export const jobExt = (doc) => (doc?.mount ? '3dlayered' : '2dlayered');

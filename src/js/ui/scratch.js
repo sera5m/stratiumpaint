@@ -81,6 +81,7 @@ export async function jobBytes(doc) {
     kind, id: jobFolder(doc), name: doc.name, width: doc.width, height: doc.height,
     active: doc.active, savepoint, layers: await pngsOf(doc), mesh: meshOf(doc),
     nodeGraph: graphForSave(doc.nodeGraph),
+    agentLog: doc.agentLog || '',
   });
   return { kind, bytes, savepoint };
 }
@@ -134,6 +135,7 @@ export async function openJob(bytes, name) {
   doc.setLayers(layers);
   doc.selectLayer(clamp(job.active ?? layers.length - 1, 0, layers.length - 1));
   if (job.nodeGraph) doc.nodeGraph = graphFromSave(job.nodeGraph);
+  if (job.agentLog) doc.agentLog = job.agentLog;
   if (job.mesh) {
     beginSession(doc, {
       mesh: {

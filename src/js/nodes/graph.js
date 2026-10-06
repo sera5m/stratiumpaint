@@ -204,8 +204,14 @@ export function linkSockets(g, from, out, to, inn) {
     if (a.scope !== b.scope) throw new Error('Those nodes are not in the same group.');
     if (from === to) throw new Error('A node cannot link to itself.');
     if (reaches(a.scope, to, from)) throw new Error('That link would make a cycle.');
-    if (!socketsOf(a.node).outputs.some((s) => s.id === out)) throw new Error(`No output “${out}”.`);
-    if (!socketsOf(b.node).inputs.some((s) => s.id === inn)) throw new Error(`No input “${inn}”.`);
+    if (!socketsOf(a.node).outputs.some((s) => s.id === out)) {
+      const ids = socketsOf(a.node).outputs.map((s) => s.id).join(', ') || 'none';
+      throw new Error(`No output “${out}” on ${from} (${a.node.type}). Outputs: ${ids}.`);
+    }
+    if (!socketsOf(b.node).inputs.some((s) => s.id === inn)) {
+      const ids = socketsOf(b.node).inputs.map((s) => s.id).join(', ') || 'none';
+      throw new Error(`No input “${inn}” on ${to} (${b.node.type}). Inputs: ${ids}.`);
+    }
     a.scope.links = a.scope.links.filter((l) => !(l.to === to && l.in === inn));
     if (b.node.type === 'reroute') b.node.params.kind = socketKind(a.node, 'out', out);
     const link = { id: alloc(g), from, out, to, in: inn };
@@ -552,4 +558,31 @@ export function nodeLabel(node) {
   if (node.type === 'frame') return node.params?.title || 'Frame';
   if (node.type === 'group') return node.params?.title || 'Group';
   return NODE_TYPES[node.type]?.label || node.type;
+}
+
+/** Pick the socket a model meant. Exact id wins; otherwise a close name, or the only socket. */
+export function matchSocket(node, dir, name) {
+  const list = (dir === 'out' ? socketsOf(node).outputs : socketsOf(node).inputs) || [];
+  if (!list.length) return String(name || '');
+  const want = String(name ?? '').trim();
+  if (!want) return list[0].id;
+  if (list.some((s) => s.id === want)) return want;
+  const key = want.toLowerCase().replace(/[\s_-]+/g, '');
+  const byText = list.find((s) => s.id.toLowerCase().replace(/[\s_-]+/g, '') === key
+    || String(s.name || '').toLowerCase().replace(/[\s_-]+/g, '') === key);
+  if (byText) return byText.id;
+  let pool = [];
+  if (['image', 'img', 'picture', 'tex', 'texture'].includes(key)) {
+    pool = list.filter((s) => s.kind === 'image' || s.kind === 'color' || s.id === 'image' || s.id === 'color');
+  } else if (['colour', 'color', 'rgb', 'rgba'].includes(key)) {
+    pool = list.filter((s) => s.kind === 'color' || s.id === 'color' || s.id === 'color1');
+  } else if (['value', 'float', 'number', 'fac', 'factor', 'mask'].includes(key)) {
+    pool = list.filter((s) => s.kind === 'value' || s.id === 'fac' || s.id === 'value' || s.id === 'mask');
+  } else if (['vector', 'vec', 'uv', 'coord', 'coords'].includes(key)) {
+    pool = list.filter((s) => s.kind === 'vector' || s.id === 'vector' || s.id === 'start');
+  } else if (['out', 'output', 'result', 'in', 'input'].includes(key)) pool = list;
+  const uniq = [...new Map(pool.map((s) => [s.id, s])).values()];
+  if (uniq.length === 1) return uniq[0].id;
+  if (list.length === 1) return list[0].id;
+  return want;
 }
