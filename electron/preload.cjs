@@ -23,4 +23,7 @@ contextBridge.exposeInMainWorld('stratumNative', {
   quit: () => ipcRenderer.invoke('app:quit'),
   checkUpdate: () => ipcRenderer.invoke('app:check-update'),
   applyUpdate: (mode) => ipcRenderer.invoke('app:apply-update', mode),
+  onScriptExec: (cb) => ipcRenderer.on('script:exec', (_e, payload) => cb(payload)),
+  scriptResult: (id, result) => ipcRenderer.send('script:result', id, result),
+  scriptReady: () => ipcRenderer.send('script:ready'),
 });

@@ -7,10 +7,11 @@ import { icon } from './icons.js';
 export const MENUS = [
   ['File', ['new', 'open', '-', 'save', 'saveAs', 'saveUnfinished', 'saveBackup', 'restoreBackup', '-', 'close', 'quit']],
   ['Edit', ['undo', 'redo', '-', 'cut', 'copy', 'paste', 'pasteNew', '-', 'erase', 'fill', 'colorRange', '-', 'selectAll', 'deselect', 'invertSel', '-', 'wholeImage']],
-  ['View', ['zoomIn', 'zoomOut', 'zoomFit', 'zoomActual', '-', 'grid']],
+  ['View', ['zoomIn', 'zoomOut', 'zoomFit', 'zoomActual', '-', 'grid', '-', 'viewCanvas', 'viewNodes']],
   ['Image', ['crop', '-', 'resize', 'canvasSize', '-', 'flipH', 'flipV', '-', 'rotateCW', 'rotateCCW', 'rotate180', '-', 'removeBg', '-', 'flatten']],
   ['Model', ['openModel', 'demoModel', 'reunwrap', '-', 'addModelImage', 'newModelImage', 'modelRaise', 'modelLower', 'limitFaces', '-', 'layoutSplit', 'layout2d', 'layout3d', '-', 'uvLines', 'unmount']],
   ['Layers', ['layerAdd', 'layerDelete', 'layerDuplicate', 'layerMerge', '-', 'layerUp', 'layerDown', '-', 'layerProps']],
+  ['Nodes', ['viewNodes', 'nodeAdd', 'applyNodes', 'runScript']],
   ['Adjustments', ['wholeImage', '-', ...ADJUSTMENTS.map((s) => `adj:${s.id}`)]],
   ['Effects', ['wholeImage', '-', ...EFFECT_CATEGORIES.map((cat) => ({ label: cat, items: EFFECTS.filter((e) => e.category === cat).map((e) => `fx:${e.id}`) }))]],
   ['Help', ['shortcuts', 'checkUpdate', 'about']],

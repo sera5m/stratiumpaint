@@ -484,6 +484,62 @@ test('scroll in move mode scales the selection from its centre', () => {
   assert.deepEqual(px(doc.layer, 9, 9), [0, 180, 0, 255]);
 });
 
+test('dragging the border between the knobs scales that edge', () => {
+  const { ed, doc } = session(30, 30);
+  for (let y = 4; y < 12; y++) for (let x = 4; x < 16; x++) doc.layer.img.data.set([255, 0, 0, 255], (y * 30 + x) * 4);
+  doc.setSelection(rectMask(30, 30, 4, 4, 16, 12));
+  ed.setTool('move-pixels');
+  // Bounds are x=4,y=4,w=12,h=8. At zoom 5 the bottom edge is screen y=60.
+  // A point 15px in from the left corner is not on a knob (those are only 8px).
+  const view = { zoom: 5, ox: 0, oy: 0 };
+  const at = (docX, docY) => ev(docX, docY, { sx: docX * 5, sy: docY * 5, ...view });
+  ed.pointer('down', at(7, 12));
+  ed.pointer('move', at(7, 20));
+  ed.pointer('up', at(7, 20));
+  assert.equal(alphaAt(doc.layer, 6, 4), 255, 'the top edge stayed put');
+  assert.ok(alphaAt(doc.layer, 6, 18) > 200, 'the block grew downward');
+  assert.equal(alphaAt(doc.layer, 20, 8), 0, 'the width did not change');
+  ed.commitTool();
+  assert.equal(doc.selection && doc.history.entries().at(-1).name, 'Scale Selected Pixels');
+});
+
+test('width and height in move mode scale the selected pixels', () => {
+  const { ed, doc } = session(30, 30);
+  for (let y = 4; y < 12; y++) for (let x = 4; x < 16; x++) doc.layer.img.data.set([0, 0, 255, 255], (y * 30 + x) * 4);
+  doc.setSelection(rectMask(30, 30, 4, 4, 16, 12));
+  ed.setTool('move-pixels');
+  assert.deepEqual(ed.tool.metrics(ed), { w: 12, h: 8 });
+  ed.tool.setSize(ed, 18, 8);
+  assert.ok(alphaAt(doc.layer, 20, 6) > 200, 'it grew to the right');
+  assert.equal(alphaAt(doc.layer, 6, 14), 0, 'height stayed the same');
+  ed.commitTool();
+  assert.equal(doc.history.entries().at(-1).name, 'Scale Selected Pixels');
+  doc.undo();
+  assert.equal(alphaAt(doc.layer, 20, 6), 0);
+  assert.deepEqual(px(doc.layer, 6, 6), [0, 0, 255, 255]);
+});
+
+test('move selection scales the outline from an edge and leaves the pixels', () => {
+  const { ed, doc } = session(30, 30);
+  doc.layer.img.data.set([255, 0, 0, 255], (6 * 30 + 6) * 4);
+  doc.setSelection(rectMask(30, 30, 4, 4, 16, 12));
+  const before = new Uint8Array(doc.selection.data);
+  ed.setTool('move-selection');
+  const view = { zoom: 5, ox: 0, oy: 0 };
+  const at = (docX, docY) => ev(docX, docY, { sx: docX * 5, sy: docY * 5, ...view });
+  ed.pointer('down', at(7, 12));
+  ed.pointer('move', at(7, 20));
+  ed.pointer('up', at(7, 20));
+  assert.deepEqual(doc.selection.data, before, 'still floating');
+  assert.deepEqual(px(doc.layer, 6, 6), [255, 0, 0, 255]);
+  ed.commitTool();
+  assert.equal(doc.selection.data[18 * 30 + 6], 255, 'the outline grew downward');
+  assert.equal(doc.selection.data[6 * 30 + 18], 0, 'it did not grow sideways');
+  assert.deepEqual(px(doc.layer, 6, 6), [255, 0, 0, 255], 'pixels were not touched');
+  doc.undo();
+  assert.deepEqual(doc.selection.data, before);
+});
+
 test('colour picker takes the pixel under the cursor', () => {
   const { ed, doc } = session();
   doc.layer.img.data.set([12, 34, 56, 255], (4 * 40 + 6) * 4);

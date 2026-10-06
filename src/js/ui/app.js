@@ -9,9 +9,11 @@ import * as platform from './platform.js';
 import { encodeDocument } from '../doc/io.js';
 import { putBackup } from './backup.js';
 import { MeshView } from './meshview.js';
+import { NodeView } from './nodeview.js';
 import { watchScratch, dropScratch } from './scratch.js';
 import { watchPlacement } from './place.js';
 import { $, h } from './dom.js';
+import { executeLine } from '../nodes/script.js';
 
 const TEXT_INPUTS = new Set(['text', 'number', 'search', 'url', 'email', 'password', 'tel']);
 
@@ -34,6 +36,7 @@ export function start() {
   const view = new View(ed, stage);
   ed.view = view;
   ed.meshView = new MeshView(ed, $('#pane-3d'));
+  ed.nodeView = new NodeView(ed, $('#pane-nodes'));
 
   const { cmds, openFilesInto, closeDoc, closeAll, openMeshBytes } = createCommands({ ed, view });
 
@@ -48,6 +51,15 @@ export function start() {
   ed.on('doc', applyLayout);
   ed.on('docs', applyLayout);
   ed.on('layout', applyLayout);
+  const paneNodes = $('#pane-nodes');
+  const applySurface = () => {
+    const nodes = ed.surfaceMode === 'nodes';
+    paneNodes.hidden = !nodes;
+    $('#main').classList.toggle('mode-nodes', nodes);
+    if (nodes) ed.nodeView.show();
+  };
+  ed.on('surface', applySurface);
+  applySurface();
 
   const run = async (cmd) => {
     if (cmd.enabled && !cmd.enabled()) return;
@@ -70,6 +82,7 @@ export function start() {
 
   window.addEventListener('keydown', (e) => {
     if (isModalOpen() || isTyping(e.target)) return;
+    if (ed.surfaceMode === 'nodes' && ed.nodeView.handleKey(e, 'down')) { e.preventDefault(); return; }
     const combo = comboOf(e);
 
     if (combo === 'Space') { e.preventDefault(); view.setSpace(true); return; }
@@ -86,7 +99,10 @@ export function start() {
     if (combo === 'X') { ed.swapColors(); return; }
     if (e.key.length === 1 && ed.cycleTool(e.key.toUpperCase())) e.preventDefault();
   });
-  window.addEventListener('keyup', (e) => { if (e.key === ' ') view.setSpace(false); });
+  window.addEventListener('keyup', (e) => {
+    if (ed.surfaceMode === 'nodes' && ed.nodeView.handleKey(e, 'up')) return;
+    if (e.key === ' ') view.setSpace(false);
+  });
   window.addEventListener('blur', () => view.setSpace(false));
 
   // On Linux, middle-click conventionally pastes the X11 "primary" selection (whatever text was
@@ -144,6 +160,12 @@ export function start() {
     window.addEventListener('pagehide', () => { for (const d of ed.docs) dropScratch(d); });
   }
   platform.initialFiles().then((files) => { if (files.length) openFilesInto(files); });
+
+  platform.onScriptExec?.((payload) => {
+    const result = executeLine(ed, payload.line);
+    platform.scriptResult?.(payload.id, result);
+  });
+  platform.scriptReady?.();
 
   watchScratch(ed);
   watchPlacement(ed);

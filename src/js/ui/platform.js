@@ -7,6 +7,10 @@ const native = typeof window !== 'undefined' ? window.stratumNative ?? null : nu
 
 export const isNative = !!native;
 
+export function onScriptExec(cb) { native?.onScriptExec?.(cb); }
+export function scriptResult(id, result) { native?.scriptResult?.(id, result); }
+export function scriptReady() { native?.scriptReady?.(); }
+
 /** → [{name, path, bytes}] */
 export async function openFiles() {
   if (native) return native.openFiles();

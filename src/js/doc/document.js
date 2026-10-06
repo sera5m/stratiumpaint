@@ -45,8 +45,8 @@ export class Doc extends Emitter {
   }
 
   get layer() { return this.layers[this.active]; }
-  get modified() { return this.history.index !== this.savedIndex; }
-  markSaved() { this.savedIndex = this.history.index; this.emit('meta'); }
+  get modified() { return this.history.index !== this.savedIndex || !!this._graphDirty; }
+  markSaved() { this.savedIndex = this.history.index; this._graphDirty = false; this.emit('meta'); }
   rename(name, path = this.path) { this.name = name; this.path = path; this.emit('meta'); }
 
   /** Replace the layer stack without touching history (used when loading a file). Bottom-most first. */

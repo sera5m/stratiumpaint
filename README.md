@@ -20,9 +20,46 @@ Left-click sets colour A, right-click sets colour B and opens the dialog.
 Primary and secondary are the starting ends.
 
 Move Selected Pixels (M) drags what you selected, or the whole layer when
-nothing is. A box with corner and edge handles scales it, and the scroll
-wheel scales it from the centre. Shift on a handle keeps the proportions.
+nothing is. Drag any edge or corner of the box to scale it — not only the
+knobs — or type a width and height in the options bar. Shift (or Lock) keeps
+the proportions, and the scroll wheel scales from the centre. Move Selection
+resizes the outline the same way and leaves the pixels where they are.
 Enter or a right-click sets it down; Esc puts it back.
+
+View → Node Editor (Shift+N) is a third way to build a picture: a function
+graph in the spirit of Blender's compositor and shader editor. Textures,
+colour, blur, masks and math nodes mix together. The Formula node takes a
+small slice of LaTeX (`\frac{u}{2}`, `\sin(u \cdot \pi)`, `u^2+v^2`, or a
+bare `sin(u)`). u and v run across the image, and A, B and C are the
+node's inputs. Apply writes the Composite node onto the active layer, and
+a selection limits that write. Ctrl+Z in the node editor undoes the graph,
+not the paint.
+
+The editor copies the Blender interactions that matter for a raster graph:
+Shift+A search, drag sockets (drop on empty ground to search), box select,
+Alt-drag to cut links, Shift+D duplicate, copy and paste, mute (M),
+collapse (H), delete and delete-with-reconnect (Ctrl+X), reroute on a
+double-clicked wire, frames (Ctrl+J), groups (Ctrl+G, Tab in, Shift+Tab
+out), a viewer with a backdrop (V, or Ctrl+Shift-click a node), a sidebar
+(N), colour tags, Ctrl to snap, and G to grab. It is not a path tracer, so
+there are no BSDF shaders, movie clips, render layers, Cryptomatte,
+tracking or physical defocus.
+
+The same graph can be driven from a pipe, including a compiled desktop
+build, which is there so a local model can use it:
+
+```text
+stratum --script
+{"cmd":"help"}
+{"cmd":"new","width":256,"height":256}
+{"cmd":"add","type":"formula","id":"fx","params":{"latex":"\\\\sin(u \\\\cdot \\\\pi)"}}
+{"cmd":"link","from":"fx","out":"value","to":"comp","in":"image"}
+{"cmd":"apply"}
+```
+
+One JSON object per line, one JSON result per line. If Stratum is already
+open, the pipe is handed to that copy. Nodes → Run Script uses the same
+language in the browser. `{"cmd":"types"}` lists every node and socket.
 
 Model → Unwrap Demo, Model → Open Model, or dropping an `.obj` lays the
 surface out as one texture and mounts it beside the canvas. Charts stay

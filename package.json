@@ -1,7 +1,7 @@
 {
   "name": "stratum",
   "productName": "Stratum",
-  "version": "2.10.3",
+  "version": "2.11.0",
   "description": "Layered raster image editor in the spirit of Paint.NET, for Linux",
   "main": "electron/main.cjs",
   "license": "MIT",
@@ -11,7 +11,8 @@
     "build:dev": "node scripts/bundle-standalone.mjs --dev",
     "start": "npm run build:dev && electron .",
     "web": "python3 -m http.server 8080 --directory src",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "nodes": "node src/js/nodes/cli.js"
   },
   "devDependencies": {
     "esbuild": "^0.25.12"

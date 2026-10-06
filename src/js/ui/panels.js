@@ -52,6 +52,52 @@ const OPTIONS = {
   font: { type: 'font', label: 'Font' },
 };
 
+/** Width / height for the move tools. Typing a size scales the selection; Lock keeps the proportions. */
+function appendMoveSize(root, ed, syncs) {
+  const wIn = h('input', { type: 'number', class: 'num', min: 1, max: 8192, 'aria-label': 'Width' });
+  const hIn = h('input', { type: 'number', class: 'num', min: 1, max: 8192, 'aria-label': 'Height' });
+  const lock = h('input', { type: 'checkbox', title: 'Keep proportions', 'aria-label': 'Keep proportions' });
+  let aspect = 1;
+  const read = () => ed.tool.metrics?.(ed);
+  const sync = () => {
+    const m = read();
+    if (!m) { wIn.value = ''; hIn.value = ''; return; }
+    if (document.activeElement !== wIn) wIn.value = m.w;
+    if (document.activeElement !== hIn) hIn.value = m.h;
+    if (!lock.checked && m.h) aspect = m.w / m.h;
+  };
+  const apply = (which) => {
+    let w = Math.round(+wIn.value), hh = Math.round(+hIn.value);
+    if (!(w > 0) || !(hh > 0)) { sync(); return; }
+    if (lock.checked && aspect > 0) {
+      if (which === 'w') hh = Math.max(1, Math.round(w / aspect));
+      else w = Math.max(1, Math.round(hh * aspect));
+      wIn.value = w; hIn.value = hh;
+    }
+    ed.tool.setSize?.(ed, w, hh);
+    sync();
+  };
+  const onKey = (which) => (e) => {
+    e.stopPropagation();
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    apply(which);
+    ed.commitTool();
+  };
+  wIn.addEventListener('change', () => apply('w'));
+  hIn.addEventListener('change', () => apply('h'));
+  wIn.addEventListener('keydown', onKey('w'));
+  hIn.addEventListener('keydown', onKey('h'));
+  lock.addEventListener('change', () => { const m = read(); if (m?.h) aspect = m.w / m.h; });
+  syncs.push(sync);
+  sync();
+  root.append(
+    h('label', { class: 'opt' }, h('span', { class: 'opt-label' }, 'Width'), wIn),
+    h('label', { class: 'opt' }, h('span', { class: 'opt-label' }, 'Height'), hIn),
+    h('label', { class: 'opt' }, h('span', { class: 'opt-label' }, 'Lock'), lock),
+  );
+}
+
 export function buildOptionsBar(root, ed) {
   let syncs = [];
 
@@ -118,6 +164,7 @@ export function buildOptionsBar(root, ed) {
       const c = control(key);
       if (c) root.append(c);
     }
+    if (ed.tool.metrics && ed.tool.setSize) appendMoveSize(root, ed, syncs);
     root.append(h('span', { class: 'opt-spacer' }));
     if (ed.tool.id === 'clone') root.append(h('span', { class: 'opt-hint' }, 'Ctrl+click to set the source'));
     if (ed.tool.id === 'text') root.append(h('span', { class: 'opt-hint' }, 'Ctrl+Enter to commit'));
@@ -125,7 +172,10 @@ export function buildOptionsBar(root, ed) {
 
   document.getElementById('font-list')?.append(...FONTS.map((f) => h('option', { value: f })));
   ed.on('tool', rebuild);
-  ed.on('opts', () => syncs.forEach((s) => s()));
+  const resync = () => syncs.forEach((s) => s());
+  ed.on('opts', resync);
+  ed.on('overlay', resync);
+  ed.on('doc:selection', resync);
   rebuild();
 }
 
@@ -318,8 +368,8 @@ export function buildStatusbar(root, ed, view) {
     'ellipse-select': 'Drag to select. Ctrl adds, Alt subtracts, Shift makes a circle.',
     lasso: 'Drag to draw a free-form selection.',
     wand: 'Click to select similar colours.',
-    'move-pixels': 'Drag inside to move. Drag a corner or edge to scale, or scroll. Shift keeps proportions. Enter or right-click sets it down; Esc cancels.',
-    'move-selection': 'Drag to move the selection outline only. Enter or right-click sets it down; Esc cancels.',
+    'move-pixels': 'Drag inside to move. Drag an edge or corner to scale, or set Width and Height. Shift keeps proportions. Scroll scales from the centre. Enter or right-click sets it down; Esc cancels.',
+    'move-selection': 'Drag inside to move the outline. Drag an edge or corner to scale it, or set Width and Height. Enter or right-click sets it down; Esc cancels.',
     zoom: 'Click to zoom in, right-click to zoom out, drag a box to zoom to it.',
     pan: 'Drag to pan. You can also hold Space with any tool.',
     bucket: 'Click to fill. Right-click fills with the secondary colour.',
@@ -338,14 +388,18 @@ export function buildStatusbar(root, ed, view) {
 
   const update = () => {
     const doc = ed.doc;
-    hint.textContent = HINTS[ed.tool.id] ?? '';
+    hint.textContent = ed.surfaceMode === 'nodes'
+      ? 'Node editor: Shift+A adds a node, drag sockets to link, M mutes, Ctrl+G groups, Tab enters a group. Apply writes the composite onto the layer.'
+      : (HINTS[ed.tool.id] ?? '');
     size.textContent = doc ? `${doc.width} × ${doc.height}` : '';
+    const off = ed.marchOffset;
     const b = doc?.selection && maskBounds(doc.selection);
-    sel.textContent = b ? `Selection ${b.w} × ${b.h}` : '';
+    const live = b && off?.to ? off.to : b;
+    sel.textContent = live ? `Selection ${live.w} × ${live.h}` : '';
     zoom.textContent = doc ? `${Math.round(view.zoom * (view.zoom < 0.1 ? 1000 : 100)) / (view.zoom < 0.1 ? 10 : 1)}%` : '';
     zoomIn.disabled = zoomOut.disabled = zoom.disabled = !doc;
   };
   ed.on('cursor', (x, y) => { pos.textContent = x == null || !ed.doc ? '' : `${Math.floor(x)}, ${Math.floor(y)}`; });
-  for (const ev of ['doc', 'tool', 'view', 'doc:selection', 'doc:size']) ed.on(ev, update);
+  for (const ev of ['doc', 'tool', 'view', 'doc:selection', 'doc:size', 'overlay', 'surface']) ed.on(ev, update);
   update();
 }

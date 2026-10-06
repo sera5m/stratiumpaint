@@ -5,6 +5,7 @@ const { app, BrowserWindow, Menu, ipcMain, dialog, clipboard, nativeImage, shell
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const https = require('node:https');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -39,20 +40,14 @@ function newerUserCopy() {
 }
 
 const userCopy = newerUserCopy();
-if (userCopy) {
+if (userCopy && !process.argv.includes('--script')) {
   spawn(process.execPath, [userCopy], { detached: true, stdio: 'ignore' }).unref();
   app.exit(0);
   return;
 }
 
-app.setName('stratum');
-app.commandLine.appendSwitch('ozone-platform-hint', 'auto'); // native Wayland when available
-
-if (!app.requestSingleInstanceLock()) {
-  app.quit();
-  return;
-}
-
+const SCRIPT_MODE = process.argv.includes('--script');
+let ownsScriptPort = false;
 let win = null;
 let forceClose = false;
 
@@ -86,7 +81,6 @@ function createWindow() {
   });
   Menu.setApplicationMenu(null); // the app draws its own menu bar
   win.loadFile(INDEX);
-  win.once('ready-to-show', () => win.show());
 
   // Let the renderer ask about unsaved work before the window really closes.
   win.on('close', (e) => {
@@ -105,6 +99,7 @@ function createWindow() {
     if (input.type === 'keyDown' && input.key === 'F12') win.webContents.toggleDevTools();
   });
   if (process.argv.includes('--devtools')) win.webContents.openDevTools({ mode: 'detach' });
+  if (!SCRIPT_MODE) win.once('ready-to-show', () => win.show());
 }
 
 app.on('second-instance', (_e, argv) => {
@@ -114,9 +109,6 @@ app.on('second-instance', (_e, argv) => {
   const files = filesFromArgv(argv);
   if (files.length) readFiles(files).then((f) => win?.webContents.send('app:open-files', f));
 });
-
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => app.quit());
 
 // ---------------------------------------------------------------- IPC
 
@@ -448,3 +440,155 @@ ipcMain.handle('app:apply-update', async (_e, mode) => {
 
 ipcMain.handle('app:confirm-close', () => { forceClose = true; win?.close(); });
 ipcMain.handle('app:quit', () => { forceClose = true; app.quit(); });
+
+// ---------------------------------------------------------------- script pipe
+// `stratum --script` reads JSON commands on stdin. If a copy is already open, the
+// bytes are forwarded to it and this process leaves before taking the single-instance lock.
+
+function scriptPortFile() {
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(base, 'stratum', 'script.port');
+}
+
+function readScriptPort() {
+  try { return Number(fs.readFileSync(scriptPortFile(), 'utf8')) || 0; } catch { return 0; }
+}
+
+function proxyScript(port) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect({ host: '127.0.0.1', port });
+    const fail = (err) => { sock.destroy(); reject(err); };
+    sock.once('error', fail);
+    sock.once('connect', () => {
+      sock.off('error', fail);
+      process.stdin.pipe(sock);
+      sock.pipe(process.stdout);
+      const done = () => resolve();
+      sock.on('end', done);
+      sock.on('close', done);
+      sock.on('error', done);
+      process.stdin.on('end', () => sock.end());
+    });
+  });
+}
+
+const scriptWaiters = new Map();
+const scriptQueue = [];
+let scriptReady = false;
+let scriptSeq = 0;
+
+function handleScriptLine(line) {
+  const text = String(line || '').trim();
+  if (!text) return Promise.resolve({ ok: true, skipped: true });
+  return new Promise((resolve) => {
+    const id = ++scriptSeq;
+    scriptWaiters.set(id, resolve);
+    const send = () => win?.webContents.send('script:exec', { id, line: text });
+    if (scriptReady && win) send();
+    else scriptQueue.push(send);
+    setTimeout(() => {
+      if (!scriptWaiters.has(id)) return;
+      scriptWaiters.delete(id);
+      resolve({ ok: false, error: 'Script timed out.' });
+    }, 120000);
+  });
+}
+
+ipcMain.on('script:ready', () => {
+  scriptReady = true;
+  for (const send of scriptQueue.splice(0)) send();
+});
+ipcMain.on('script:result', (_e, id, result) => {
+  const resolve = scriptWaiters.get(id);
+  if (!resolve) return;
+  scriptWaiters.delete(id);
+  resolve(result);
+});
+
+function startScriptServer() {
+  return new Promise((resolve) => {
+    const server = net.createServer((sock) => {
+      let buf = '';
+      sock.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          handleScriptLine(line).then((res) => sock.write(`${JSON.stringify(res)}\n`)).catch((err) => {
+            sock.write(`${JSON.stringify({ ok: false, error: err.message })}\n`);
+          });
+        }
+      });
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      const file = scriptPortFile();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, String(port));
+      ownsScriptPort = true;
+      resolve(server);
+    });
+  });
+}
+
+function pipeStdin() {
+  let buf = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    buf += chunk;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      handleScriptLine(line).then((res) => process.stdout.write(`${JSON.stringify(res)}\n`));
+    }
+  });
+  process.stdin.on('end', () => {
+    const finish = () => {
+      if (scriptWaiters.size || scriptQueue.length) { setTimeout(finish, 40); return; }
+      forceClose = true;
+      app.exit(0);
+    };
+    setTimeout(finish, 40);
+  });
+}
+
+app.on('will-quit', () => {
+  if (!ownsScriptPort) return;
+  try { fs.unlinkSync(scriptPortFile()); } catch { /* already gone */ }
+});
+
+async function launch() {
+  if (SCRIPT_MODE) {
+    const port = readScriptPort();
+    if (port) {
+      try { await proxyScript(port); process.exit(0); return; }
+      catch { /* the port file is stale; become the host if we can */ }
+    }
+  }
+  app.setName('stratum');
+  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+  if (!app.requestSingleInstanceLock()) {
+    if (SCRIPT_MODE) {
+      await new Promise((r) => setTimeout(r, 300));
+      const port = readScriptPort();
+      if (port) {
+        try { await proxyScript(port); process.exit(0); return; } catch { /* still down */ }
+      }
+      console.error('Stratum is already running, but its script port is not accepting a pipe.');
+      process.exit(1);
+    }
+    app.quit();
+    return;
+  }
+  app.whenReady().then(async () => {
+    createWindow();
+    try { await startScriptServer(); } catch (err) { console.error('Script port failed:', err.message); }
+    if (SCRIPT_MODE) pipeStdin();
+  });
+  app.on('window-all-closed', () => app.quit());
+}
+
+launch();
+

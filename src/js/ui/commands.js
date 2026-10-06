@@ -15,6 +15,8 @@ import * as dlg from './dialogs.js';
 import { putBackup, listBackups, formatWhen } from './backup.js';
 import * as platform from './platform.js';
 import { h } from './dom.js';
+import { executeLine } from '../nodes/script.js';
+import { canRedoGraph, canUndoGraph, ensureGraph, markGraph, redoGraph, undoGraph } from '../nodes/graph.js';
 
 const base = (path) => path.split(/[\\/]/).pop();
 
@@ -209,8 +211,20 @@ export function createCommands({ ed, view }) {
 
   // ------------------------------------------------------------------ edit
 
-  add('undo', 'Undo', () => ed.doc.undo(), { shortcut: 'Ctrl+Z', enabled: () => ed.doc?.history.canUndo });
-  add('redo', 'Redo', () => ed.doc.redo(), { shortcut: 'Ctrl+Y|Ctrl+Shift+Z', enabled: () => ed.doc?.history.canRedo });
+  add('undo', 'Undo', () => {
+    if (ed.surfaceMode === 'nodes' && ed.doc?.nodeGraph) {
+      if (undoGraph(ed.doc.nodeGraph)) { markGraph(ed.doc); ed.emit('nodes'); }
+      return;
+    }
+    ed.doc.undo();
+  }, { shortcut: 'Ctrl+Z', enabled: () => (ed.surfaceMode === 'nodes' ? canUndoGraph(ed.doc?.nodeGraph) : !!ed.doc?.history.canUndo) });
+  add('redo', 'Redo', () => {
+    if (ed.surfaceMode === 'nodes' && ed.doc?.nodeGraph) {
+      if (redoGraph(ed.doc.nodeGraph)) { markGraph(ed.doc); ed.emit('nodes'); }
+      return;
+    }
+    ed.doc.redo();
+  }, { shortcut: 'Ctrl+Y|Ctrl+Shift+Z', enabled: () => (ed.surfaceMode === 'nodes' ? canRedoGraph(ed.doc?.nodeGraph) : !!ed.doc?.history.canRedo) });
 
   const copy = guard(async (cut) => {
     const layer = ed.editableLayer();
@@ -440,6 +454,25 @@ export function createCommands({ ed, view }) {
     shortcut: 'Ctrl+Shift+W', enabled: () => true, checked: () => ed.opts.wholeImage,
   });
 
+  // ------------------------------------------------------------------ nodes
+
+  const showNodes = () => {
+    if (!ed.doc) ed.addDoc(new Doc(512, 512, { name: 'Untitled' }));
+    ensureGraph(ed.doc);
+    ed.commitPending();
+    ed.surfaceMode = 'nodes';
+    ed.emit('surface', 'nodes');
+  };
+  add('viewCanvas', 'Canvas', () => { ed.surfaceMode = 'canvas'; ed.emit('surface', 'canvas'); }, {
+    enabled: () => true, checked: () => ed.surfaceMode !== 'nodes',
+  });
+  add('viewNodes', 'Node Editor', showNodes, {
+    shortcut: 'Shift+N', enabled: () => true, checked: () => ed.surfaceMode === 'nodes',
+  });
+  add('nodeAdd', 'Add Node…', () => { showNodes(); ed.nodeView?.openSearch(180, 96); }, { enabled: () => true });
+  add('applyNodes', 'Apply to Layer', () => { showNodes(); ed.nodeView?.apply(); }, { enabled: () => true });
+  add('runScript', 'Run Script…', () => scriptDialog(ed), { enabled: () => true });
+
   // ------------------------------------------------------------------ help
 
   add('shortcuts', 'Keyboard Shortcuts', () => dlg.infoDialog('Keyboard Shortcuts', shortcutsBody(cmds, ed), 560), { shortcut: 'F1', enabled: () => true });
@@ -479,6 +512,35 @@ export function createCommands({ ed, view }) {
 
 // ---------------------------------------------------------------------- help content
 
+function scriptDialog(ed) {
+  const input = h('textarea', {
+    rows: 12,
+    spellcheck: false,
+    style: { width: '100%', fontFamily: 'ui-monospace, monospace', fontSize: '12px' },
+    value: '{\n  "cmd": "help"\n}\n',
+  });
+  const out = h('pre', { class: 'script-out' });
+  dlg.modal({
+    title: 'Node script',
+    width: 560,
+    body: h('div', null,
+      h('p', { class: 'dim' }, 'One JSON command per line. A compiled Stratum reads the same lines from a pipe: stratum --script'),
+      input, out),
+    buttons: [
+      {
+        label: 'Run', primary: true, keepOpen: true,
+        onClick: () => {
+          const lines = input.value.split(/\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('//'));
+          out.textContent = lines.map((l) => JSON.stringify(executeLine(ed, l))).join('\n');
+          ed.emit('nodes');
+          ed.emit('surface', ed.surfaceMode);
+        },
+      },
+      { label: 'Close', cancel: true },
+    ],
+  });
+}
+
 function shortcutsBody(cmds, ed) {
   const row = (a, b) => h('tr', null, h('td', null, a), h('td', { class: 'keys' }, b));
   const pretty = (s) => s.split('|')[0];
@@ -500,6 +562,22 @@ function shortcutsBody(cmds, ed) {
       row('Move tools: set it down', 'Enter or right-click'), row('Move tools: cancel', 'Esc')),
     h('h4', null, 'Navigation'),
     h('table', null, row('Pan', 'Space + drag, middle-drag, or scroll'), row('Zoom', 'Ctrl + scroll')),
+    h('h4', null, 'Node editor'),
+    h('table', null,
+      row('Open the node editor', 'Shift+N'),
+      row('Add / search', 'Shift+A'),
+      row('Box select', 'Drag the background'),
+      row('Cut links', 'Alt+drag'),
+      row('Mute / collapse', 'M / H'),
+      row('Duplicate', 'Shift+D'),
+      row('Delete / delete and reconnect', 'X / Ctrl+X'),
+      row('Group / enter / leave', 'Ctrl+G / Tab / Shift+Tab'),
+      row('Frame selected nodes', 'Ctrl+J'),
+      row('Grab, snap while dragging', 'G, hold Ctrl'),
+      row('Viewer backdrop', 'V'),
+      row('Sidebar', 'N'),
+      row('View a node', 'Ctrl+Shift+click'),
+      row('Undo a node edit', 'Ctrl+Z (does not undo paint)')),
     h('h4', null, 'Commands'),
     h('table', null, [...cmds.values()].filter((c) => c.shortcut).map((c) => row(c.label.replace('…', ''), pretty(c.shortcut)))));
 }
@@ -507,6 +585,7 @@ function shortcutsBody(cmds, ed) {
 function aboutBody() {
   return h('div', { class: 'about' },
     h('p', null, 'Stratum is a layered raster image editor in the spirit of Paint.NET, built for Linux.'),
+    h('p', null, 'View → Node Editor is a function compositor: textures, colour, blur and a LaTeX formula node, mixed and applied onto the active layer. Nodes → Run Script, or a pipe into the desktop app (stratum --script), speaks the same JSON commands so a local model can drive it.'),
     h('p', null, 'Model → Open Model reads OBJ, JSON, STL, FBX and GLB. STL and FBX have no UVs, so Stratum unwraps the triangles it finds. A GLB keeps the UVs it already has, and objects that shared one texture are split apart so paint on one does not show on the others. The cube on the model snaps the view. Help → Check for Updates keeps the desktop app current.'),
     h('p', { class: 'dim' }, 'Runs on Electron; the editing core has no dependencies.'));
 }

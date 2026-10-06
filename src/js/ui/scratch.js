@@ -5,6 +5,7 @@
 // old strokes are not all held in memory. The tree is deleted on close unless
 // the user saves it out.
 import { encodeJob, decodeJob, jobExt, safeSegment } from '../core/job.js';
+import { graphForSave, graphFromSave } from '../nodes/graph.js';
 import { imageToPng, decodeImage } from '../doc/io.js';
 import { Doc } from '../doc/document.js';
 import { Layer, claimLayerId } from '../doc/layer.js';
@@ -34,6 +35,7 @@ export function watchScratch(ed) {
   };
   ed.on('doc:render', note);
   ed.on('doc:layers', note);
+  ed.on('doc:meta', note);
 }
 
 export function freezeScratch(doc) {
@@ -78,6 +80,7 @@ export async function jobBytes(doc) {
   const bytes = encodeJob({
     kind, id: jobFolder(doc), name: doc.name, width: doc.width, height: doc.height,
     active: doc.active, savepoint, layers: await pngsOf(doc), mesh: meshOf(doc),
+    nodeGraph: graphForSave(doc.nodeGraph),
   });
   return { kind, bytes, savepoint };
 }
@@ -130,6 +133,7 @@ export async function openJob(bytes, name) {
   if (!layers.length) throw new Error('That job has no layers.');
   doc.setLayers(layers);
   doc.selectLayer(clamp(job.active ?? layers.length - 1, 0, layers.length - 1));
+  if (job.nodeGraph) doc.nodeGraph = graphFromSave(job.nodeGraph);
   if (job.mesh) {
     beginSession(doc, {
       mesh: {

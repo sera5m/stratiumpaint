@@ -37,6 +37,7 @@ export function encodeJob(job) {
     height: job.height,
     active: job.active ?? 0,
     savepoint: job.savepoint ?? null,
+    nodeGraph: job.nodeGraph ?? null,
     layers: job.layers.map((l) => ({
       id: l.id, name: l.name, visible: l.visible !== false,
       opacity: l.opacity ?? 1, blend: l.blend || 'source-over',
