@@ -28,12 +28,19 @@ Enter or a right-click sets it down; Esc puts it back.
 
 View → Node Editor (Shift+N) is a third way to build a picture: a function
 graph in the spirit of Blender's compositor and shader editor. Textures,
-colour, blur, masks and math nodes mix together. The Formula node takes a
-small slice of LaTeX (`\frac{u}{2}`, `\sin(u \cdot \pi)`, `u^2+v^2`, or a
-bare `sin(u)`). u and v run across the image, and A, B and C are the
-node's inputs. Apply writes the Composite node onto the active layer, and
-a selection limits that write. Ctrl+Z in the node editor undoes the graph,
-not the paint.
+colour, blur, masks and math nodes mix together. Gradient takes a start
+and an end vector, plus two colours, so the ramp is not stuck as grey.
+Add, Subtract, XOR and Intersect combine two pictures: opaque colours mix
+per channel, and a transparent edge behaves like a shape boolean. Circle,
+Oval, Triangle, N-Gon, Line and Curve draw a fill and an outline. The
+Formula node takes a small slice of LaTeX (`\frac{u}{2}`, `\sin(u \cdot \pi)`,
+`u^2+v^2`, or a bare `sin(u)`). With Pixels off, u and v run from 0 to 1
+across the picture; with Pixels on they are pixel coordinates. x and y are
+always pixels. A, B and C are the node's inputs. An RGB node's title is
+the colour itself, checkerboard showing through where alpha is low, and
+the body takes hex or 0–255 channels including alpha. Apply writes the
+Composite node onto the active layer, and a selection limits that write.
+Ctrl+Z in the node editor undoes the graph, not the paint.
 
 The editor copies the Blender interactions that matter for a raster graph:
 Shift+A search, drag sockets (drop on empty ground to search), box select,
@@ -64,10 +71,14 @@ language in the browser. `{"cmd":"types"}` lists every node and socket.
 The node editor also has a short Ask row. Type an Ollama model name
 (`qwen2.5-coder:7b`, or a small thinking model such as a DeepSeek distill)
 and a sentence. Stratum calls `http://127.0.0.1:11434` and runs the JSON
-lines that come back. The model stays in Ollama, so its video memory is
-not Stratum's. Retry asks one more time if a line fails; leave it off when
+lines that come back. While it waits, a small box shows the model, the
+token just produced, tokens per second, how many commands have arrived,
+and the harness name (`Ollama`, or `script pipe` when something writes
+the pipe). The model stays in Ollama, so its video memory is not
+Stratum's. Retry asks one more time if a line fails; leave it off when
 the model spends a long time thinking. Any other harness can still pipe
-into `stratum --script` instead of using Ask.
+into `stratum --script` instead of using Ask. A line may include
+`"source":"my harness"` to put that name on the second line of the box.
 
 Model → Unwrap Demo, Model → Open Model, or dropping an `.obj` lays the
 surface out as one texture and mounts it beside the canvas. Charts stay

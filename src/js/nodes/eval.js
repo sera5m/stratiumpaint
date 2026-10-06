@@ -118,6 +118,10 @@ function evalNode(node, inputs, ctx) {
     case 'frame':
     case 'group_out': return {};
     case 'mix': return { color: mixNode(node, inputs, w, h) };
+    case 'add': return { color: boolNode('add', inputs, w, h) };
+    case 'sub': return { color: boolNode('sub', inputs, w, h) };
+    case 'xor': return { color: boolNode('xor', inputs, w, h) };
+    case 'intersect': return { color: boolNode('intersect', inputs, w, h) };
     case 'brightcontrast': return { color: colorMap(inputs.color, w, h, (c, i) => bright(c, pick(node, inputs, 'bright', i, p.bright), pick(node, inputs, 'contrast', i, p.contrast))) };
     case 'gamma': return { color: colorMap(inputs.color, w, h, (c, i) => gammaPx(c, pick(node, inputs, 'gamma', i, p.gamma || 1))) };
     case 'exposure': return { color: colorMap(inputs.color, w, h, (c, i) => scalePx(c, 2 ** pick(node, inputs, 'exposure', i, p.exposure || 0))) };
@@ -147,6 +151,12 @@ function evalNode(node, inputs, ctx) {
     case 'gradient': return gradientNode(node, inputs, ctx);
     case 'brick': return brickNode(node, inputs, ctx);
     case 'whitenoise': return whiteNode(node, inputs, ctx);
+    case 'circle': return shapeNode(node, inputs, ctx, 'circle');
+    case 'oval': return shapeNode(node, inputs, ctx, 'oval');
+    case 'triangle': return shapeNode(node, inputs, ctx, 'triangle');
+    case 'ngon': return shapeNode(node, inputs, ctx, 'ngon');
+    case 'line': return shapeNode(node, inputs, ctx, 'line');
+    case 'curve': return shapeNode(node, inputs, ctx, 'curve');
     case 'blur': return { image: blurImage(asImage(inputs.image, w, h), Math.round((p.radius || 0) * (ctx.scale || 1))) };
     case 'sharpen': return { image: sharpenImage(inputs.image, p, ctx) };
     case 'pixelate': return { image: pixelate(inputs.image, p.cells || 16, w, h) };
@@ -395,12 +405,15 @@ function formulaNode(node, inputs, ctx) {
     formulaCache.set(latex, compiled);
   }
   const { width: w, height: h } = ctx;
+  const pixels = !!node.params?.pixels;
   return imageOf(w, h, (u, v, x, y) => {
     const i = y * w + x;
     const a = pxAt(inputs.a, i);
+    const docX = u * ctx.docWidth;
+    const docY = v * ctx.docHeight;
     const env = formulaEnv({
-      u, v,
-      x: u * ctx.docWidth, y: v * ctx.docHeight,
+      u: pixels ? docX : u, v: pixels ? docY : v,
+      x: docX, y: docY,
       r: a[0], g: a[1], b: a[2], a: a[3],
       A: numAt(inputs.a, i), B: numAt(inputs.b, i), C: numAt(inputs.c, i),
       t: ctx.time || 0, W: ctx.docWidth, H: ctx.docHeight,
@@ -849,15 +862,189 @@ function checkerNode(node, inputs, ctx) {
   return { color: fac, fac: mask };
 }
 function gradientNode(node, inputs, ctx) {
-  const kind = node.params?.kind || 'linear';
-  const fac = imageOf(ctx.width, ctx.height, (u, v, x, y) => {
-    const uv = uvOf(inputs, u, v, y * ctx.width + x);
-    let n = uv[0];
-    if (kind === 'radial') n = clamp(Math.hypot(uv[0] - 0.5, uv[1] - 0.5) * 2, 0, 1);
-    else if (kind === 'diagonal') n = clamp((uv[0] + uv[1]) / 2, 0, 1);
-    return [n, n, n, 1];
+  const p = node.params || {};
+  const kind = p.kind || 'linear';
+  const w = ctx.width, h = ctx.height;
+  const c1 = colorOf(p.color1 || { r: 0, g: 0, b: 0, a: 1 });
+  const c2 = colorOf(p.color2 || { r: 1, g: 1, b: 1, a: 1 });
+  const color = new Float32Array(w * h * 4);
+  const fac = new Float32Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const v = (y + 0.5) / h;
+    for (let x = 0; x < w; x++) {
+      const u = (x + 0.5) / w;
+      const i = y * w + x;
+      const uv = uvOf(inputs, u, v, i);
+      const start = vec2At(inputs.start, i, kind === 'radial' ? [0.5, 0.5] : (kind === 'diagonal' ? [0, 0] : [0, 0.5]));
+      const end = vec2At(inputs.end, i, kind === 'radial' ? [1, 0.5] : (kind === 'diagonal' ? [1, 1] : [1, 0.5]));
+      let n;
+      if (kind === 'radial') {
+        const rad = Math.hypot(end[0] - start[0], end[1] - start[1]) || 1;
+        n = clamp(Math.hypot(uv[0] - start[0], uv[1] - start[1]) / rad, 0, 1);
+      } else n = projectUv(uv, start, end);
+      const A = inputs.color1 ? pxAt(inputs.color1, i) : [c1.r, c1.g, c1.b, c1.a];
+      const B = inputs.color2 ? pxAt(inputs.color2, i) : [c2.r, c2.g, c2.b, c2.a];
+      const o = i * 4;
+      color[o] = A[0] + (B[0] - A[0]) * n;
+      color[o + 1] = A[1] + (B[1] - A[1]) * n;
+      color[o + 2] = A[2] + (B[2] - A[2]) * n;
+      color[o + 3] = A[3] + (B[3] - A[3]) * n;
+      fac[o] = fac[o + 1] = fac[o + 2] = n;
+      fac[o + 3] = 1;
+    }
+  }
+  return {
+    color: { kind: 'image', width: w, height: h, data: color },
+    fac: { kind: 'image', width: w, height: h, data: fac },
+  };
+}
+
+function vec2At(v, i, fallback) {
+  if (v == null) return fallback;
+  const p = pxAt(v, i);
+  return [p[0], p[1]];
+}
+
+function projectUv(uv, start, end) {
+  const dx = end[0] - start[0], dy = end[1] - start[1];
+  const l2 = dx * dx + dy * dy || 1;
+  return clamp(((uv[0] - start[0]) * dx + (uv[1] - start[1]) * dy) / l2, 0, 1);
+}
+
+function boolNode(mode, inputs, w, h) {
+  const once = (i) => boolPx(mode, pxAt(inputs.a, i), pxAt(inputs.b, i));
+  if (!varying(inputs.a, inputs.b)) {
+    const c = once(0);
+    return { kind: 'color', r: c[0], g: c[1], b: c[2], a: c[3] };
+  }
+  return imageOf(w, h, (_u, _v, x, y) => once(y * w + x));
+}
+
+function boolPx(mode, a, b) {
+  if (a[3] < 0.999 || b[3] < 0.999) {
+    const aA = clamp(a[3], 0, 1), bA = clamp(b[3], 0, 1);
+    let outA = 0, t = 0;
+    if (mode === 'add') {
+      outA = aA + bA * (1 - aA);
+      t = outA ? (bA * (1 - aA)) / outA : 0;
+    } else if (mode === 'sub') outA = aA * (1 - bA);
+    else if (mode === 'xor') {
+      const left = aA * (1 - bA), right = bA * (1 - aA);
+      outA = left + right;
+      t = outA ? right / outA : 0;
+    } else {
+      outA = aA * bA;
+      t = 0.5;
+    }
+    const mix = (k) => a[k] * (1 - t) + b[k] * t;
+    return [mix(0), mix(1), mix(2), outA];
+  }
+  const ch = (x, y) => {
+    if (mode === 'add') return clamp(x + y, 0, 1);
+    if (mode === 'sub') return clamp(x - y, 0, 1);
+    if (mode === 'xor') return Math.abs(x - y);
+    return Math.min(x, y);
+  };
+  return [ch(a[0], b[0]), ch(a[1], b[1]), ch(a[2], b[2]), ch(a[3], b[3])];
+}
+
+function shapeNode(node, inputs, ctx, kind) {
+  const p = node.params || {};
+  const w = ctx.width, h = ctx.height;
+  const minSide = Math.min(w, h);
+  const bw = Math.max(0, num(p.border)) * minSide;
+  let distAt = (u, v) => 1;
+  if (kind === 'circle') {
+    const cx = num(p.x) * w, cy = num(p.y) * h, rad = Math.max(0, num(p.radius)) * minSide;
+    distAt = (u, v) => Math.hypot(u * w - cx, v * h - cy) - rad;
+  } else if (kind === 'oval') {
+    const cx = num(p.x) * w, cy = num(p.y) * h;
+    const rx = Math.max(0.0001, num(p.rx)) * w, ry = Math.max(0.0001, num(p.ry)) * h;
+    distAt = (u, v) => (Math.hypot((u * w - cx) / rx, (v * h - cy) / ry) - 1) * Math.min(rx, ry);
+  } else if (kind === 'triangle') {
+    const ax = num(p.x1) * w, ay = num(p.y1) * h;
+    const bx = num(p.x2) * w, by = num(p.y2) * h;
+    const cx = num(p.x3) * w, cy = num(p.y3) * h;
+    distAt = (u, v) => sdTriangle(u * w, v * h, ax, ay, bx, by, cx, cy);
+  } else if (kind === 'ngon') {
+    const cx = num(p.x) * w, cy = num(p.y) * h;
+    const rad = Math.max(0, num(p.radius)) * minSide;
+    const sides = Math.max(3, Math.min(32, Math.round(num(p.sides || 6))));
+    const rot = num(p.angle) * Math.PI / 180;
+    distAt = (u, v) => sdNgon(u * w - cx, v * h - cy, rad, sides, rot);
+  } else if (kind === 'line') {
+    const ax = num(p.x1) * w, ay = num(p.y1) * h, bx = num(p.x2) * w, by = num(p.y2) * h;
+    const half = Math.max(0, num(p.width)) * minSide * 0.5;
+    distAt = (u, v) => distSeg(u * w, v * h, ax, ay, bx, by) - half;
+  } else if (kind === 'curve') {
+    const pts = quadPoints(num(p.x1) * w, num(p.y1) * h, num(p.cx) * w, num(p.cy) * h, num(p.x2) * w, num(p.y2) * h, 32);
+    const half = Math.max(0, num(p.width)) * minSide * 0.5;
+    distAt = (u, v) => {
+      const px = u * w, py = v * h;
+      let best = Infinity;
+      for (let i = 0; i < pts.length - 1; i++) best = Math.min(best, distSeg(px, py, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]));
+      return best - half;
+    };
+  }
+  const color = imageOf(w, h, (u, v, x, y) => {
+    const i = y * w + x;
+    return coverShape(distAt(u, v), bw, paintColor(inputs, 'fill', p.fill, i), paintColor(inputs, 'border', p.edge, i));
   });
-  return { color: fac, fac };
+  return { color, fac: channelLike(color, (c) => c[3]) };
+}
+function paintColor(inputs, key, param, i) {
+  if (inputs[key]) return pxAt(inputs[key], i);
+  const c = colorOf(param);
+  return [c.r, c.g, c.b, c.a];
+}
+function coverShape(d, bw, fill, border) {
+  const inner = bw > 0 ? d + bw : d;
+  const fillCover = clamp(0.5 - inner, 0, 1);
+  const edge = Math.max(0, clamp(0.5 - d, 0, 1) - fillCover);
+  const fA = fillCover * clamp(fill[3], 0, 1);
+  const bA = edge * clamp(border[3], 0, 1);
+  const a = fA + bA * (1 - fA);
+  if (a <= 1e-4) return [0, 0, 0, 0];
+  const mix = (k) => (fill[k] * fA + border[k] * bA * (1 - fA)) / a;
+  return [mix(0), mix(1), mix(2), a];
+}
+function distSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const l2 = dx * dx + dy * dy || 1;
+  let t = ((px - ax) * dx + (py - ay) * dy) / l2;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+function quadPoints(ax, ay, cx, cy, bx, by, n) {
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, u = 1 - t;
+    pts.push([u * u * ax + 2 * u * t * cx + t * t * bx, u * u * ay + 2 * u * t * cy + t * t * by]);
+  }
+  return pts;
+}
+function sdTriangle(px, py, ax, ay, bx, by, cx, cy) {
+  const e0x = bx - ax, e0y = by - ay, e1x = cx - bx, e1y = cy - by, e2x = ax - cx, e2y = ay - cy;
+  const v0x = px - ax, v0y = py - ay, v1x = px - bx, v1y = py - by, v2x = px - cx, v2y = py - cy;
+  const dot = (x, y, x2, y2) => x * x2 + y * y2;
+  const cl = (t) => (t < 0 ? 0 : t > 1 ? 1 : t);
+  const t0 = cl(dot(v0x, v0y, e0x, e0y) / (dot(e0x, e0y, e0x, e0y) || 1));
+  const t1 = cl(dot(v1x, v1y, e1x, e1y) / (dot(e1x, e1y, e1x, e1y) || 1));
+  const t2 = cl(dot(v2x, v2y, e2x, e2y) / (dot(e2x, e2y, e2x, e2y) || 1));
+  const p0x = v0x - e0x * t0, p0y = v0y - e0y * t0;
+  const p1x = v1x - e1x * t1, p1y = v1y - e1y * t1;
+  const p2x = v2x - e2x * t2, p2y = v2y - e2y * t2;
+  const s = Math.sign(e0x * e2y - e0y * e2x) || 1;
+  const c0 = dot(p0x, p0y, p0x, p0y), c1 = dot(p1x, p1y, p1x, p1y), c2 = dot(p2x, p2y, p2x, p2y);
+  const s0 = s * (v0x * e0y - v0y * e0x), s1 = s * (v1x * e1y - v1y * e1x), s2 = s * (v2x * e2y - v2y * e2x);
+  return -Math.sqrt(Math.min(c0, c1, c2)) * Math.sign(Math.min(s0, s1, s2));
+}
+function sdNgon(px, py, r, n, rot) {
+  const an = (Math.PI * 2) / n;
+  let a = Math.atan2(py, px) + rot;
+  a = ((a % an) + an) % an - an * 0.5;
+  return Math.cos(Math.abs(a)) * Math.hypot(px, py) - r * Math.cos(an * 0.5);
 }
 function brickNode(node, inputs, ctx) {
   const p = node.params || {};

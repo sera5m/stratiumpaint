@@ -11,17 +11,58 @@ export function onScriptExec(cb) { native?.onScriptExec?.(cb); }
 export function scriptResult(id, result) { native?.scriptResult?.(id, result); }
 export function scriptReady() { native?.scriptReady?.(); }
 
-/** Ask a local Ollama. The desktop app calls out from the shell; a browser tab calls directly. */
-export async function ollamaGenerate({ url, model, prompt }) {
-  if (native?.ollamaGenerate) return native.ollamaGenerate({ url, model, prompt });
+/** Ask a local Ollama. The desktop app calls out from the shell; a browser tab calls directly.
+ *  `onProgress` receives { tokens, tps, token, text, done } while the reply streams. */
+export async function ollamaGenerate({ url, model, prompt, onProgress }) {
+  if (native?.ollamaGenerate) {
+    if (onProgress && native.onOllamaProgress) native.onOllamaProgress(onProgress);
+    try {
+      return await native.ollamaGenerate({ url, model, prompt, stream: !!onProgress });
+    } finally {
+      native.offOllamaProgress?.();
+    }
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, prompt, stream: false, options: { num_ctx: 8192, temperature: 0.2 } }),
+    body: JSON.stringify({ model, prompt, stream: !!onProgress, options: { num_ctx: 8192, temperature: 0.2 } }),
   });
   if (!res.ok) throw new Error(`The local model returned ${res.status}. Is Ollama running?`);
-  const data = await res.json();
-  return String(data.response || '');
+  if (!onProgress || !res.body?.getReader) {
+    const data = await res.json();
+    return String(data.response || '');
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', text = '', tokens = 0;
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now)();
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let data;
+      try { data = JSON.parse(line); } catch { continue; }
+      if (data.error) throw new Error(String(data.error));
+      if (data.response) {
+        text += data.response;
+        tokens += 1;
+        const sec = Math.max(0.001, (now() - t0) / 1000);
+        onProgress({ tokens, tps: tokens / sec, token: data.response, text, done: false });
+      }
+      if (data.done) {
+        if (data.eval_count) tokens = data.eval_count;
+        const sec = data.eval_duration ? data.eval_duration / 1e9 : Math.max(0.001, (now() - t0) / 1000);
+        onProgress({ tokens, tps: tokens / Math.max(sec, 0.001), token: '', text, done: true });
+      }
+    }
+  }
+  return text;
 }
 
 /** → [{name, path, bytes}] */

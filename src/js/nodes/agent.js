@@ -9,7 +9,8 @@ const CHEAT = [
   'A new document already has checker id chk, composite id comp, and viewer id view.',
   'Link the finished picture into comp input image and view input image, then {"cmd":"apply"}.',
   'Commands: add {type,id,params}, link {from,out,to,in}, param {id,name,value}, formula {id,latex}, delete {id}, apply.',
-  'Types: checker, noise, voronoi, wave, gradient, brick, white, mix, blur, formula, rgb, brightcontrast, invert, gamma.',
+  'Types: checker, noise, voronoi, wave, gradient, brick, white, mix, add, sub, xor, intersect, blur, formula, rgb, circle, oval, triangle, ngon, line, curve.',
+  'gradient inputs are start and end (vectors) plus color1 and color2. formula params.pixels true makes u and v pixel coordinates; otherwise they are 0 to 1.',
   'Formula latex may use \\\\frac{u}{2}, \\\\sin(u \\\\cdot \\\\pi), or u^2+v^2. Variables are u, v, r, g, b, a.',
   'mix params.mode is one of mix, multiply, screen, overlay, add. wave params.kind is bands or rings.',
 ].join('\n');
@@ -100,4 +101,13 @@ export function checkModelName(model) {
   const name = String(model || '').trim();
   if (!name || name.length > 80 || !/^[\w.:/-]+$/.test(name)) throw new Error('Type the Ollama model name, such as qwen2.5-coder:7b.');
   return name;
+}
+
+/** Two-line readout while a local model or another harness is working. */
+export function agentReadout({ model, token, tokens, tps, commands, source }) {
+  const name = String(model || 'model');
+  const piece = token ? `${tokens ?? 0} ${String(token).replace(/\s+/g, ' ').trim().slice(0, 24)}` : String(tokens ?? 0);
+  const rate = (Number.isFinite(+tps) ? +tps : 0).toFixed(1);
+  const from = String(source || 'Ollama');
+  return `[agent: ${name} [${piece}][${rate} tok/s] [${commands | 0} commands]]\n[${from}]`;
 }

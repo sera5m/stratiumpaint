@@ -76,6 +76,30 @@ export const NODE_TYPES = {
       num('fac', 'Fac', 1, 0, 1, 0.01),
     ],
   },
+  add: {
+    category: 'color', label: 'Add',
+    inputs: [sock('a', 'A', 'color'), sock('b', 'B', 'color')],
+    outputs: [sock('color', 'Color', 'color')],
+    params: [],
+  },
+  sub: {
+    category: 'color', label: 'Subtract',
+    inputs: [sock('a', 'A', 'color'), sock('b', 'B', 'color')],
+    outputs: [sock('color', 'Color', 'color')],
+    params: [],
+  },
+  xor: {
+    category: 'color', label: 'XOR',
+    inputs: [sock('a', 'A', 'color'), sock('b', 'B', 'color')],
+    outputs: [sock('color', 'Color', 'color')],
+    params: [],
+  },
+  intersect: {
+    category: 'color', label: 'Intersect',
+    inputs: [sock('a', 'A', 'color'), sock('b', 'B', 'color')],
+    outputs: [sock('color', 'Color', 'color')],
+    params: [],
+  },
   brightcontrast: {
     category: 'color', label: 'Bright / Contrast',
     inputs: [sock('color', 'Color', 'color'), sock('bright', 'Bright', 'value'), sock('contrast', 'Contrast', 'value')],
@@ -188,7 +212,7 @@ export const NODE_TYPES = {
     category: 'converter', label: 'Formula',
     inputs: [sock('a', 'A', 'color'), sock('b', 'B', 'value'), sock('c', 'C', 'value')],
     outputs: [sock('value', 'Value', 'value')],
-    params: [txt('latex', 'LaTeX', '\\frac{u + v}{2}')],
+    params: [txt('latex', 'LaTeX', '\\frac{u + v}{2}'), bool('pixels', 'Pixels', false)],
   },
   switch: {
     category: 'converter', label: 'Switch',
@@ -255,9 +279,19 @@ export const NODE_TYPES = {
   },
   gradient: {
     category: 'texture', label: 'Gradient',
-    inputs: [sock('vector', 'Vector', 'vector')],
+    inputs: [
+      sock('vector', 'Vector', 'vector'),
+      sock('start', 'Start', 'vector'),
+      sock('end', 'End', 'vector'),
+      sock('color1', 'Color 1', 'color'),
+      sock('color2', 'Color 2', 'color'),
+    ],
     outputs: [sock('color', 'Color', 'color'), sock('fac', 'Fac', 'value')],
-    params: [sel('kind', 'Type', 'linear', [['linear', 'Linear'], ['radial', 'Quadratic / Radial'], ['diagonal', 'Diagonal']])],
+    params: [
+      sel('kind', 'Type', 'linear', [['linear', 'Linear'], ['radial', 'Quadratic / Radial'], ['diagonal', 'Diagonal']]),
+      col('color1', 'Color 1', 0, 0, 0, 1),
+      col('color2', 'Color 2', 1, 1, 1, 1),
+    ],
   },
   brick: {
     category: 'texture', label: 'Brick',
@@ -273,6 +307,69 @@ export const NODE_TYPES = {
     inputs: [sock('vector', 'Vector', 'vector')],
     outputs: [sock('color', 'Color', 'color'), sock('value', 'Value', 'value')],
     params: [num('seed', 'Seed', 0, 0, 999, 1)],
+  },
+  circle: {
+    category: 'texture', label: 'Circle',
+    inputs: [sock('fill', 'Fill', 'color'), sock('border', 'Border', 'color')],
+    outputs: [sock('color', 'Color', 'color'), sock('fac', 'Fac', 'value')],
+    params: [
+      num('x', 'X', 0.5, -1, 2, 0.01), num('y', 'Y', 0.5, -1, 2, 0.01), num('radius', 'Radius', 0.35, 0, 2, 0.01),
+      col('fill', 'Fill', 0.9, 0.35, 0.15, 1), col('edge', 'Border', 0.08, 0.08, 0.1, 1), num('border', 'Outline', 0.02, 0, 0.5, 0.005),
+    ],
+  },
+  oval: {
+    category: 'texture', label: 'Oval',
+    inputs: [sock('fill', 'Fill', 'color'), sock('border', 'Border', 'color')],
+    outputs: [sock('color', 'Color', 'color'), sock('fac', 'Fac', 'value')],
+    params: [
+      num('x', 'X', 0.5, -1, 2, 0.01), num('y', 'Y', 0.5, -1, 2, 0.01),
+      num('rx', 'Radius X', 0.4, 0, 2, 0.01), num('ry', 'Radius Y', 0.25, 0, 2, 0.01),
+      col('fill', 'Fill', 0.2, 0.55, 0.85, 1), col('edge', 'Border', 0.08, 0.08, 0.1, 1), num('border', 'Outline', 0.02, 0, 0.5, 0.005),
+    ],
+  },
+  triangle: {
+    category: 'texture', label: 'Triangle',
+    inputs: [sock('fill', 'Fill', 'color'), sock('border', 'Border', 'color')],
+    outputs: [sock('color', 'Color', 'color'), sock('fac', 'Fac', 'value')],
+    params: [
+      num('x1', 'X1', 0.5, -1, 2, 0.01), num('y1', 'Y1', 0.16, -1, 2, 0.01),
+      num('x2', 'X2', 0.16, -1, 2, 0.01), num('y2', 'Y2', 0.84, -1, 2, 0.01),
+      num('x3', 'X3', 0.84, -1, 2, 0.01), num('y3', 'Y3', 0.84, -1, 2, 0.01),
+      col('fill', 'Fill', 0.85, 0.75, 0.2, 1), col('edge', 'Border', 0.08, 0.08, 0.1, 1), num('border', 'Outline', 0.02, 0, 0.5, 0.005),
+    ],
+  },
+  ngon: {
+    category: 'texture', label: 'N-Gon',
+    inputs: [sock('fill', 'Fill', 'color'), sock('border', 'Border', 'color')],
+    outputs: [sock('color', 'Color', 'color'), sock('fac', 'Fac', 'value')],
+    params: [
+      num('x', 'X', 0.5, -1, 2, 0.01), num('y', 'Y', 0.5, -1, 2, 0.01), num('radius', 'Radius', 0.34, 0, 2, 0.01),
+      num('sides', 'Sides', 6, 3, 32, 1), num('angle', 'Angle', 0, -360, 360, 1),
+      col('fill', 'Fill', 0.45, 0.75, 0.4, 1), col('edge', 'Border', 0.08, 0.08, 0.1, 1), num('border', 'Outline', 0.02, 0, 0.5, 0.005),
+    ],
+  },
+  line: {
+    category: 'texture', label: 'Line',
+    inputs: [sock('fill', 'Fill', 'color'), sock('border', 'Border', 'color')],
+    outputs: [sock('color', 'Color', 'color'), sock('fac', 'Fac', 'value')],
+    params: [
+      num('x1', 'X1', 0.15, -1, 2, 0.01), num('y1', 'Y1', 0.5, -1, 2, 0.01),
+      num('x2', 'X2', 0.85, -1, 2, 0.01), num('y2', 'Y2', 0.5, -1, 2, 0.01),
+      num('width', 'Width', 0.04, 0, 0.5, 0.005),
+      col('fill', 'Fill', 0.95, 0.95, 0.95, 1), col('edge', 'Border', 0.15, 0.15, 0.18, 1), num('border', 'Outline', 0.008, 0, 0.5, 0.005),
+    ],
+  },
+  curve: {
+    category: 'texture', label: 'Curve',
+    inputs: [sock('fill', 'Fill', 'color'), sock('border', 'Border', 'color')],
+    outputs: [sock('color', 'Color', 'color'), sock('fac', 'Fac', 'value')],
+    params: [
+      num('x1', 'X1', 0.12, -1, 2, 0.01), num('y1', 'Y1', 0.72, -1, 2, 0.01),
+      num('cx', 'Control X', 0.5, -1, 2, 0.01), num('cy', 'Control Y', 0.12, -1, 2, 0.01),
+      num('x2', 'X2', 0.88, -1, 2, 0.01), num('y2', 'Y2', 0.72, -1, 2, 0.01),
+      num('width', 'Width', 0.035, 0, 0.5, 0.005),
+      col('fill', 'Fill', 0.95, 0.55, 0.75, 1), col('edge', 'Border', 0.15, 0.08, 0.12, 1), num('border', 'Outline', 0.008, 0, 0.5, 0.005),
+    ],
   },
   blur: {
     category: 'filter', label: 'Blur',

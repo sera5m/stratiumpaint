@@ -162,6 +162,12 @@ export function start() {
   platform.initialFiles().then((files) => { if (files.length) openFilesInto(files); });
 
   platform.onScriptExec?.((payload) => {
+    let source = 'script pipe';
+    try {
+      const msg = JSON.parse(payload.line);
+      if (msg && msg.source) source = String(msg.source).slice(0, 80);
+    } catch { /* executeLine reports a bad line */ }
+    ed.emit('script-in', { source });
     const result = executeLine(ed, payload.line);
     platform.scriptResult?.(payload.id, result);
   });

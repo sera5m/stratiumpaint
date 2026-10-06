@@ -10,7 +10,7 @@ import {
 } from '../nodes/graph.js';
 import { applyToLayer, evaluateGraph, makeContext, previewSize, primaryOutput } from '../nodes/eval.js';
 import { compileFormula, drawFormula } from '../nodes/formula.js';
-import { extractCommands, ollamaEndpoint, repairPrompt, runCommands, taskPrompt, checkModelName } from '../nodes/agent.js';
+import { extractCommands, ollamaEndpoint, repairPrompt, runCommands, taskPrompt, checkModelName, agentReadout } from '../nodes/agent.js';
 import { ollamaGenerate } from './platform.js';
 import { h } from './dom.js';
 
@@ -40,19 +40,27 @@ export class NodeView {
     this.bar = h('div', { class: 'nodes-bar' });
     this.modelRow = h('div', { class: 'nodes-model' });
     this.modelLog = h('pre', { class: 'nodes-model-log', hidden: true });
+    this.agentBox = h('div', { class: 'nodes-agent', hidden: true });
+    this.agentLine = h('div', { class: 'nodes-agent-line' });
+    this.agentSrc = h('div', { class: 'nodes-agent-src' });
+    this.agentBar = h('div', { class: 'nodes-agent-bar', hidden: true }, h('i'));
+    this.agentBox.append(this.agentLine, this.agentSrc, this.agentBar);
     this.wrap = h('div', { class: 'nodes-wrap' });
     this.canvas = h('canvas', { class: 'nodes-canvas' });
+    this.colorEdit = h('div', { class: 'node-color-body', hidden: true });
     this.side = h('aside', { class: 'nodes-side' });
-    this.wrap.append(this.canvas);
-    this.main.append(this.bar, this.modelRow, this.modelLog, this.wrap);
+    this.wrap.append(this.canvas, this.colorEdit);
+    this.main.append(this.bar, this.modelRow, this.agentBox, this.modelLog, this.wrap);
     root.append(this.main, this.side);
 
     this.ctx = this.canvas.getContext('2d');
     this.#bar();
     this.#model();
+    this.#colorEditor();
     this.#listen();
     ed.on('doc', () => this.schedule());
     ed.on('nodes', () => this.schedule());
+    ed.on('script-in', (info) => this.#scriptPulse(info));
     ed.on('surface', () => { if (ed.surfaceMode === 'nodes') this.show(); });
   }
 
@@ -641,6 +649,22 @@ export class NodeView {
     );
   }
 
+  #showAgent(state) {
+    const [line, src] = agentReadout(state).split('\n');
+    this.agentLine.textContent = line;
+    this.agentSrc.textContent = src;
+    this.agentBox.hidden = false;
+    this.agentBar.hidden = !state.live;
+  }
+
+  #scriptPulse(info) {
+    this._pipeCount = (this._pipeCount || 0) + 1;
+    this.#showAgent({
+      model: 'script', tokens: this._pipeCount, token: '', tps: 0,
+      commands: this._pipeCount, source: info?.source || 'script pipe', live: false,
+    });
+  }
+
   #rememberModel() {
     try { localStorage.setItem('stratum.model', JSON.stringify({ model: this.modelName.value.trim() })); } catch { /* ignore */ }
   }
@@ -656,30 +680,54 @@ export class NodeView {
     this.#rememberModel();
     this.modelBtn.disabled = true;
     this.modelLog.hidden = false;
-    this.modelLog.textContent = 'Waiting for the model. A thinking model can take a minute. VRAM stays with Ollama.';
+    const source = 'Ollama';
+    let tokens = 0, tps = 0, token = '', commands = 0, textSoFar = '';
+    const paint = (live) => this.#showAgent({ model, token, tokens, tps, commands, source, live });
+    paint(true);
     const url = ollamaEndpoint('http://127.0.0.1:11434');
+    const watch = (info) => {
+      if (!info) return;
+      tokens = info.tokens || tokens;
+      if (Number.isFinite(info.tps)) tps = info.tps;
+      if (info.token) token = info.token;
+      if (info.text) textSoFar = info.text;
+      const now = performance.now();
+      if (!info.done && now - (this._agentAt || 0) < 80) return;
+      this._agentAt = now;
+      commands = extractCommands(textSoFar).length;
+      paint(true);
+    };
     try {
       ensureGraph(doc);
-      let text = await ollamaGenerate({ url, model, prompt: taskPrompt(task, doc) });
-      let commands = extractCommands(text);
-      if (!commands.length) {
+      let text = await ollamaGenerate({ url, model, prompt: taskPrompt(task, doc), onProgress: watch });
+      textSoFar = text || textSoFar;
+      let commandsList = extractCommands(textSoFar);
+      commands = commandsList.length;
+      paint(true);
+      if (!commandsList.length) {
         this.modelLog.textContent = 'No commands came back. The pipe still accepts JSON lines if you would rather send them yourself.\n' + String(text || '').slice(0, 600);
+        paint(false);
         return;
       }
-      let results = runCommands(this.ed, commands);
+      let results = runCommands(this.ed, commandsList);
+      commands = results.length;
       this.#changed();
+      paint(this.modelRetry.checked && results.some((r) => !r.ok));
       if (this.modelRetry.checked && results.some((r) => !r.ok)) {
         this.modelLog.textContent = 'A command failed. Asking once more…';
-        text = await ollamaGenerate({ url, model, prompt: repairPrompt(task, doc, results) });
+        text = await ollamaGenerate({ url, model, prompt: repairPrompt(task, doc, results), onProgress: watch });
         const more = extractCommands(text);
         if (more.length) results = results.concat(runCommands(this.ed, more));
+        commands = results.length;
         this.#changed();
       }
       this.modelLog.textContent = results.map((r) => JSON.stringify(r)).join('\n');
+      paint(false);
       const bad = results.filter((r) => !r.ok).length;
       this.ed.toast(bad ? `${bad} command${bad > 1 ? 's' : ''} failed.` : 'The model updated the graph.');
     } catch (err) {
       this.modelLog.textContent = err.message || String(err);
+      paint(false);
       this.ed.toast(err.message || String(err));
     } finally {
       this.modelBtn.disabled = false;
@@ -769,14 +817,7 @@ export class NodeView {
       control.addEventListener('input', () => commit(control.value, true));
       control.addEventListener('blur', () => { if (endEdit(g)) markGraph(this.ed.doc); if (f.id === 'latex') this.#side(); });
     } else if (f.type === 'color') {
-      const c = value || f.default || { r: 1, g: 1, b: 1, a: 1 };
-      control = h('input', { type: 'color', value: rgbHex(c) });
-      control.addEventListener('input', () => {
-        const n = parseInt(control.value.slice(1), 16);
-        commit({ r: ((n >> 16) & 255) / 255, g: ((n >> 8) & 255) / 255, b: (n & 255) / 255, a: c.a ?? 1 }, true);
-      });
-      control.addEventListener('pointerdown', () => beginEdit(g));
-      control.addEventListener('change', () => { if (endEdit(g)) markGraph(this.ed.doc); });
+      return this.#colorField(g, node, f);
     } else {
       control = h('input', { type: 'number', min: f.min, max: f.max, step: f.step ?? 0.01, value: value ?? f.default ?? 0 });
       control.addEventListener('focus', () => beginEdit(g));
@@ -784,6 +825,128 @@ export class NodeView {
       control.addEventListener('blur', () => { if (endEdit(g)) markGraph(this.ed.doc); });
     }
     return h('label', { class: 'opt nodes-field' }, f.label, control);
+  }
+
+  #colorField(g, node, f) {
+    const value = node.params?.[f.id] || f.default || { r: 1, g: 1, b: 1, a: 1 };
+    const commit = (c, live) => {
+      if (live) setParamLive(g, node.id, f.id, c);
+      else setParam(g, node.id, f.id, c);
+      this.schedule();
+    };
+    const picker = h('input', { type: 'color', value: rgbHex(value) });
+    const hex = h('input', { type: 'text', class: 'node-hex', spellcheck: false, value: rgbaHex(value), title: 'Hex with alpha' });
+    const alpha = h('input', { type: 'number', min: 0, max: 1, step: 0.01, value: value.a ?? 1 });
+    const write = (live) => {
+      const parsed = parseHex(hex.value);
+      const base = node.params?.[f.id] || value;
+      const n = parseInt(picker.value.slice(1), 16);
+      const next = parsed && document.activeElement === hex
+        ? { r: parsed.r, g: parsed.g, b: parsed.b, a: parsed.a == null ? (base.a ?? 1) : parsed.a }
+        : { r: ((n >> 16) & 255) / 255, g: ((n >> 8) & 255) / 255, b: (n & 255) / 255, a: clamp(Number(alpha.value), 0, 1) };
+      commit(next, live);
+      if (document.activeElement !== hex) hex.value = rgbaHex(next);
+      if (document.activeElement !== picker) picker.value = rgbHex(next);
+    };
+    picker.addEventListener('pointerdown', () => beginEdit(g));
+    hex.addEventListener('focus', () => beginEdit(g));
+    alpha.addEventListener('focus', () => beginEdit(g));
+    picker.addEventListener('input', () => write(true));
+    hex.addEventListener('input', () => write(true));
+    alpha.addEventListener('input', () => write(true));
+    const finish = () => { write(true); if (endEdit(g)) markGraph(this.ed.doc); };
+    picker.addEventListener('change', finish);
+    hex.addEventListener('blur', finish);
+    alpha.addEventListener('blur', finish);
+    return h('div', { class: 'nodes-field' },
+      h('span', null, f.label),
+      h('div', { class: 'node-color-row' }, picker, hex),
+      h('label', { class: 'opt' }, 'Alpha', alpha),
+    );
+  }
+
+  #colorEditor() {
+    this.hexInput = h('input', { type: 'text', class: 'node-hex', spellcheck: false, placeholder: '#RRGGBBAA', title: 'Hex with alpha' });
+    this.rInput = h('input', { type: 'number', min: 0, max: 255, step: 1 });
+    this.gInput = h('input', { type: 'number', min: 0, max: 255, step: 1 });
+    this.bInput = h('input', { type: 'number', min: 0, max: 255, step: 1 });
+    this.aInput = h('input', { type: 'number', min: 0, max: 255, step: 1 });
+    const channel = (name, input) => h('label', null, name, input);
+    this.colorEdit.append(
+      this.hexInput,
+      h('div', { class: 'node-color-rgb' }, channel('R', this.rInput), channel('G', this.gInput), channel('B', this.bInput), channel('A', this.aInput)),
+    );
+    const inputs = [this.hexInput, this.rInput, this.gInput, this.bInput, this.aInput];
+    for (const input of inputs) {
+      input.addEventListener('pointerdown', (e) => e.stopPropagation());
+      input.addEventListener('focus', () => {
+        const hit = this.#rgbTarget();
+        if (hit) beginEdit(hit.g);
+      });
+      input.addEventListener('input', () => this.#writeRgb());
+      input.addEventListener('blur', () => this.#finishRgb());
+    }
+  }
+
+  #rgbTarget() {
+    const g = this.graph();
+    if (!g || g.selected.length !== 1) return null;
+    const node = currentScope(g).nodes.find((n) => n.id === g.selected[0]);
+    if (!node || node.type !== 'rgb' || node.collapsed) return null;
+    return { g, node };
+  }
+
+  #writeRgb() {
+    const hit = this.#rgbTarget();
+    if (!hit) return;
+    const cur = { r: 1, g: 1, b: 1, a: 1, ...(hit.node.params?.color || {}) };
+    let next;
+    if (document.activeElement === this.hexInput) {
+      const parsed = parseHex(this.hexInput.value);
+      if (!parsed) return;
+      next = { r: parsed.r, g: parsed.g, b: parsed.b, a: parsed.a == null ? cur.a : parsed.a };
+    } else {
+      const byte = (input, fallback) => {
+        const n = Number(input.value);
+        return Number.isFinite(n) ? clamp(Math.round(n), 0, 255) / 255 : fallback;
+      };
+      next = {
+        r: byte(this.rInput, cur.r), g: byte(this.gInput, cur.g),
+        b: byte(this.bInput, cur.b), a: byte(this.aInput, cur.a),
+      };
+    }
+    setParamLive(hit.g, hit.node.id, 'color', next);
+    this.#fillRgbInputs(next, document.activeElement);
+    this.schedule();
+  }
+
+  #finishRgb() {
+    this.#writeRgb();
+    const hit = this.#rgbTarget();
+    if (hit && endEdit(hit.g)) markGraph(this.ed.doc);
+  }
+
+  #fillRgbInputs(c, skip) {
+    const byte = (v) => String(Math.round(clamp(v, 0, 1) * 255));
+    if (skip !== this.hexInput) this.hexInput.value = rgbaHex(c);
+    if (skip !== this.rInput) this.rInput.value = byte(c.r);
+    if (skip !== this.gInput) this.gInput.value = byte(c.g);
+    if (skip !== this.bInput) this.bInput.value = byte(c.b);
+    if (skip !== this.aInput) this.aInput.value = byte(c.a ?? 1);
+  }
+
+  #placeColorEdit() {
+    const hit = this.#rgbTarget();
+    if (!hit || !this.colorEdit) { if (this.colorEdit) this.colorEdit.hidden = true; return; }
+    const b = nodeBox(hit.node);
+    const x = hit.node.x * this.zoom + this.panX + 8 * this.zoom;
+    const y = hit.node.y * this.zoom + this.panY + (26 + 8 + 18) * this.zoom;
+    this.colorEdit.hidden = false;
+    this.colorEdit.style.left = `${x}px`;
+    this.colorEdit.style.top = `${y}px`;
+    this.colorEdit.style.width = `${Math.max(80, b.w - 16)}px`;
+    this.colorEdit.style.transform = `scale(${this.zoom})`;
+    if (!this.colorEdit.contains(document.activeElement)) this.#fillRgbInputs(hit.node.params?.color || { r: 1, g: 1, b: 1, a: 1 });
   }
 
   #formula(node) {
@@ -834,7 +997,7 @@ export class NodeView {
     if (this.backdrop) this.#backdrop(ctx);
     this.#grid(ctx);
     const g = this.graph();
-    if (!g) return;
+    if (!g) { this.#placeColorEdit(); return; }
     ctx.save();
     ctx.translate(this.panX, this.panY);
     ctx.scale(this.zoom, this.zoom);
@@ -861,6 +1024,7 @@ export class NodeView {
       ctx.strokeRect(x, y, Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
     }
     ctx.restore();
+    this.#placeColorEdit();
   }
 
   #backdrop(ctx) {
@@ -917,7 +1081,8 @@ export class NodeView {
     }
     const b = nodeBox(n);
     const spec = NODE_TYPES[n.type];
-    const head = n.color || categoryColor(spec?.category);
+    const rgb = n.type === 'rgb' ? (n.params?.color || { r: 1, g: 1, b: 1, a: 1 }) : null;
+    const head = rgb ? null : (n.color || categoryColor(spec?.category));
     const on = g.selected.includes(n.id);
     ctx.fillStyle = '#23262d';
     ctx.strokeStyle = this.errors.some((e) => e.id === n.id) ? '#ff6b6b' : (on ? '#4c9dff' : '#3a404a');
@@ -928,14 +1093,38 @@ export class NodeView {
     ctx.beginPath();
     roundRect(ctx, n.x, n.y, b.w, 26, 7);
     ctx.clip();
-    ctx.fillStyle = head;
-    ctx.globalAlpha = n.muted ? 0.45 : 1;
-    ctx.fillRect(n.x, n.y, b.w, 26);
+    if (rgb) {
+      const cell = 6;
+      for (let x = 0; x < b.w; x += cell) {
+        for (let row = 0; row < 26; row += cell) {
+          ctx.fillStyle = ((x / cell | 0) + (row / cell | 0)) & 1 ? '#9a9a9a' : '#d5d5d5';
+          ctx.fillRect(n.x + x, n.y + row, cell, cell);
+        }
+      }
+      const R = Math.round(clamp(rgb.r, 0, 1) * 255);
+      const G = Math.round(clamp(rgb.g, 0, 1) * 255);
+      const B = Math.round(clamp(rgb.b, 0, 1) * 255);
+      ctx.fillStyle = `rgba(${R},${G},${B},${rgb.a ?? 1})`;
+      ctx.fillRect(n.x, n.y, b.w, 26);
+    } else {
+      ctx.fillStyle = head;
+      ctx.globalAlpha = n.muted ? 0.45 : 1;
+      ctx.fillRect(n.x, n.y, b.w, 26);
+    }
     ctx.restore();
     ctx.globalAlpha = 1;
-    ctx.fillStyle = '#15171c';
+    ctx.fillStyle = rgb ? inkFor(rgb) : '#15171c';
     ctx.font = '12px sans-serif';
     ctx.fillText(nodeLabel(n), n.x + 8, n.y + 17);
+    if (!n.collapsed && rgb) {
+      ctx.fillStyle = '#c5cad3';
+      ctx.font = '11px ui-monospace, monospace';
+      const y0 = n.y + 26 + 8 + 18 + 14;
+      ctx.fillText(rgbaHex(rgb), n.x + 10, y0);
+      const ch = (v) => Math.round(clamp(v, 0, 1) * 255);
+      ctx.fillText(`R ${ch(rgb.r)}   G ${ch(rgb.g)}   B ${ch(rgb.b)}`, n.x + 10, y0 + 16);
+      ctx.fillText(`A ${ch(rgb.a ?? 1)}`, n.x + 10, y0 + 32);
+    }
     if (!n.collapsed && (n.type === 'viewer' || n.type === 'composite')) {
       const thumb = this.thumbs.get(n.id);
       if (thumb) ctx.drawImage(thumb, n.x + 8, n.y + b.h - 64, b.w - 16, 56);
@@ -986,6 +1175,32 @@ export class NodeView {
 function rgbHex(c) {
   const n = (v) => Math.round(clamp(v, 0, 1) * 255).toString(16).padStart(2, '0');
   return `#${n(c.r)}${n(c.g)}${n(c.b)}`;
+}
+
+function rgbaHex(c) {
+  const n = (v) => Math.round(clamp(v, 0, 1) * 255).toString(16).padStart(2, '0');
+  return `#${n(c.r)}${n(c.g)}${n(c.b)}${n(c.a ?? 1)}`;
+}
+
+function parseHex(s) {
+  let t = String(s || '').trim().replace(/^#/, '');
+  if (t.length === 3 || t.length === 4) t = t.split('').map((ch) => ch + ch).join('');
+  if (!/^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(t)) return null;
+  return {
+    r: parseInt(t.slice(0, 2), 16) / 255,
+    g: parseInt(t.slice(2, 4), 16) / 255,
+    b: parseInt(t.slice(4, 6), 16) / 255,
+    a: t.length === 8 ? parseInt(t.slice(6, 8), 16) / 255 : null,
+  };
+}
+
+function inkFor(c) {
+  const a = c.a == null ? 1 : clamp(c.a, 0, 1);
+  const r = c.r * a + 0.62 * (1 - a);
+  const g = c.g * a + 0.62 * (1 - a);
+  const b = c.b * a + 0.62 * (1 - a);
+  const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return y > 0.62 ? '#15171c' : '#f4f6fa';
 }
 
 function roundRect(ctx, x, y, w, h, r) {

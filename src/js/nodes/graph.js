@@ -534,7 +534,8 @@ export function nodeBox(node) {
   const rows = Math.max(socks.inputs.length, socks.outputs.length, 1);
   if (node.collapsed) return { w: NODE_W, h: 26 };
   const preview = node.type === 'viewer' || node.type === 'composite' ? 68 : 0;
-  return { w: NODE_W, h: 26 + 8 + rows * 18 + preview };
+  const swatch = !node.collapsed && node.type === 'rgb' ? 78 : 0;
+  return { w: NODE_W, h: 26 + 8 + rows * 18 + preview + swatch };
 }
 
 export function socketXY(node, dir, id) {

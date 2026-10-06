@@ -7,7 +7,7 @@ import { ensureGraph, linkSockets, groupNodes, graphForSave } from '../src/js/no
 import { evaluateGraph, makeContext, primaryOutput, summarize } from '../src/js/nodes/eval.js';
 import { executeLine } from '../src/js/nodes/script.js';
 import { encodeJob, decodeJob } from '../src/js/core/job.js';
-import { extractCommands, ollamaEndpoint, runCommands, taskPrompt, checkModelName } from '../src/js/nodes/agent.js';
+import { extractCommands, ollamaEndpoint, runCommands, taskPrompt, checkModelName, agentReadout } from '../src/js/nodes/agent.js';
 
 test('latex formulas compile and evaluate', () => {
   const env = formulaEnv({ u: 1, v: 0, x: 0, y: 0, r: 0, g: 0, b: 0, a: 1, A: 0, B: 0, C: 0, t: 0, W: 1, H: 1 });
@@ -143,4 +143,70 @@ test('a model completion becomes commands, and thinking text is ignored', () => 
   assert.throws(() => checkModelName(''));
   assert.equal(ollamaEndpoint('http://127.0.0.1:11434'), 'http://127.0.0.1:11434/api/generate');
   assert.throws(() => ollamaEndpoint('http://example.com/api'));
+});
+
+test('gradient colours follow two vectors, and booleans combine pictures', () => {
+  const ed = new Editor();
+  executeLine(ed, { cmd: 'new', width: 8, height: 4, name: 'G' });
+  executeLine(ed, { cmd: 'add', type: 'rgb', id: 'black', params: { color: { r: 0, g: 0, b: 0, a: 1 } } });
+  executeLine(ed, { cmd: 'add', type: 'rgb', id: 'red', params: { color: { r: 1, g: 0, b: 0, a: 1 } } });
+  executeLine(ed, { cmd: 'add', type: 'gradient', id: 'grad' });
+  executeLine(ed, { cmd: 'link', from: 'black', out: 'color', to: 'grad', in: 'color1' });
+  executeLine(ed, { cmd: 'link', from: 'red', out: 'color', to: 'grad', in: 'color2' });
+  let out = executeLine(ed, { cmd: 'eval', node: 'grad', sample: [[0.05, 0.5], [0.95, 0.5]] });
+  assert.equal(out.ok, true, out.error);
+  assert.ok(out.samples[1].r > out.samples[0].r + 0.5, JSON.stringify(out.samples));
+  executeLine(ed, { cmd: 'add', type: 'combinexyz', id: 's', params: { x: 1, y: 0.5, z: 0 } });
+  executeLine(ed, { cmd: 'add', type: 'combinexyz', id: 'e', params: { x: 0, y: 0.5, z: 0 } });
+  executeLine(ed, { cmd: 'link', from: 's', out: 'vector', to: 'grad', in: 'start' });
+  executeLine(ed, { cmd: 'link', from: 'e', out: 'vector', to: 'grad', in: 'end' });
+  out = executeLine(ed, { cmd: 'eval', node: 'grad', sample: [[0.05, 0.5], [0.95, 0.5]] });
+  assert.ok(out.samples[0].r > out.samples[1].r + 0.5, JSON.stringify(out.samples));
+
+  executeLine(ed, { cmd: 'add', type: 'rgb', id: 'green', params: { color: { r: 0, g: 1, b: 0, a: 1 } } });
+  executeLine(ed, { cmd: 'add', type: 'add', id: 'sum' });
+  executeLine(ed, { cmd: 'link', from: 'red', out: 'color', to: 'sum', in: 'a' });
+  executeLine(ed, { cmd: 'link', from: 'green', out: 'color', to: 'sum', in: 'b' });
+  out = executeLine(ed, { cmd: 'eval', node: 'sum', sample: [[0.5, 0.5]] });
+  assert.ok(out.samples[0].r > 0.9 && out.samples[0].g > 0.9, JSON.stringify(out.samples));
+
+  executeLine(ed, { cmd: 'add', type: 'sub', id: 'diff' });
+  executeLine(ed, { cmd: 'link', from: 'sum', out: 'color', to: 'diff', in: 'a' });
+  executeLine(ed, { cmd: 'link', from: 'red', out: 'color', to: 'diff', in: 'b' });
+  out = executeLine(ed, { cmd: 'eval', node: 'diff', sample: [[0.5, 0.5]] });
+  assert.ok(out.samples[0].r < 0.05 && out.samples[0].g > 0.9, JSON.stringify(out.samples));
+
+  executeLine(ed, { cmd: 'add', type: 'xor', id: 'xx' });
+  executeLine(ed, { cmd: 'link', from: 'red', out: 'color', to: 'xx', in: 'a' });
+  executeLine(ed, { cmd: 'link', from: 'green', out: 'color', to: 'xx', in: 'b' });
+  out = executeLine(ed, { cmd: 'eval', node: 'xx', sample: [[0.5, 0.5]] });
+  assert.ok(Math.abs(out.samples[0].r - 1) < 0.05 && Math.abs(out.samples[0].g - 1) < 0.05);
+
+  executeLine(ed, { cmd: 'add', type: 'intersect', id: 'both' });
+  executeLine(ed, { cmd: 'add', type: 'rgb', id: 'half', params: { color: { r: 0.5, g: 1, b: 0, a: 1 } } });
+  executeLine(ed, { cmd: 'link', from: 'red', out: 'color', to: 'both', in: 'a' });
+  executeLine(ed, { cmd: 'link', from: 'half', out: 'color', to: 'both', in: 'b' });
+  out = executeLine(ed, { cmd: 'eval', node: 'both', sample: [[0.5, 0.5]] });
+  assert.ok(Math.abs(out.samples[0].r - 0.5) < 0.05 && out.samples[0].g < 0.05, JSON.stringify(out.samples));
+});
+
+test('shapes cover their interior and a formula can count pixels', () => {
+  const ed = new Editor();
+  executeLine(ed, { cmd: 'new', width: 32, height: 32, name: 'S' });
+  for (const type of ['circle', 'oval', 'triangle', 'ngon', 'line', 'curve']) {
+    executeLine(ed, { cmd: 'add', type, id: type, params: type === 'curve' ? { width: 0.3 } : undefined });
+    const out = executeLine(ed, { cmd: 'eval', node: type, sample: [[0.5, 0.5], [0.02, 0.02]] });
+    assert.equal(out.ok, true, out.error);
+    assert.ok(out.samples[0].a > 0.5, `${type} centre ${JSON.stringify(out.samples[0])}`);
+    assert.ok(out.samples[1].a < 0.2, `${type} corner ${JSON.stringify(out.samples[1])}`);
+  }
+  executeLine(ed, { cmd: 'add', type: 'formula', id: 'px', params: { latex: 'u', pixels: true } });
+  const out = executeLine(ed, { cmd: 'eval', node: 'px', sample: [[0.02, 0.5], [0.9, 0.5]] });
+  assert.ok(out.samples[1].r > 10, JSON.stringify(out.samples));
+  assert.ok(out.samples[0].r < 2, JSON.stringify(out.samples));
+});
+
+test('the agent readout names the model, the token rate, and the harness', () => {
+  const text = agentReadout({ model: 'bonsai', token: 'add', tokens: 12, tps: 9.13, commands: 2, source: 'Ollama' });
+  assert.equal(text, '[agent: bonsai [12 add][9.1 tok/s] [2 commands]]\n[Ollama]');
 });

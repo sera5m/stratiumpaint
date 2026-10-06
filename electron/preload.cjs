@@ -27,4 +27,9 @@ contextBridge.exposeInMainWorld('stratumNative', {
   scriptResult: (id, result) => ipcRenderer.send('script:result', id, result),
   scriptReady: () => ipcRenderer.send('script:ready'),
   ollamaGenerate: (payload) => ipcRenderer.invoke('ollama:generate', payload),
+  onOllamaProgress: (cb) => {
+    ipcRenderer.removeAllListeners('ollama:progress');
+    if (typeof cb === 'function') ipcRenderer.on('ollama:progress', (_e, data) => cb(data));
+  },
+  offOllamaProgress: () => ipcRenderer.removeAllListeners('ollama:progress'),
 });

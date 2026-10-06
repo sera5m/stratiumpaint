@@ -441,10 +441,11 @@ ipcMain.handle('app:apply-update', async (_e, mode) => {
 ipcMain.handle('app:confirm-close', () => { forceClose = true; win?.close(); });
 ipcMain.handle('app:quit', () => { forceClose = true; app.quit(); });
 
-ipcMain.handle('ollama:generate', async (_e, payload) => {
+ipcMain.handle('ollama:generate', async (e, payload) => {
   const url = String(payload?.url || '');
   const model = String(payload?.model || '');
   const prompt = String(payload?.prompt || '');
+  const stream = !!payload?.stream;
   let parsed;
   try { parsed = new URL(url); }
   catch { throw new Error('That address is not a URL.'); }
@@ -459,12 +460,48 @@ ipcMain.handle('ollama:generate', async (_e, payload) => {
     const res = await fetch(parsed.href, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt, stream: false, options: { num_ctx: 8192, temperature: 0.2 } }),
+      body: JSON.stringify({ model, prompt, stream, options: { num_ctx: 8192, temperature: 0.2 } }),
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`The local model returned ${res.status}. Is Ollama running?`);
-    const data = await res.json();
-    return String(data.response || '');
+    if (!stream) {
+      const data = await res.json();
+      return String(data.response || '');
+    }
+    const reader = res.body?.getReader?.();
+    if (!reader) {
+      const data = await res.json();
+      return String(data.response || '');
+    }
+    const dec = new TextDecoder();
+    let buf = '', text = '', tokens = 0;
+    const t0 = Date.now();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let data;
+        try { data = JSON.parse(line); } catch { continue; }
+        if (data.error) throw new Error(String(data.error));
+        if (data.response) {
+          text += data.response;
+          tokens += 1;
+          const sec = Math.max(0.001, (Date.now() - t0) / 1000);
+          e.sender.send('ollama:progress', { tokens, tps: tokens / sec, token: data.response, text, done: false });
+        }
+        if (data.done) {
+          if (data.eval_count) tokens = data.eval_count;
+          const sec = data.eval_duration ? data.eval_duration / 1e9 : Math.max(0.001, (Date.now() - t0) / 1000);
+          e.sender.send('ollama:progress', { tokens, tps: tokens / Math.max(sec, 0.001), token: '', text, done: true });
+        }
+      }
+    }
+    return text;
   } catch (err) {
     if (err.name === 'AbortError') throw new Error('The model took longer than three minutes.');
     throw err;
