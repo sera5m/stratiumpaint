@@ -441,6 +441,38 @@ ipcMain.handle('app:apply-update', async (_e, mode) => {
 ipcMain.handle('app:confirm-close', () => { forceClose = true; win?.close(); });
 ipcMain.handle('app:quit', () => { forceClose = true; app.quit(); });
 
+ipcMain.handle('ollama:generate', async (_e, payload) => {
+  const url = String(payload?.url || '');
+  const model = String(payload?.model || '');
+  const prompt = String(payload?.prompt || '');
+  let parsed;
+  try { parsed = new URL(url); }
+  catch { throw new Error('That address is not a URL.'); }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !['127.0.0.1', 'localhost', '::1'].includes(host)) {
+    throw new Error('Only a model on this computer is allowed.');
+  }
+  if (!model || model.length > 80) throw new Error('Type the Ollama model name.');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 180000);
+  try {
+    const res = await fetch(parsed.href, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, prompt, stream: false, options: { num_ctx: 8192, temperature: 0.2 } }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`The local model returned ${res.status}. Is Ollama running?`);
+    const data = await res.json();
+    return String(data.response || '');
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('The model took longer than three minutes.');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 // ---------------------------------------------------------------- script pipe
 // `stratum --script` reads JSON commands on stdin. If a copy is already open, the
 // bytes are forwarded to it and this process leaves before taking the single-instance lock.

@@ -26,4 +26,5 @@ contextBridge.exposeInMainWorld('stratumNative', {
   onScriptExec: (cb) => ipcRenderer.on('script:exec', (_e, payload) => cb(payload)),
   scriptResult: (id, result) => ipcRenderer.send('script:result', id, result),
   scriptReady: () => ipcRenderer.send('script:ready'),
+  ollamaGenerate: (payload) => ipcRenderer.invoke('ollama:generate', payload),
 });

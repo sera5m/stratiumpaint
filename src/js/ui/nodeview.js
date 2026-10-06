@@ -10,6 +10,8 @@ import {
 } from '../nodes/graph.js';
 import { applyToLayer, evaluateGraph, makeContext, previewSize, primaryOutput } from '../nodes/eval.js';
 import { compileFormula, drawFormula } from '../nodes/formula.js';
+import { extractCommands, ollamaEndpoint, repairPrompt, runCommands, taskPrompt, checkModelName } from '../nodes/agent.js';
+import { ollamaGenerate } from './platform.js';
 import { h } from './dom.js';
 
 const TAGS = ['', '#6aa2ff', '#7dba5a', '#e2a24a', '#e06a6a', '#d46ad4', '#8a84e0'];
@@ -36,15 +38,18 @@ export class NodeView {
     root.classList.add('nodes-root');
     this.main = h('div', { class: 'nodes-main' });
     this.bar = h('div', { class: 'nodes-bar' });
+    this.modelRow = h('div', { class: 'nodes-model' });
+    this.modelLog = h('pre', { class: 'nodes-model-log', hidden: true });
     this.wrap = h('div', { class: 'nodes-wrap' });
     this.canvas = h('canvas', { class: 'nodes-canvas' });
     this.side = h('aside', { class: 'nodes-side' });
     this.wrap.append(this.canvas);
-    this.main.append(this.bar, this.wrap);
+    this.main.append(this.bar, this.modelRow, this.modelLog, this.wrap);
     root.append(this.main, this.side);
 
     this.ctx = this.canvas.getContext('2d');
     this.#bar();
+    this.#model();
     this.#listen();
     ed.on('doc', () => this.schedule());
     ed.on('nodes', () => this.schedule());
@@ -609,6 +614,76 @@ export class NodeView {
       this.backBtn, add, apply,
     );
     this.#syncBar();
+  }
+
+  #model() {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('stratum.model') || '{}'); } catch { /* private mode */ }
+    this.modelName = h('input', {
+      type: 'text', class: 'model-name', spellcheck: false, placeholder: 'qwen2.5-coder:7b',
+      value: saved.model || '', title: 'Ollama model on this computer',
+    });
+    this.modelTask = h('input', {
+      type: 'text', class: 'model-task', placeholder: 'Ask the local model… slow red to blue waves',
+      title: 'The model replies with script lines. Stratum runs them here.',
+    });
+    this.modelRetry = h('input', { type: 'checkbox', title: 'Ask once more if a command fails. Leave off for a thinking model.' });
+    this.modelBtn = h('button', { type: 'button', class: 'btn', onClick: () => this.#askModel() }, 'Ask');
+    this.modelName.addEventListener('change', () => this.#rememberModel());
+    this.modelTask.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); this.#askModel(); }
+    });
+    this.modelRow.append(
+      this.modelName,
+      this.modelTask,
+      h('label', { class: 'opt', title: 'One more completion if a line fails' }, this.modelRetry, 'Retry'),
+      this.modelBtn,
+    );
+  }
+
+  #rememberModel() {
+    try { localStorage.setItem('stratum.model', JSON.stringify({ model: this.modelName.value.trim() })); } catch { /* ignore */ }
+  }
+
+  async #askModel() {
+    const doc = this.ed.doc;
+    if (!doc) { this.ed.toast('Open an image first.'); return; }
+    let model;
+    try { model = checkModelName(this.modelName.value); }
+    catch (err) { this.ed.toast(err.message); return; }
+    const task = this.modelTask.value.trim();
+    if (!task) { this.ed.toast('Say what the picture should do.'); return; }
+    this.#rememberModel();
+    this.modelBtn.disabled = true;
+    this.modelLog.hidden = false;
+    this.modelLog.textContent = 'Waiting for the model. A thinking model can take a minute. VRAM stays with Ollama.';
+    const url = ollamaEndpoint('http://127.0.0.1:11434');
+    try {
+      ensureGraph(doc);
+      let text = await ollamaGenerate({ url, model, prompt: taskPrompt(task, doc) });
+      let commands = extractCommands(text);
+      if (!commands.length) {
+        this.modelLog.textContent = 'No commands came back. The pipe still accepts JSON lines if you would rather send them yourself.\n' + String(text || '').slice(0, 600);
+        return;
+      }
+      let results = runCommands(this.ed, commands);
+      this.#changed();
+      if (this.modelRetry.checked && results.some((r) => !r.ok)) {
+        this.modelLog.textContent = 'A command failed. Asking once more…';
+        text = await ollamaGenerate({ url, model, prompt: repairPrompt(task, doc, results) });
+        const more = extractCommands(text);
+        if (more.length) results = results.concat(runCommands(this.ed, more));
+        this.#changed();
+      }
+      this.modelLog.textContent = results.map((r) => JSON.stringify(r)).join('\n');
+      const bad = results.filter((r) => !r.ok).length;
+      this.ed.toast(bad ? `${bad} command${bad > 1 ? 's' : ''} failed.` : 'The model updated the graph.');
+    } catch (err) {
+      this.modelLog.textContent = err.message || String(err);
+      this.ed.toast(err.message || String(err));
+    } finally {
+      this.modelBtn.disabled = false;
+    }
   }
 
   #syncBar() {

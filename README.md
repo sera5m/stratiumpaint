@@ -61,6 +61,14 @@ One JSON object per line, one JSON result per line. If Stratum is already
 open, the pipe is handed to that copy. Nodes → Run Script uses the same
 language in the browser. `{"cmd":"types"}` lists every node and socket.
 
+The node editor also has a short Ask row. Type an Ollama model name
+(`qwen2.5-coder:7b`, or a small thinking model such as a DeepSeek distill)
+and a sentence. Stratum calls `http://127.0.0.1:11434` and runs the JSON
+lines that come back. The model stays in Ollama, so its video memory is
+not Stratum's. Retry asks one more time if a line fails; leave it off when
+the model spends a long time thinking. Any other harness can still pipe
+into `stratum --script` instead of using Ask.
+
 Model → Unwrap Demo, Model → Open Model, or dropping an `.obj` lays the
 surface out as one texture and mounts it beside the canvas. Charts stay
 joined while the bend between faces is under the angle you set; sharper

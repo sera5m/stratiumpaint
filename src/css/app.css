@@ -98,6 +98,12 @@ h3 { margin: 0; padding: 8px 10px 6px; font-size: 11px; font-weight: 600; letter
 .nodes-bar { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 4px 8px; background: var(--bg-2); border-bottom: 1px solid var(--line); overflow-x: auto; }
 .nodes-bar .btn { padding: 3px 10px; }
 .nodes-bar .btn.on { background: var(--accent-dim); }
+.nodes-model { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: var(--bg-1); border-bottom: 1px solid var(--line); }
+.nodes-model input[type="text"] { background: var(--bg-0); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; min-width: 0; }
+.nodes-model .model-name { width: 190px; flex: none; }
+.nodes-model .model-task { flex: 1; }
+.nodes-model-log { margin: 0; max-height: 76px; overflow: auto; padding: 4px 10px; background: var(--bg-0); color: var(--dim); font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
+.nodes-model-log[hidden] { display: none; }
 .nodes-crumb { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
 .linkish { background: none; border: 0; color: var(--text); padding: 0 2px; }
 .nodes-wrap { position: relative; flex: 1; min-height: 0; }

@@ -54,7 +54,7 @@ await writeFile(
   html.replace(styleTag, '<link rel="stylesheet" href="app.css">').replace(scriptTag, '<script src="app.js" defer></script>'),
 );
 
-const inlineCsp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; object-src 'none'; base-uri 'none'">`;
+const inlineCsp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src http://127.0.0.1:11434 http://localhost:11434; object-src 'none'; base-uri 'none'">`;
 await writeFile(
   path.join(dist, 'stratum.html'),
   html.replace(cspTag, inlineCsp).replace(styleTag, () => `<style>${css}</style>`)

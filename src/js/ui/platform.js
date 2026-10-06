@@ -11,6 +11,19 @@ export function onScriptExec(cb) { native?.onScriptExec?.(cb); }
 export function scriptResult(id, result) { native?.scriptResult?.(id, result); }
 export function scriptReady() { native?.scriptReady?.(); }
 
+/** Ask a local Ollama. The desktop app calls out from the shell; a browser tab calls directly. */
+export async function ollamaGenerate({ url, model, prompt }) {
+  if (native?.ollamaGenerate) return native.ollamaGenerate({ url, model, prompt });
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, prompt, stream: false, options: { num_ctx: 8192, temperature: 0.2 } }),
+  });
+  if (!res.ok) throw new Error(`The local model returned ${res.status}. Is Ollama running?`);
+  const data = await res.json();
+  return String(data.response || '');
+}
+
 /** → [{name, path, bytes}] */
 export async function openFiles() {
   if (native) return native.openFiles();

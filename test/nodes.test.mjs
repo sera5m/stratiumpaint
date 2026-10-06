@@ -3,11 +3,11 @@ import test from 'node:test';
 import { Editor } from '../src/js/ui/editor.js';
 import { Doc } from '../src/js/doc/document.js';
 import { compileFormula, evalFormula, formulaEnv, parseFormula } from '../src/js/nodes/formula.js';
-import { ensureGraph, linkSockets, groupNodes } from '../src/js/nodes/graph.js';
+import { ensureGraph, linkSockets, groupNodes, graphForSave } from '../src/js/nodes/graph.js';
 import { evaluateGraph, makeContext, primaryOutput, summarize } from '../src/js/nodes/eval.js';
 import { executeLine } from '../src/js/nodes/script.js';
 import { encodeJob, decodeJob } from '../src/js/core/job.js';
-import { graphForSave } from '../src/js/nodes/graph.js';
+import { extractCommands, ollamaEndpoint, runCommands, taskPrompt, checkModelName } from '../src/js/nodes/agent.js';
 
 test('latex formulas compile and evaluate', () => {
   const env = formulaEnv({ u: 1, v: 0, x: 0, y: 0, r: 0, g: 0, b: 0, a: 1, A: 0, B: 0, C: 0, t: 0, W: 1, H: 1 });
@@ -115,4 +115,32 @@ test('a job keeps the node graph', async () => {
   const job = await decodeJob(bytes);
   assert.equal(job.nodeGraph.nodes.some((n) => n.type === 'formula' || n.type === 'checker'), true);
   assert.ok(job.nodeGraph.links.length >= 1);
+});
+
+test('a model completion becomes commands, and thinking text is ignored', () => {
+  const text = [
+    '<think>link the checker first</think>',
+    'Here you go:',
+    '```',
+    '{"cmd":"delete","id":"chk"}',
+    '{"cmd":"add","type":"wave","id":"wv"}',
+    '```',
+    'done',
+  ].join('\n');
+  const cmds = extractCommands(text);
+  assert.equal(cmds.length, 2);
+  assert.equal(cmds[0].id, 'chk');
+  assert.deepEqual(extractCommands('[{"cmd":"apply"},{"cmd":"info"}]').map((c) => c.cmd), ['apply', 'info']);
+  assert.equal(extractCommands('no json here').length, 0);
+  const ed = new Editor();
+  ed.addDoc(new Doc(8, 8));
+  const results = runCommands(ed, [{ cmd: 'add', type: 'rgb', id: 'red', params: { r: 1, g: 0, b: 0, a: 1 } }]);
+  assert.equal(results[0].ok, true);
+  assert.ok(ed.doc.nodeGraph.nodes.some((n) => n.id === 'red'));
+  assert.match(taskPrompt('red waves', ed.doc), /red waves/);
+  assert.match(taskPrompt('red waves', ed.doc), /"id":"comp"/);
+  assert.equal(checkModelName('qwen2.5-coder:7b'), 'qwen2.5-coder:7b');
+  assert.throws(() => checkModelName(''));
+  assert.equal(ollamaEndpoint('http://127.0.0.1:11434'), 'http://127.0.0.1:11434/api/generate');
+  assert.throws(() => ollamaEndpoint('http://example.com/api'));
 });
