@@ -191,8 +191,8 @@ function movePixels() {
     const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
     ed.doc.transaction(name, () => {
       ed.doc.commitRegion(s.layer, total, original, name);
-      finish();
     });
+    finish();
   };
 
   const lift = (ed) => {
