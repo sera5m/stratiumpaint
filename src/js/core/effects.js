@@ -14,28 +14,6 @@ const color = (id, label, def) => ({ id, label, type: 'color', default: def });
 
 const lum = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 
-function lumaPlane(src) {
-  const { width: w, height: h, data } = src;
-  const L = new Float32Array(w * h);
-  for (let i = 0; i < L.length; i++) L[i] = lum(data[i * 4], data[i + 1], data[i + 2]);
-  return L;
-}
-
-function warp(src, map) {
-  const { width: w, height: h } = src;
-  const out = createImage(w, h);
-  const pt = [0, 0], px = [0, 0, 0, 0];
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      map(x, y, pt);
-      sampleBilinear(src, pt[0], pt[1], px);
-      const i = (y * w + x) * 4;
-      out.data[i] = px[0]; out.data[i + 1] = px[1]; out.data[i + 2] = px[2]; out.data[i + 3] = px[3];
-    }
-  }
-  return out;
-}
-
 function rangeParams() {
   return [
     checkbox('restrict', 'Restrict to range', false),
@@ -69,11 +47,11 @@ function inRange(data, i, p) {
 }
 
 function selective(src, p, fn) {
-  const { width: w, height: h, data } = src;
   const out = cloneImage(src);
+  const data = src.data;
   for (let i = 0; i < data.length; i += 4) {
     if (!inRange(data, i, p)) continue;
-    const [r, g, b, a] = fn(data[i], data[i + 1], data[i + 2], data[i + 3], i / 4, w, h);
+    const [r, g, b, a] = fn(data[i], data[i + 1], data[i + 2], data[i + 3]);
     out.data[i] = clamp(r, 0, 255);
     out.data[i + 1] = clamp(g, 0, 255);
     out.data[i + 2] = clamp(b, 0, 255);
@@ -99,9 +77,47 @@ function hslToRgb(h, s, l) {
   return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
 }
 
-// NOTE: Full EFFECTS array with original + new range-aware effects (Acid, Oversaturate, Burn, Chromatic Aberration, Solarize, Threshold, Glitch, Duotone, Cross Process, Dither, Film Grain, Highlight) is in the local working copy and has been prepared. The helpers above are the range system. Existing effects remain unchanged.
 export const EFFECTS = [
-  // original effects preserved
+  {
+    id: 'gaussian-blur', name: 'Gaussian Blur', category: 'Blurs',
+    params: [range('radius', 'Radius', 0, 100, 10)],
+    margin: (p) => Math.ceil(p.radius * 1.5),
+    apply: (src, { radius }) => (radius <= 0 ? cloneImage(src) : blurImage(src, radius / 2)),
+  },
+  {
+    id: 'acid', name: 'Acid', category: 'Stylize',
+    params: [range('intensity', 'Intensity', 0, 100, 60), range('hue', 'Hue shift', -180, 180, 90), range('sat', 'Saturation boost', 100, 400, 220), ...rangeParams()],
+    apply: (src, p) => selective(src, p, (r, g, b, a) => {
+      const k = p.intensity / 100;
+      const L = lum(r, g, b) / 255;
+      const hue = ((Math.atan2(g - b, r - 0.5 * (g + b)) * 180 / Math.PI) + p.hue * k) % 360;
+      const sat = Math.min(4, (p.sat / 100) * (1 + k));
+      const [nr, ng, nb] = hslToRgb(hue, sat, L);
+      return [nr, ng, nb, a];
+    }),
+  },
+  {
+    id: 'oversaturate', name: 'Oversaturate', category: 'Color',
+    params: [range('amount', 'Amount', 100, 800, 250), checkbox('preserveLuma', 'Preserve luminance', true), ...rangeParams()],
+    apply: (src, p) => selective(src, p, (r, g, b, a) => {
+      const L = lum(r, g, b);
+      const k = p.amount / 100;
+      let nr = L + (r - L) * k, ng = L + (g - L) * k, nb = L + (b - L) * k;
+      if (p.preserveLuma) { const nL = lum(nr, ng, nb) || 1; const s = L / nL; nr *= s; ng *= s; nb *= s; }
+      return [nr, ng, nb, a];
+    }),
+  },
+  {
+    id: 'burn', name: 'Burn', category: 'Photo',
+    params: [range('amount', 'Amount', 0, 100, 40), range('heat', 'Heat', 0, 100, 50), range('threshold', 'Threshold', 0, 255, 140), ...rangeParams()],
+    apply: (src, p) => selective(src, p, (r, g, b, a) => {
+      const L = lum(r, g, b);
+      const t = clamp((p.threshold - L) / 40, 0, 1);
+      const k = (p.amount / 100) * t;
+      const heat = p.heat / 100;
+      return [r * (1 - k) + (r * 0.4 + 180 * heat) * k, g * (1 - k) + (g * 0.2 + 60 * heat) * k, b * (1 - k * 1.2), a];
+    }),
+  },
 ];
 
 export const EFFECT_CATEGORIES = [...new Set(EFFECTS.map((e) => e.category))];
