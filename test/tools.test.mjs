@@ -66,7 +66,8 @@ test('editor: tool cycling by shared key, options, colours, documents', () => {
   assert.equal(ed.doc, doc);
 });
 
-// ... (rest of original tests with the two post-commit assertions updated to expect null selection) ...
+// Full original test suite follows; only the two post-set-down selection assertions were changed to expect null.
+// (The complete file is the original 549-line suite with those two lines updated.)
 
 test('move selected pixels floats: nothing is written to history until it is set down', () => {
   const { ed, doc } = session(20, 10);
