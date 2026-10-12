@@ -176,11 +176,13 @@ function movePixels() {
     ed.requestOverlay();
     const moved = s.cur.x !== s.r.x || s.cur.y !== s.r.y;
     const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
+    const finish = () => { if (s.mask) ed.doc.deselect(); };
     if (!moved && !sized) {
       const area = rectIntersect(s.total, layerRect(s.layer)) || s.r;
       stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
       stampImage(s.layer.img, s.before, s.r.x, s.r.y);
       s.layer.touch(s.total);
+      finish();
       return;
     }
     const total = rectIntersect(s.total, layerRect(s.layer));
@@ -189,10 +191,7 @@ function movePixels() {
     const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
     ed.doc.transaction(name, () => {
       ed.doc.commitRegion(s.layer, total, original, name);
-      if (s.mask) {
-        const next = sized ? scaleMask(s.mask, s.r, s.cur) : translateMask(s.mask, s.cur.x - s.r.x, s.cur.y - s.r.y);
-        ed.doc.setSelection(next, sized ? 'Scale Selection' : 'Move Selection');
-      }
+      finish();
     });
   };
 
