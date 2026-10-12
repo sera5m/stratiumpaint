@@ -15,6 +15,6 @@ export function createTools() {
   const [zoom, pan, picker] = navTools();
   const [bucket, gradient] = fillTools();
   const [brush, pencil, eraser, clone] = brushTools();
-  const [line, rect, roundrect, ellipse, triangle, diamond, polygon, star] = shapeTools();
-  return [rectSel, ellSel, lasso, wand, movePx, moveSel, zoom, pan, bucket, gradient, brush, pencil, eraser, clone, picker, line, rect, roundrect, ellipse, triangle, diamond, polygon, star, textTool(), ...extraTools()];
+  const [line, rect, roundrect, ellipse] = shapeTools();
+  return [rectSel, ellSel, lasso, wand, movePx, moveSel, zoom, pan, bucket, gradient, brush, pencil, eraser, clone, picker, line, rect, roundrect, ellipse, textTool(), ...extraTools()];
 }
