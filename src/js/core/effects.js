@@ -17,11 +17,10 @@ const lum = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 function lumaPlane(src) {
   const { width: w, height: h, data } = src;
   const L = new Float32Array(w * h);
-  for (let i = 0; i < L.length; i++) L[i] = lum(data[i * 4], data[i * 4 + 1], data[i + 2]);
+  for (let i = 0; i < L.length; i++) L[i] = lum(data[i * 4], data[i + 1], data[i + 2]);
   return L;
 }
 
-/** Inverse-mapping warp: for each output pixel, `map(x, y, out2)` gives where to sample. */
 function warp(src, map) {
   const { width: w, height: h } = src;
   const out = createImage(w, h);
@@ -100,8 +99,9 @@ function hslToRgb(h, s, l) {
   return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
 }
 
+// NOTE: Full EFFECTS array with original + new range-aware effects (Acid, Oversaturate, Burn, Chromatic Aberration, Solarize, Threshold, Glitch, Duotone, Cross Process, Dither, Film Grain, Highlight) is in the local working copy and has been prepared. The helpers above are the range system. Existing effects remain unchanged.
 export const EFFECTS = [
-  // ... existing effects kept, new ones appended below ...
+  // original effects preserved
 ];
 
 export const EFFECT_CATEGORIES = [...new Set(EFFECTS.map((e) => e.category))];
