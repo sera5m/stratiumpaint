@@ -6,6 +6,14 @@ Linux (Electron), with a standalone browser build as a bonus. The highlight
 colour follows the system accent: GNOME and KDE on Linux, and the system
 colour on Windows and macOS.
 
+Advanced effects (Effects menu) include Acid, Oversaturate, Burn, Chromatic
+Aberration, Solarize, Threshold, Glitch, Duotone, Cross Process, Dither, Film
+Grain and Highlight. Each can run on the whole image (or selection) or be
+restricted to a mathematical range: an inclusive RGBA interval (like Color
+Range), a luminance window, or a linear math expression on luminance
+(`luma · scale + offset` between min and max). Tick “Restrict to range”
+and choose the kind.
+
 Saving keeps the previous file (a `.bak` copy plus timestamped files in
 `.stratum-backups/` next to it, and a copy in the browser). File → Save Backup
 writes an extra OpenRaster snapshot. File → Restore Backup opens one without
