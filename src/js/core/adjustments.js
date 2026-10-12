@@ -138,6 +138,30 @@ export const ADJUSTMENTS = [
       return out;
     },
   },
+  {
+    id: 'shadows-highlights', name: 'Shadows / Highlights',
+    params: [
+      range('shadows', 'Shadows', -100, 100, 0),
+      range('highlights', 'Highlights', -100, 100, 0),
+      range('midtones', 'Midtones', -100, 100, 0),
+    ],
+    apply(src, { shadows, highlights, midtones }) {
+      const out = cloneImage(src), d = out.data;
+      const sh = shadows / 200, hi = highlights / 200, mi = midtones / 200;
+      for (let i = 0; i < d.length; i += 4) {
+        const L = lum(d[i], d[i + 1], d[i + 2]) / 255;
+        let adj = 0;
+        if (L < 0.33) adj = sh * (0.33 - L) / 0.33;
+        else if (L > 0.66) adj = hi * (L - 0.66) / 0.34;
+        else adj = mi;
+        const f = 1 + adj;
+        d[i] = clamp(d[i] * f, 0, 255);
+        d[i + 1] = clamp(d[i + 1] * f, 0, 255);
+        d[i + 2] = clamp(d[i + 2] * f, 0, 255);
+      }
+      return out;
+    },
+  },
 ];
 
 export const defaultParams = (spec) => Object.fromEntries((spec.params ?? []).map((p) => [p.id, p.default]));
