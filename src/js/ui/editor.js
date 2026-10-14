@@ -63,7 +63,7 @@ export class Editor extends Emitter {
 
   /** Pressing a tool's letter again cycles through the tools that share it. */
   cycleTool(key) {
-    const group = this.tools.filter((t) => t.key === key);
+    const group = this.tools.filter((t) => t && t.key === key);
     if (!group.length) return false;
     const i = group.indexOf(this.tool);
     this.setTool(group[(i + 1) % group.length].id);
