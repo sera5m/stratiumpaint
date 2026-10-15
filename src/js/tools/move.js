@@ -184,17 +184,10 @@ function movePixels() {
       return;
     }
     const total = rectIntersect(s.total, layerRect(s.layer));
-    // Undo image: the layer as it was before the lift (hole filled).
+    // Undo image only: the layer before the lift (hole filled). The layer itself already
+    // has the floated result from the drag — do not rewrite it or the move snaps back.
     const original = cropImage(s.base, total);
     stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y);
-    // Final image: fill the hole at the old spot, then paint the floated pixels at the new spot.
-    stampImage(s.layer.img, cropImage(s.base, total), total.x, total.y);
-    stampImage(s.layer.img, s.before, s.r.x, s.r.y);
-    const img = s.cur.w === s.src.width && s.cur.h === s.src.height
-      ? s.src
-      : resizeImage(s.src, s.cur.w, s.cur.h, 'smooth');
-    paintImage(s.layer.img, img, s.cur.x, s.cur.y);
-    s.layer.touch(total);
     const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
     ed.doc.transaction(name, () => {
       ed.doc.commitRegion(s.layer, total, original, name);
