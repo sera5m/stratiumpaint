@@ -1,7 +1,7 @@
 {
   "name": "stratum",
   "productName": "Stratum",
-  "version": "2.12.2",
+  "version": "2.12.3",
   "description": "Layered raster image editor in the spirit of Paint.NET, for Linux",
   "main": "electron/main.cjs",
   "license": "MIT",
@@ -12,9 +12,52 @@
     "start": "npm run build:dev && electron .",
     "web": "python3 -m http.server 8080 --directory src",
     "test": "node --test test/*.test.mjs",
-    "nodes": "node src/js/nodes/cli.js"
+    "nodes": "node src/js/nodes/cli.js",
+    "dist": "npm run build && electron-builder",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac"
   },
   "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.25.12"
-  }
+  },
+  "build": {
+    "appId": "com.sera5m.stratum",
+    "productName": "Stratum",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Graphics",
+      "synopsis": "Layered raster image editor"
+    },
+    "win": {
+      "target": [
+        "zip",
+        "nsis"
+      ],
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "author": "sera5m <69703832+sera5m@users.noreply.github.com>"
 }

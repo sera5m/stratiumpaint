@@ -3,3 +3,4 @@ dist/
 *.pkg.tar.*
 packaging/arch/pkg/
 packaging/arch/src/
+release/

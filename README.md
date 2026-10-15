@@ -181,7 +181,18 @@ npm test               # runs test/*.test.mjs (Node's built-in test runner)
 ```
 
 `dist/index.html` + `app.js` + `app.css` is what Electron loads.
-`dist/stratum.html` is everything inlined into one file — open it directly in
+`dist/stratum.html` is everything inlined into one file
+
+## Desktop packages
+
+```sh
+npm install
+npm run dist:linux   # AppImage + .deb in release/
+npm run dist:win     # portable zip (NSIS installer needs wine or a Windows host)
+```
+
+Artifacts land in `release/`. A GitHub Release can attach the AppImage, deb, and Windows zip.
+ — open it directly in
 any modern browser, no install needed.
 
 ## Installing on Arch Linux
