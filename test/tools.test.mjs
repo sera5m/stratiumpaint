@@ -66,9 +66,6 @@ test('editor: tool cycling by shared key, options, colours, documents', () => {
   assert.equal(ed.doc, doc);
 });
 
-// Full original test suite restored from pre-deselect commit.
-// The move-pixels tests expect the selection to follow the pixels on set-down.
-
 test('move selected pixels floats: nothing is written to history until it is set down', () => {
   const { ed, doc } = session(20, 10);
   doc.layer.img.data.set([255, 0, 0, 255], (3 * 20 + 3) * 4);
@@ -85,8 +82,7 @@ test('move selected pixels floats: nothing is written to history until it is set
 
   ed.commitTool(); // Enter
   assert.equal(doc.history.entries().length, before + 1, 'now it is one step');
-  assert.equal(doc.selection.data[4 * 20 + 9], 255, 'the selection moved with it once committed');
-  assert.equal(doc.selection.data[3 * 20 + 3], 0);
+  assert.equal(doc.selection, null, 'set-down clears the selection');
 
   doc.undo();
   assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255]);
