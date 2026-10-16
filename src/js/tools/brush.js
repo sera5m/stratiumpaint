@@ -8,11 +8,23 @@ import { clamp, rectUnion } from '../core/util.js';
 import { colorFor } from './common.js';
 
 /** 0..1 coverage of a dab of radius r at distance d from its centre. */
-export function coverage(d, r, hardness, aa) {
-  if (hardness >= 0.999) return aa ? clamp(r + 0.5 - d, 0, 1) : d <= r ? 1 : 0;
+export function coverage(d, r, hardness, aa, falloff = 'linear') {
+  if (falloff === 'hard' || hardness >= 0.999) return aa ? clamp(r + 0.5 - d, 0, 1) : d <= r ? 1 : 0;
+  if (d >= r) return 0;
+  const t = d / r;
+  if (falloff === 'gaussian') {
+    const sigma = 0.28 + (1 - hardness) * 0.22;
+    return Math.exp(-0.5 * (t / sigma) ** 2);
+  }
+  if (falloff === 'smooth') {
+    const inner = hardness;
+    if (t <= inner) return 1;
+    const u = (t - inner) / Math.max(1e-4, 1 - inner);
+    return 1 - u * u * (3 - 2 * u);
+  }
+  if (falloff === 'airbrush') return Math.exp(-2.4 * t * t) * (1 - t * 0.35);
   const inner = r * hardness;
   if (d <= inner) return 1;
-  if (d >= r) return 0;
   return (r - d) / (r - inner);
 }
 
@@ -26,7 +38,7 @@ function stamp(S, cx, cy) {
     const dy = y + 0.5 - cy;
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx;
-      const c = Math.round(coverage(Math.sqrt(dx * dx + dy * dy), r, hardness, aa) * 255);
+      const c = Math.round(coverage(Math.sqrt(dx * dx + dy * dy), r, hardness, aa, S.falloff) * 255);
       const i = y * w + x;
       if (c <= cov[i]) continue;
       cov[i] = c;
@@ -86,7 +98,7 @@ function makeBrush({ id, name, kind, key, icon }) {
     return {
       layer, mode: kind === 'eraser' ? 'erase' : kind === 'clone' ? 'clone' : 'paint',
       orig: cloneImage(layer.img), cov: new Uint8Array(layer.width * layer.height), mask: ed.surface().selection,
-      r: size / 2, hardness: pencil ? 1 : o.hardness / 100, aa: pencil ? false : o.aa,
+      r: size / 2, hardness: pencil ? 1 : o.hardness / 100, aa: pencil ? false : o.aa, falloff: pencil ? 'hard' : (o.falloff || 'linear'),
       step: pencil ? 1 : Math.max(1, size * 0.1), snap: pencil,
       alpha: (o.opacity / 100) * (kind === 'eraser' || kind === 'clone' ? 1 : color.a ?? 1), color,
       dirty: null, lx: e.x, ly: e.y, rem: 0, ox: 0, oy: 0,

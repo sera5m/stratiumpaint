@@ -14,12 +14,56 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function tracePath(ctx, kind, x0, y0, x1, y1, radius) {
+function poly(ctx, x, y, w, h, n, rot = -Math.PI / 2) {
+  const cx = x + w / 2, cy = y + h / 2, rx = w / 2, ry = h / 2;
+  for (let i = 0; i < n; i++) {
+    const a = rot + (i / n) * Math.PI * 2;
+    const px = cx + Math.cos(a) * rx, py = cy + Math.sin(a) * ry;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+}
+
+function starPath(ctx, x, y, w, h, points = 5, inner = 0.42) {
+  const cx = x + w / 2, cy = y + h / 2, rx = w / 2, ry = h / 2;
+  const n = points * 2;
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (i / n) * Math.PI * 2;
+    const k = i % 2 === 0 ? 1 : inner;
+    const px = cx + Math.cos(a) * rx * k, py = cy + Math.sin(a) * ry * k;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+}
+
+function arrowPath(ctx, x, y, w, h) {
+  const x0 = x, y0 = y, x1 = x + w, y1 = y + h;
+  const shaft = h * 0.35, head = w * 0.38;
+  const cy = (y0 + y1) / 2;
+  ctx.moveTo(x0, cy - shaft / 2);
+  ctx.lineTo(x1 - head, cy - shaft / 2);
+  ctx.lineTo(x1 - head, y0);
+  ctx.lineTo(x1, cy);
+  ctx.lineTo(x1 - head, y1);
+  ctx.lineTo(x1 - head, cy + shaft / 2);
+  ctx.lineTo(x0, cy + shaft / 2);
+  ctx.closePath();
+}
+
+function tracePath(ctx, kind, x0, y0, x1, y1, radius, sides = 5) {
   ctx.beginPath();
   if (kind === 'line') { ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); return; }
   const x = Math.min(x0, x1), y = Math.min(y0, y1), w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
   if (kind === 'rect') ctx.rect(x, y, w, h);
   else if (kind === 'ellipse') ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+  else if (kind === 'roundrect') roundRectPath(ctx, x, y, w, h, Math.min(radius, w / 2, h / 2));
+  else if (kind === 'triangle') poly(ctx, x, y, w, h, 3);
+  else if (kind === 'diamond') poly(ctx, x, y, w, h, 4);
+  else if (kind === 'pentagon') poly(ctx, x, y, w, h, 5);
+  else if (kind === 'hexagon') poly(ctx, x, y, w, h, 6, 0);
+  else if (kind === 'polygon') poly(ctx, x, y, w, h, Math.max(3, sides | 0));
+  else if (kind === 'star') starPath(ctx, x, y, w, h, Math.max(3, sides | 0));
+  else if (kind === 'arrow') arrowPath(ctx, x, y, w, h);
   else roundRectPath(ctx, x, y, w, h, Math.min(radius, w / 2, h / 2));
 }
 
@@ -91,7 +135,7 @@ function makeShape({ id, name, kind, key }) {
           ctx.beginPath(); ctx.rect(c.x, c.y, c.w, c.h); ctx.clip();
         }
         ctx.translate(-(piece.dx || 0), -(piece.dy || 0));
-        tracePath(ctx, kind, g.x0, g.y0, g.x1, g.y1, o.radius);
+        tracePath(ctx, kind, g.x0, g.y0, g.x1, g.y1, o.radius, o.sides || 5);
         paint(ctx);
         ctx.restore();
       }
@@ -106,7 +150,9 @@ function makeShape({ id, name, kind, key }) {
   return {
     id, name, key, group: 'shape', cursor: 'crosshair',
     options: kind === 'line' ? ['size', 'opacity', 'aa']
-      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'opacity', 'aa'] : ['size', 'shape', 'opacity', 'aa'],
+      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'opacity', 'aa']
+      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'opacity', 'aa']
+      : ['size', 'shape', 'opacity', 'aa'],
 
     down(e, ed) {
       const layer = ed.editableLayer();
@@ -142,9 +188,159 @@ function makeShape({ id, name, kind, key }) {
   };
 }
 
+
+/** Line that becomes a cubic Bézier after the drag. Drag the handles to bend it; Enter or right-click sets it down. */
+function makeCurve() {
+  let S = null;
+
+  const samples = (a, c0, c1, b, n = 48) => {
+    const pts = [];
+    for (let i = 0; i <= n; i++) {
+      const t = i / n, u = 1 - t;
+      pts.push({
+        x: u*u*u*a.x + 3*u*u*t*c0.x + 3*u*t*t*c1.x + t*t*t*b.x,
+        y: u*u*u*a.y + 3*u*u*t*c0.y + 3*u*t*t*c1.y + t*t*t*b.y,
+      });
+    }
+    return pts;
+  };
+
+  const boundsOf = (pts, pad) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    return { x: Math.floor(x0 - pad), y: Math.floor(y0 - pad), w: Math.ceil(x1 - x0 + pad * 2), h: Math.ceil(y1 - y0 + pad * 2) };
+  };
+
+  const draw = (ed) => {
+    const s = S, o = ed.opts, layer = s.layer;
+    const stroke = s.swap ? ed.secondary : ed.primary;
+    if (s.prev) stampImage(layer.img, cropImage(s.orig, s.prev), s.prev.x, s.prev.y);
+    const pts = samples(s.a, s.c0, s.c1, s.b);
+    const pad = Math.ceil(o.size / 2) + 3;
+    let region = rectIntersect(boundsOf(pts, pad), layerRect(layer));
+    if (!region) { s.prev = null; return; }
+    const img = rasterize(region.w, region.h, (ctx) => {
+      ctx.translate(-region.x, -region.y);
+      ctx.beginPath();
+      ctx.moveTo(s.a.x, s.a.y);
+      ctx.bezierCurveTo(s.c0.x, s.c0.y, s.c1.x, s.c1.y, s.b.x, s.b.y);
+      ctx.lineWidth = Math.max(1, o.size);
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = rgbaCss(stroke);
+      ctx.stroke();
+    });
+    if (!o.aa) hardenAlpha(img);
+    paintImage(layer.img, img, region.x, region.y, ed.doc.selection, o.opacity / 100);
+    layer.touch(s.prev ? rectUnion(s.prev, region) : region);
+    s.prev = region;
+    s.all = s.all ? rectUnion(s.all, region) : region;
+  };
+
+  const settle = (ed) => {
+    const s = S; S = null;
+    if (s?.moved && s.all) ed.doc.commitRegion(s.layer, s.all, cropImage(s.orig, s.all), 'Line / Curve');
+    ed.requestOverlay();
+  };
+  const revert = (ed) => {
+    const s = S; S = null;
+    if (s?.all) { stampImage(s.layer.img, cropImage(s.orig, s.all), s.all.x, s.all.y); s.layer.touch(s.all); }
+    ed?.requestOverlay();
+  };
+
+  const hit = (e, s) => {
+    const pts = { a: s.a, b: s.b, c0: s.c0, c1: s.c1 };
+    let best = null, bestD = 10;
+    for (const [id, p] of Object.entries(pts)) {
+      const d = Math.hypot(e.x - p.x, e.y - p.y);
+      if (d < bestD) { best = id; bestD = d; }
+    }
+    return best;
+  };
+
+  return {
+    id: 'line', name: 'Line / Curve', key: 'O', group: 'shape', cursor: 'crosshair',
+    options: ['size', 'opacity', 'aa'],
+    down(e, ed) {
+      if (S?.editing) {
+        if (e.button === 2) { settle(ed); return; }
+        const h = hit(e, S);
+        if (h) { S.dragging = h; return; }
+        settle(ed);
+      }
+      const layer = ed.editableLayer();
+      if (!layer) return;
+      const p = { x: e.x, y: e.y };
+      S = {
+        layer, orig: cloneImage(layer.img), a: { ...p }, b: { ...p }, c0: { ...p }, c1: { ...p },
+        shift: e.shift, swap: e.button === 2, prev: null, all: null, moved: false, editing: false, dragging: 'b',
+      };
+    },
+    move(e, ed) {
+      if (!S) return;
+      if (S.editing && S.dragging) {
+        S[S.dragging] = { x: e.x, y: e.y };
+        // Keep the unused control on the chord until the user grabs it.
+        if (S.dragging === 'a' && !S.c0moved) S.c0 = { ...S.a };
+        if (S.dragging === 'b' && !S.c1moved) S.c1 = { ...S.b };
+        if (S.dragging === 'c0') S.c0moved = true;
+        if (S.dragging === 'c1') S.c1moved = true;
+        draw(ed);
+        ed.requestOverlay();
+        return;
+      }
+      S.b = { x: e.x, y: e.y };
+      if (e.shift) {
+        const dx = S.b.x - S.a.x, dy = S.b.y - S.a.y;
+        const len = Math.hypot(dx, dy), ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 12)) * (Math.PI / 12);
+        S.b = { x: S.a.x + Math.cos(ang) * len, y: S.a.y + Math.sin(ang) * len };
+      }
+      S.c1 = { ...S.b };
+      S.moved = true;
+      draw(ed);
+    },
+    up(e, ed) {
+      if (!S) return;
+      if (!S.editing) {
+        S.editing = true;
+        S.dragging = null;
+        if (!S.c0moved) S.c0 = { x: S.a.x + (S.b.x - S.a.x) / 3, y: S.a.y + (S.b.y - S.a.y) / 3 };
+        if (!S.c1moved) S.c1 = { x: S.a.x + (S.b.x - S.a.x) * 2 / 3, y: S.a.y + (S.b.y - S.a.y) * 2 / 3 };
+        ed.requestOverlay();
+        return;
+      }
+      S.dragging = null;
+    },
+    overlay(ctx, ed, v) {
+      if (!S?.editing) return;
+      const pts = [S.a, S.c0, S.c1, S.b].map((p) => v.toScreen(p.x, p.y));
+      ctx.save();
+      ctx.strokeStyle = 'rgba(70,130,220,.7)';
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(pts[3].x, pts[3].y); ctx.lineTo(pts[2].x, pts[2].y); ctx.stroke();
+      ctx.setLineDash([]);
+      for (const p of pts) {
+        ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#2a5ccc'; ctx.stroke();
+      }
+      ctx.restore();
+    },
+    colorsChanged(ed) { if (S?.moved) draw(ed); },
+    deactivate(ed) { if (S) settle(ed); },
+    cancel(ed) { if (S) revert(ed); },
+  };
+}
+
 export const shapeTools = () => [
-  makeShape({ id: 'line', name: 'Line', kind: 'line', key: 'O' }),
+  makeCurve(),
   makeShape({ id: 'rect', name: 'Rectangle', kind: 'rect', key: 'R' }),
   makeShape({ id: 'roundrect', name: 'Rounded Rectangle', kind: 'roundrect', key: 'R' }),
   makeShape({ id: 'ellipse', name: 'Ellipse', kind: 'ellipse', key: 'O' }),
+  makeShape({ id: 'triangle', name: 'Triangle', kind: 'triangle', key: 'O' }),
+  makeShape({ id: 'diamond', name: 'Diamond', kind: 'diamond', key: 'O' }),
+  makeShape({ id: 'pentagon', name: 'Pentagon', kind: 'pentagon', key: 'O' }),
+  makeShape({ id: 'hexagon', name: 'Hexagon', kind: 'hexagon', key: 'O' }),
+  makeShape({ id: 'polygon', name: 'Polygon', kind: 'polygon', key: 'O' }),
+  makeShape({ id: 'star', name: 'Star', kind: 'star', key: 'O' }),
+  makeShape({ id: 'arrow', name: 'Arrow', kind: 'arrow', key: 'O' }),
 ];

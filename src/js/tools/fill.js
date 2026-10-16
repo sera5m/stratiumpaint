@@ -43,16 +43,19 @@ function gradient() {
 
   return {
     id: 'gradient', name: 'Gradient', key: 'G', group: 'fill', cursor: 'crosshair',
-    options: ['gradient', 'opacity'],
+    options: ['gradient', 'gradientMode', 'opacity'],
     down(e, ed) {
       const layer = ed.editableLayer();
       if (!layer) return;
       const region = targetRegion(ed.doc);
       if (!region) return;
       const o = ed.opts, swap = e.button === 2;
+      const c0 = withOpacity(swap ? ed.secondary : ed.primary, o.opacity);
+      let c1 = withOpacity(swap ? ed.primary : ed.secondary, o.opacity);
+      if (o.gradientMode === 'alpha') c1 = { ...c0, a: 0 };
       S = {
         layer, region, before: cropImage(layer.img, region), p0: { x: e.x, y: e.y }, p1: { x: e.x, y: e.y }, moved: false,
-        c0: withOpacity(swap ? ed.secondary : ed.primary, o.opacity), c1: withOpacity(swap ? ed.primary : ed.secondary, o.opacity),
+        c0, c1,
       };
     },
     move(e, ed) {

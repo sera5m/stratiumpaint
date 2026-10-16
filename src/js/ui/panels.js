@@ -1,10 +1,43 @@
 // Toolbox, tool options bar, layers / history / colours panels, document tabs and the status bar.
-import { GRADIENT_TYPES, PATTERN_TYPES } from '../core/fill.js';
+import { GRADIENT_TYPES, GRADIENT_MODES, PATTERN_TYPES } from '../core/fill.js';
 import { maskBounds } from '../core/mask.js';
 import { rgbToHex } from '../core/color.js';
 import { debounce, clear, h } from './dom.js';
 import { icon } from './icons.js';
 import { colorDialog } from './dialogs.js';
+
+
+const FALLOFFS = [
+  ['hard', 'Hard', 100],
+  ['linear', 'Soft (linear)', 55],
+  ['smooth', 'Smooth', 40],
+  ['gaussian', 'Gaussian', 35],
+  ['airbrush', 'Airbrush', 20],
+];
+
+function showFalloffMenu(e, ed, toolId) {
+  document.querySelector('.falloff-menu')?.remove();
+  const menu = h('div', { class: 'falloff-menu', role: 'menu' });
+  for (const [id, label, hardness] of FALLOFFS) {
+    const active = (ed.opts.falloff || 'linear') === id;
+    menu.append(h('button', {
+      class: `falloff-item${active ? ' active' : ''}`, type: 'button', role: 'menuitem',
+      onClick: () => {
+        ed.setTool(toolId);
+        ed.setOpt('falloff', id);
+        ed.setOpt('hardness', hardness);
+        menu.remove();
+      },
+    }, label));
+  }
+  menu.style.left = `${e.clientX}px`;
+  menu.style.top = `${e.clientY}px`;
+  document.body.append(menu);
+  const close = (ev) => {
+    if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('pointerdown', close, true); }
+  };
+  setTimeout(() => document.addEventListener('pointerdown', close, true), 0);
+}
 
 // ---------------------------------------------------------------------- toolbox
 
@@ -18,6 +51,10 @@ export function buildToolbox(root, ed) {
       class: 'tool-btn', type: 'button', title: `${t.name} (${t.key})`, 'aria-label': t.name,
       onClick: () => ed.setTool(t.id),
     }, icon(t.id, 20));
+    if (t.id === 'brush' || t.id === 'eraser' || t.id === 'clone') {
+      b.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); showFalloffMenu(e, ed, t.id); });
+      b.title = `${t.name} (${t.key}) — right-click for pen falloff`;
+    }
     buttons.set(t.id, b);
     root.append(b);
   }
@@ -47,7 +84,9 @@ const OPTIONS = {
   flood: { type: 'select', label: 'Fill', items: [['contiguous', 'Contiguous'], ['global', 'Global']] },
   sampling: { type: 'select', label: 'Sample', items: [['image', 'Image'], ['layer', 'Layer']] },
   shape: { type: 'select', label: 'Style', items: [['outline', 'Outline'], ['fill', 'Filled'], ['both', 'Outline + fill']] },
+  sides: { type: 'range', label: 'Sides', min: 3, max: 16, unit: '' },
   gradient: { type: 'select', label: 'Type', items: GRADIENT_TYPES },
+  gradientMode: { type: 'select', label: 'Blend', items: GRADIENT_MODES },
   pattern: { type: 'select', label: 'Fill with', items: [['solid', 'Solid colour'], ...PATTERN_TYPES] },
   font: { type: 'font', label: 'Font' },
 };
@@ -431,13 +470,13 @@ export function buildStatusbar(root, ed, view) {
     zoom: 'Click to zoom in, right-click to zoom out, drag a box to zoom to it.',
     pan: 'Drag to pan. You can also hold Space with any tool.',
     bucket: 'Click to fill. Right-click fills with the secondary colour.',
-    gradient: 'Drag from start to end. Right-drag reverses the colours.',
+    gradient: 'Drag from start to end. Right-drag reverses the colours. Blend can fade to transparent.',
     brush: 'Drag to paint. Right button uses the secondary colour. [ and ] change size.',
     pencil: 'Drag to draw single hard pixels.',
     eraser: 'Drag to erase to transparency.',
     clone: 'Ctrl+click to choose a source, then drag to paint from it.',
     picker: 'Click to pick a colour. Right-click sets the secondary colour.',
-    line: 'Drag to draw a line. Shift snaps to 15°.',
+    line: 'Drag a line, then drag the handles to bend it into a curve. Enter or right-click sets it down. Shift snaps the first drag to 15°.',
     rect: 'Drag to draw a rectangle. Shift makes a square.',
     roundrect: 'Drag to draw a rounded rectangle.',
     ellipse: 'Drag to draw an ellipse. Shift makes a circle.',

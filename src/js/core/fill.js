@@ -54,9 +54,16 @@ export function fillMask(img, mask, color, { pattern = null, secondary = null, p
 export const GRADIENT_TYPES = [
   ['linear', 'Linear'],
   ['reflected', 'Reflected'],
-  ['diamond', 'Diamond'],
   ['radial', 'Radial'],
+  ['square', 'Square'],
+  ['diamond', 'Diamond'],
   ['conical', 'Conical'],
+  ['spiral', 'Spiral'],
+];
+
+export const GRADIENT_MODES = [
+  ['color', 'Colour'],
+  ['alpha', 'Transparency'],
 ];
 
 /**
@@ -85,7 +92,14 @@ export function renderGradient(region, type, p0, p1, c0, c1, mask, docWidth) {
           case 'reflected': t = Math.abs(u) / L; break;
           case 'diamond': t = (Math.abs(u) + Math.abs(v)) / L; break;
           case 'radial': t = Math.hypot(px, py) / L; break;
-          case 'conical': t = Math.abs(Math.atan2(v, u)) / Math.PI; break;
+          case 'square': t = Math.max(Math.abs(px), Math.abs(py)) / L; break;
+          case 'conical': t = (Math.atan2(v, u) / (Math.PI * 2) + 1) % 1; break;
+          case 'spiral': {
+            const ang = (Math.atan2(v, u) / (Math.PI * 2) + 1) % 1;
+            const rad = Math.hypot(px, py) / L;
+            t = (ang + rad) % 1;
+            break;
+          }
           default: t = u / L;
         }
         t = clamp(t, 0, 1);
