@@ -269,18 +269,30 @@ export function buildLayersPanel(root, ed, cmds) {
 // ---------------------------------------------------------------------- history
 
 export function buildHistoryPanel(root, ed) {
+  let mode = 'history'; // 'history' | 'elements'
   const list = h('div', { class: 'history-list', role: 'tree', 'aria-label': 'History' });
   const undo = h('button', { class: 'icon-btn', type: 'button', title: 'Undo', 'aria-label': 'Undo', onClick: () => ed.doc?.undo() }, icon('undo', 16));
   const redo = h('button', { class: 'icon-btn', type: 'button', title: 'Redo', 'aria-label': 'Redo', onClick: () => ed.doc?.redo() }, icon('redo', 16));
-  root.append(
-    h('h3', { title: 'Every edit, including ones you undid and replaced' }, 'History'),
-    list,
-    h('div', { class: 'panel-buttons' }, undo, redo),
-  );
+  const histBtn = h('button', { class: 'mode-btn', type: 'button', title: 'Flat edit history' }, 'History');
+  const elemBtn = h('button', { class: 'mode-btn', type: 'button', title: 'Things currently on the canvas' }, 'Elements');
+  const modes = h('div', { class: 'mode-switch', role: 'tablist' }, histBtn, elemBtn);
+  const buttons = h('div', { class: 'panel-buttons' }, undo, redo);
+  root.append(modes, list, buttons);
 
-  const render = () => {
-    clear(list);
-    const doc = ed.doc;
+  const setMode = (next) => {
+    mode = next;
+    histBtn.classList.toggle('active', mode === 'history');
+    elemBtn.classList.toggle('active', mode === 'elements');
+    histBtn.setAttribute('aria-selected', String(mode === 'history'));
+    elemBtn.setAttribute('aria-selected', String(mode === 'elements'));
+    list.setAttribute('aria-label', mode === 'history' ? 'History' : 'Elements');
+    buttons.hidden = mode !== 'history';
+    render();
+  };
+  histBtn.addEventListener('click', () => setMode('history'));
+  elemBtn.addEventListener('click', () => setMode('elements'));
+
+  const renderHistory = (doc) => {
     undo.disabled = !doc?.history.canUndo;
     redo.disabled = !doc?.history.canRedo;
     if (!doc) return;
@@ -295,13 +307,59 @@ export function buildHistoryPanel(root, ed) {
         style: { paddingLeft: `${8 + node.depth * 14}px` },
         title: node.side ? 'Another branch of edits' : node.name,
         onClick: () => doc.history.goTo(node.id),
-      }, node.depth ? node.name : node.name));
+      }, node.name));
     }
     list.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
   };
+
+  const renderElements = (doc) => {
+    if (!doc) {
+      list.append(h('div', { class: 'history-row empty' }, 'No document open'));
+      return;
+    }
+    // Layers, top of the stack first — these are the things composited on screen.
+    for (let i = doc.layers.length - 1; i >= 0; i--) {
+      const l = doc.layers[i];
+      const sub = `${Math.round(l.opacity * 100)}%${l.visible ? '' : ' · hidden'}${l.blend !== 'source-over' ? ` · ${l.blend}` : ''}`;
+      list.append(h('div', {
+        class: `history-row element-row${i === doc.active ? ' current' : ''}${l.visible ? '' : ' undone'}`,
+        role: 'treeitem',
+        'aria-selected': String(i === doc.active),
+        title: l.visible ? 'Layer on the canvas' : 'Hidden layer',
+        onClick: () => doc.selectLayer(i),
+      },
+      h('span', { class: 'element-kind' }, 'Layer'),
+      h('span', { class: 'element-name' }, l.name),
+      h('span', { class: 'element-sub' }, sub)));
+    }
+    if (doc.selection) {
+      const b = maskBounds(doc.selection);
+      const label = b ? `${b.w}×${b.h} at ${b.x},${b.y}` : 'active';
+      list.append(h('div', {
+        class: 'history-row element-row',
+        role: 'treeitem',
+        title: 'The current selection outline',
+      },
+      h('span', { class: 'element-kind' }, 'Selection'),
+      h('span', { class: 'element-name' }, 'Selection'),
+      h('span', { class: 'element-sub' }, label)));
+    }
+    if (!doc.layers.length && !doc.selection) {
+      list.append(h('div', { class: 'history-row empty' }, 'Nothing on the canvas'));
+    }
+  };
+
+  const render = () => {
+    clear(list);
+    const doc = ed.doc;
+    if (mode === 'elements') renderElements(doc);
+    else renderHistory(doc);
+  };
   ed.on('doc', render);
   ed.on('doc:history', render);
-  render();
+  ed.on('doc:layers', render);
+  ed.on('doc:selection', render);
+  setMode('history');
 }
 
 // ---------------------------------------------------------------------- colours
