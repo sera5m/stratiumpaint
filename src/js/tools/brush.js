@@ -28,6 +28,41 @@ export function coverage(d, r, hardness, aa, falloff = 'linear') {
   return (r - d) / (r - inner);
 }
 
+
+function mirrorPoints(x, y, mode, cx, cy) {
+  const pts = [[x, y]];
+  const hx = 2 * cx - x, vy = 2 * cy - y;
+  if (mode === 'h' || mode === 'both') pts.push([hx, y]);
+  if (mode === 'v' || mode === 'both') pts.push([x, vy]);
+  if (mode === 'both') pts.push([hx, vy]);
+  if (mode === 'radial4' || mode === 'radial8') {
+    const n = mode === 'radial8' ? 8 : 4;
+    const dx = x - cx, dy = y - cy;
+    for (let k = 1; k < n; k++) {
+      const a = (k / n) * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+      pts.push([cx + dx * c - dy * s, cy + dx * s + dy * c]);
+    }
+  }
+  return pts;
+}
+
+function expandPoints(x, y, S) {
+  const base = [[x, y]];
+  const rx = S.repeatX | 0, ry = S.repeatY | 0, n = Math.max(1, S.repeatN | 0);
+  if ((rx || ry) && n > 1) {
+    base.length = 0;
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) base.push([x + i * rx, y + j * ry]);
+  }
+  if (!S.mirror || S.mirror === 'none') return base;
+  const out = [];
+  for (const [px, py] of base) out.push(...mirrorPoints(px, py, S.mirror, S.cx, S.cy));
+  return out;
+}
+
+function stampMany(S, x, y) {
+  for (const [px, py] of expandPoints(x, y, S)) stamp(S, px, py);
+}
+
 function stamp(S, cx, cy) {
   const { layer, orig, cov, mask, r, hardness, aa, mode } = S;
   const w = layer.width, h = layer.height, d = layer.img.data, od = orig.data;
@@ -70,15 +105,15 @@ function strokeTo(S, x, y) {
   let t = S.rem;
   while (t <= len) {
     const px = S.lx + (dx * t) / len, py = S.ly + (dy * t) / len;
-    if (S.snap) stamp(S, Math.floor(px) + 0.5, Math.floor(py) + 0.5);
-    else stamp(S, px, py);
+    if (S.snap) stampMany(S, Math.floor(px) + 0.5, Math.floor(py) + 0.5);
+    else stampMany(S, px, py);
     t += S.step;
   }
   S.rem = t - len;
   S.lx = x; S.ly = y;
   // the spacing loop can stop up to one step short of the pointer: always finish exactly under it
-  if (S.snap) stamp(S, Math.floor(x) + 0.5, Math.floor(y) + 0.5);
-  else stamp(S, x, y);
+  if (S.snap) stampMany(S, Math.floor(x) + 0.5, Math.floor(y) + 0.5);
+  else stampMany(S, x, y);
 }
 
 /**
@@ -102,12 +137,14 @@ function makeBrush({ id, name, kind, key, icon }) {
       step: pencil ? 1 : Math.max(1, size * 0.1), snap: pencil,
       alpha: (o.opacity / 100) * (kind === 'eraser' || kind === 'clone' ? 1 : color.a ?? 1), color,
       dirty: null, lx: e.x, ly: e.y, rem: 0, ox: 0, oy: 0,
+      mirror: o.mirror || 'none', repeatX: o.repeatX || 0, repeatY: o.repeatY || 0, repeatN: o.repeatN || 1,
+      cx: 0, cy: 0,
     };
   };
 
   return {
     id, name, key, icon, group: kind === 'pencil' ? 'pencil' : 'brush', cursor: 'crosshair', ring: kind !== 'pencil',
-    options: kind === 'pencil' ? ['opacity'] : ['size', 'hardness', 'opacity', 'aa'],
+    options: kind === 'pencil' ? ['opacity', 'mirror', 'repeatX', 'repeatY', 'repeatN'] : ['size', 'hardness', 'opacity', 'aa', 'mirror', 'repeatX', 'repeatY', 'repeatN'],
 
     down(e, ed) {
       if (kind === 'clone' && e.ctrl) {
@@ -119,9 +156,12 @@ function makeBrush({ id, name, kind, key, icon }) {
       if (kind === 'clone' && !source) { ed.toast('Ctrl+click first to choose what to copy from.'); return; }
       S = begin(e, ed);
       if (!S) return;
+      const b = ed.doc.selection && maskBounds(ed.doc.selection);
+      S.cx = b ? b.x + b.w / 2 : ed.doc.width / 2;
+      S.cy = b ? b.y + b.h / 2 : ed.doc.height / 2;
       if (kind === 'clone') { S.ox = Math.round(source.x - e.x); S.oy = Math.round(source.y - e.y); }
-      if (S.snap) stamp(S, Math.floor(e.x) + 0.5, Math.floor(e.y) + 0.5);
-      else stamp(S, e.x, e.y);
+      if (S.snap) stampMany(S, Math.floor(e.x) + 0.5, Math.floor(e.y) + 0.5);
+      else stampMany(S, e.x, e.y);
       S.rem = S.step;
     },
 

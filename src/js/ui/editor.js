@@ -13,6 +13,7 @@ export const DEFAULT_OPTS = {
   gradient: 'linear',
   gradientMode: 'color',
   falloff: 'linear',
+  mirror: 'none', repeatX: 0, repeatY: 0, repeatN: 1,
   pattern: 'solid', patternSize: 16,
   font: 'DejaVu Sans', fontSize: 32, bold: false, italic: false,
   grid: false,
