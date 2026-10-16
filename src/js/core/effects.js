@@ -7,6 +7,7 @@ import { cloneImage, createImage, sampleBilinear, blendPixel } from './image.js'
 import { blurImage } from './blur.js';
 import { hexToRgb } from './color.js';
 import { inColorInterval, rgba8 } from './colorrange.js';
+import { EXTRA_EFFECTS } from './effects-extra.js';
 
 const range = (id, label, min, max, def, step = 1) => ({ id, label, type: 'range', min, max, step, default: def });
 const checkbox = (id, label, def = false) => ({ id, label, type: 'checkbox', default: def });
@@ -332,5 +333,7 @@ export const EFFECTS = [
     }),
   },
 ];
+
+EFFECTS.push(...EXTRA_EFFECTS);
 
 export const EFFECT_CATEGORIES = [...new Set(EFFECTS.map((e) => e.category))];
