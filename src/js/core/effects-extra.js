@@ -713,6 +713,77 @@ export const EXTRA_EFFECTS = [
       return errorDiffuse(img, p.levels, ATK);
     },
   },
+
+  {
+    id: 'halftone', name: 'Halftone', category: 'Pixel Art',
+    params: [range('size', 'Dot size', 2, 24, 6), range('angle', 'Angle', 0, 90, 45), checkbox('mono', 'Monochrome', true)],
+    apply(src, p) {
+      const { width: w, height: h, data } = src;
+      const out = createImage(w, h);
+      const cell = Math.max(2, p.size | 0), ang = (p.angle * Math.PI) / 180;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      for (let i = 0; i < data.length; i += 4) out.data[i + 3] = data[i + 3];
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const u = x * ca + y * sa, v = -x * sa + y * ca;
+        const cx = Math.floor(u / cell) * cell + cell / 2;
+        const cy = Math.floor(v / cell) * cell + cell / 2;
+        const sx = clamp(Math.round(x), 0, w - 1), sy = clamp(Math.round(y), 0, h - 1);
+        const i = (sy * w + sx) * 4;
+        const L = lum(data[i], data[i + 1], data[i + 2]) / 255;
+        const rad = (cell * 0.5) * Math.sqrt(1 - L);
+        const du = u - cx, dv = v - cy;
+        const on = du * du + dv * dv < rad * rad;
+        const j = (y * w + x) * 4;
+        if (p.mono) {
+          const v0 = on ? 0 : 255;
+          out.data[j] = out.data[j + 1] = out.data[j + 2] = v0;
+        } else {
+          out.data[j] = on ? data[i] * 0.3 : data[i];
+          out.data[j + 1] = on ? data[i + 1] * 0.3 : data[i + 1];
+          out.data[j + 2] = on ? data[i + 2] * 0.3 : data[i + 2];
+        }
+        out.data[j + 3] = data[i + 3];
+      }
+      return out;
+    },
+  },
+  {
+    id: 'line-dither', name: 'Line Dither', category: 'Pixel Art',
+    params: [range('spacing', 'Spacing', 1, 12, 2), range('levels', 'Levels', 2, 8, 2), { id: 'dir', label: 'Direction', type: 'select', default: 'h', options: [['h', 'Horizontal'], ['v', 'Vertical'], ['d', 'Diagonal']] }],
+    apply(src, p) {
+      const { width: w, height: h, data } = src;
+      const out = createImage(w, h), n = p.levels | 0, sp = Math.max(1, p.spacing | 0);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const L = lum(data[i], data[i + 1], data[i + 2]);
+        const band = p.dir === 'v' ? x : p.dir === 'd' ? (x + y) : y;
+        const phase = (band % (sp * 2)) / (sp * 2);
+        const t = (phase - 0.5) * (255 / n);
+        const v = quant(clamp(L + t, 0, 255), n);
+        out.data[i] = out.data[i + 1] = out.data[i + 2] = v;
+        out.data[i + 3] = data[i + 3];
+      }
+      return out;
+    },
+  },
+  {
+    id: 'hatch', name: 'Hatch', category: 'Pixel Art',
+    params: [range('spacing', 'Spacing', 2, 16, 4), range('weight', 'Weight', 1, 4, 1), range('angle', 'Angle', 0, 180, 45)],
+    apply(src, p) {
+      const { width: w, height: h, data } = src;
+      const out = cloneImage(src);
+      const sp = Math.max(2, p.spacing | 0), wt = p.weight | 0, ang = (p.angle * Math.PI) / 180;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const L = lum(data[i], data[i + 1], data[i + 2]) / 255;
+        const u = x * ca + y * sa;
+        const on = Math.abs((u % sp) - sp / 2) < wt * (1 - L + 0.15);
+        if (on) { out.data[i] *= 0.25; out.data[i + 1] *= 0.25; out.data[i + 2] *= 0.25; }
+      }
+      return out;
+    },
+  },
   {
     id: 'pixel-downscale', name: 'Pixel Downscale', category: 'Pixel Art',
     params: [range('factor', 'Factor', 2, 16, 4)],
