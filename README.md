@@ -198,6 +198,8 @@ any modern browser, no install needed.
 ## Installing on Arch Linux
 
 ```sh
+git clone https://github.com/sera5m/stratiumpaint.git
+cd stratiumpaint
 cd packaging/arch
 makepkg -si
 ```
