@@ -57,6 +57,9 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "deb": {
+      "compression": "gz"
     }
   },
   "author": "sera5m <69703832+sera5m@users.noreply.github.com>"
