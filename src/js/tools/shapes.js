@@ -1,9 +1,13 @@
 // Line, rectangle, rounded rectangle and ellipse. The shape is drawn live into the layer while
 // dragging (so what you see is what you get) and recorded as one history step on release.
+// Box shapes can be drawn turned (Rotate option, degrees about the shape's centre); it is a
+// vector rotation of the path, so edges stay crisp. To turn a shape that is already drawn,
+// select it and use Move Selected Pixels' rotate knob.
 import { cloneImage, cropImage, stampImage } from '../core/image.js';
 import { rectUnion, rectIntersect, rectGrow } from '../core/util.js';
 import { paintImage, rasterize, hardenAlpha } from '../doc/raster.js';
 import { layerRect, rgbaCss } from './common.js';
+import { rotatedBounds } from '../core/xform.js';
 
 function roundRectPath(ctx, x, y, w, h, r) {
   ctx.moveTo(x + r, y);
@@ -98,6 +102,8 @@ function makeShape({ id, name, kind, key }) {
     // A drag that crossed a weld carries one piece per lip: the shape lives in
     // continuous pixels and each piece shifts a copy back onto that lip.
     const pieces = s.wrap?.pieces?.length ? s.wrap.pieces : [{ dx: 0, dy: 0 }];
+    const turn = kind === 'line' ? 0 : ((+o.shapeAngle || 0) * Math.PI) / 180;
+    const gcx = (g.x0 + g.x1) / 2, gcy = (g.y0 + g.y1) / 2;
     let region = null;
     for (const piece of pieces) {
       const dx = piece.dx || 0, dy = piece.dy || 0;
@@ -107,6 +113,7 @@ function makeShape({ id, name, kind, key }) {
         w: Math.ceil(Math.abs(g.x1 - g.x0)) + pad * 2,
         h: Math.ceil(Math.abs(g.y1 - g.y0)) + pad * 2,
       };
+      if (turn) b = rotatedBounds(b, turn);
       const grown = piece.clip ? rectGrow(piece.clip, pad) : null;
       if (grown) b = rectIntersect(b, grown);
       if (b) {
@@ -135,6 +142,7 @@ function makeShape({ id, name, kind, key }) {
           ctx.beginPath(); ctx.rect(c.x, c.y, c.w, c.h); ctx.clip();
         }
         ctx.translate(-(piece.dx || 0), -(piece.dy || 0));
+        if (turn) { ctx.translate(gcx, gcy); ctx.rotate(turn); ctx.translate(-gcx, -gcy); }
         tracePath(ctx, kind, g.x0, g.y0, g.x1, g.y1, o.radius, o.sides || 5);
         paint(ctx);
         ctx.restore();
@@ -150,9 +158,9 @@ function makeShape({ id, name, kind, key }) {
   return {
     id, name, key, group: 'shape', cursor: 'crosshair',
     options: kind === 'line' ? ['size', 'opacity', 'aa', 'wrapShapes']
-      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'opacity', 'aa', 'wrapShapes']
-      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'opacity', 'aa', 'wrapShapes']
-      : ['size', 'shape', 'opacity', 'aa', 'wrapShapes'],
+      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'shapeAngle', 'opacity', 'aa', 'wrapShapes']
+      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'shapeAngle', 'opacity', 'aa', 'wrapShapes']
+      : ['size', 'shape', 'shapeAngle', 'opacity', 'aa', 'wrapShapes'],
 
     down(e, ed) {
       const layer = ed.editableLayer();

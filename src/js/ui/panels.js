@@ -90,6 +90,7 @@ const OPTIONS = {
   shape: { type: 'select', label: 'Style', items: [['outline', 'Outline'], ['fill', 'Filled'], ['both', 'Outline + fill']] },
   wrapShapes: { type: 'toggle', label: 'Wrap seams', title: 'Continue shapes across UV seams so they stay one surface' },
   sides: { type: 'range', label: 'Sides', min: 3, max: 16, unit: '' },
+  shapeAngle: { type: 'range', label: 'Rotate', min: -180, max: 180, unit: '°' },
   gradient: { type: 'select', label: 'Type', items: GRADIENT_TYPES },
   gradientMode: { type: 'select', label: 'Blend', items: GRADIENT_MODES },
   pattern: { type: 'select', label: 'Fill with', items: [['solid', 'Solid colour'], ...PATTERN_TYPES] },

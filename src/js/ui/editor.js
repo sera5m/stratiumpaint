@@ -11,6 +11,7 @@ export const DEFAULT_OPTS = {
   shape: 'outline',
   wrapShapes: true, // 3D: continue a shape across UV seams instead of stopping at the chart
   sides: 5,
+  shapeAngle: 0, // shapes: drawn turned by this many degrees about their centre
   gradient: 'linear',
   gradientMode: 'color',
   falloff: 'linear',
