@@ -63,6 +63,7 @@ export class MeshView {
       h('div', { class: 'seg objects' },
         h('select', { class: 'obj-select', 'aria-label': 'Object', onChange: (e) => { this.selectedGroup = +e.target.value; this.#syncHide(); } }),
         h('button', { type: 'button', class: 'seg-btn obj-hide', onClick: () => this.#toggleHide() }, 'Hide'),
+        h('button', { type: 'button', class: 'seg-btn obj-solo', title: 'Hide every other object (again to show them all)', onClick: () => this.#toggleIsolate() }, 'Isolate'),
         h('button', { type: 'button', class: 'seg-btn', onClick: () => this.#resetOffsets() }, 'Reset')),
       this.hint);
     const face = (id, label) => h('div', { class: `vc-face ${id}`, 'data-view': id }, label);
@@ -160,6 +161,20 @@ export class MeshView {
     this.#request();
   }
 
+  /** Isolate: hide every object but the selected one, or, if that is already the case, show them all. */
+  #toggleIsolate() {
+    const mount = this.ed.doc?.mount;
+    const n = mount?.groups?.length || 0;
+    if (n < 2) return;
+    const gi = Math.min(this.selectedGroup, n - 1);
+    const solo = Array.from({ length: n }, (_, i) => i !== gi);
+    const already = solo.every((h, i) => !!this.hidden[i] === h);
+    this.hidden = already ? [] : solo;
+    this.#uploadGeom(mount);
+    this.#syncHide();
+    this.#request();
+  }
+
   #syncHide() {
     const mount = this.ed.doc?.mount;
     const btn = this.hud.querySelector('.obj-hide');
@@ -168,6 +183,9 @@ export class MeshView {
     const on = !!this.hidden[gi];
     btn.textContent = on ? 'Show' : 'Hide';
     btn.classList.toggle('on', on);
+    const n = mount.groups.length;
+    const solo = this.hud.querySelector('.obj-solo');
+    if (solo) solo.classList.toggle('on', n > 1 && Array.from({ length: n }, (_, i) => i !== gi).every((h, i) => !!this.hidden[i] === h));
   }
 
   #syncObjects() {
@@ -510,10 +528,14 @@ export class MeshView {
     const u = shape ? hit.u + (this.stroke?.offU || 0) : hit.u;
     const v = shape ? hit.v + (this.stroke?.offV || 0) : hit.v;
     const p = { x: u * atlas.width, y: v * atlas.height };
-    if (shape && this.stroke?.wrapped && this.stroke.visits?.length) {
+    // Wrap seams on: one piece per lip the drag crossed, so the shape continues over the weld.
+    // Wrap seams off: a single piece clipped to the chart the drag started on (per-chart only).
+    const perChart = shape && this.shape !== 'flat' && this.ed.opts.wrapShapes === false;
+    if (shape && (this.stroke?.wrapped || perChart) && this.stroke?.visits?.length) {
       const W = atlas.width, H = atlas.height;
+      const visits = perChart ? this.stroke.visits.slice(0, 1) : this.stroke.visits;
       p.wrap = {
-        pieces: this.stroke.visits.map((v) => ({
+        pieces: visits.map((v) => ({
           dx: v.dx * W,
           dy: v.dy * H,
           clip: v.box ? {

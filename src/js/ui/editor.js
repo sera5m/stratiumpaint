@@ -62,7 +62,7 @@ export class Editor extends Emitter {
    * the document out from under the active tool (switching tools/documents, menu commands, ...).
    */
   commitPending() {
-    this.tool.deactivate?.(this);
+    this.tool.deactivate?.(this, { immediate: true }); // land it now, don't leave it on a timer
     this.tool.cancel?.(this);
   }
 

@@ -91,3 +91,75 @@ test('move selected pixels floats: nothing is written to history until it is set
   doc.redo();
   assert.deepEqual(px(doc.layer, 10, 5), [255, 0, 0, 255]);
 });
+
+/** A 4×4 red block at (2,2) with a selection around it, scaled to 8×8 through the options bar. */
+function scaledFloat() {
+  const s = session(20, 20);
+  const { ed, doc } = s;
+  for (let y = 2; y < 6; y++) for (let x = 2; x < 6; x++) doc.layer.img.data.set([255, 0, 0, 255], (y * 20 + x) * 4);
+  doc.setSelection(rectMask(20, 20, 2, 2, 4, 4));
+  ed.setTool('move-pixels');
+  assert.ok(ed.tool.setSize(ed, 8, 8));
+  return s;
+}
+
+test('scaling a float is visual only until it is set down', () => {
+  const { ed, doc } = scaledFloat();
+  const before = doc.history.entries().length;
+  assert.deepEqual(ed.tool.metrics(ed), { w: 8, h: 8 });
+  assert.equal(alphaAt(doc.layer, 7, 7), 0, 'no resample yet: the layer is not painted while scaling');
+  assert.equal(doc.history.entries().length, before);
+  ed.commitPending(); // tool switch / undo / a menu command lands it straight away
+  assert.equal(doc.history.entries().length, before + 1);
+  assert.deepEqual(px(doc.layer, 7, 7), [255, 0, 0, 255], 'the resampled pixels are what landed');
+  doc.undo();
+  assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255]);
+  assert.equal(alphaAt(doc.layer, 7, 7), 0);
+});
+
+test('Enter on a scaled float waits for idle, then resamples into one history step', async () => {
+  const { ed, doc } = scaledFloat();
+  const before = doc.history.entries().length;
+  ed.commitTool(); // Enter, right after the last size change
+  assert.equal(doc.history.entries().length, before, 'still waiting out the idle time');
+  ed.cancelTool(); // Escape after set-down does not throw the scale away
+  assert.equal(doc.history.entries().length, before + 1);
+  assert.deepEqual(px(doc.layer, 7, 7), [255, 0, 0, 255]);
+
+  const s2 = scaledFloat();
+  const n2 = s2.doc.history.entries().length;
+  s2.ed.commitTool();
+  assert.equal(s2.doc.history.entries().length, n2);
+  await new Promise((r) => setTimeout(r, 650));
+  assert.equal(s2.doc.history.entries().length, n2 + 1, 'landed by itself after 0.5s idle');
+  assert.deepEqual(px(s2.doc.layer, 7, 7), [255, 0, 0, 255]);
+  s2.ed.commitPending(); // nothing left pending: no extra step
+  assert.equal(s2.doc.history.entries().length, n2 + 1);
+});
+
+test('switching tools while a scale is waiting lands it instead of losing it', () => {
+  const { ed, doc } = scaledFloat();
+  const before = doc.history.entries().length;
+  ed.commitTool();
+  ed.setTool('move-selection');
+  assert.equal(doc.history.entries().length, before + 1);
+  assert.deepEqual(px(doc.layer, 7, 7), [255, 0, 0, 255]);
+});
+
+test('Escape before set-down reverts a scaled float', () => {
+  const { ed, doc } = scaledFloat();
+  const before = doc.history.entries().length;
+  ed.cancelTool();
+  assert.equal(doc.history.entries().length, before);
+  assert.deepEqual(px(doc.layer, 3, 3), [255, 0, 0, 255]);
+  assert.equal(alphaAt(doc.layer, 7, 7), 0);
+});
+
+test('a left-click outside the float sets it down at once', () => {
+  const { ed, doc } = scaledFloat();
+  const before = doc.history.entries().length;
+  ed.pointer('down', ev(18, 18));
+  ed.pointer('up', ev(18, 18));
+  assert.equal(doc.history.entries().length, before + 1);
+  assert.deepEqual(px(doc.layer, 7, 7), [255, 0, 0, 255]);
+});

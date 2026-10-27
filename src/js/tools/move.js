@@ -11,9 +11,12 @@
 // the knobs — resizes it (Shift keeps the proportions). Width and height in the options bar do
 // the same. The scroll wheel scales from the centre while a selection is active.
 //
-// Interactive scale is visual only (canvas stretch of the original lift). Actual pixel resampling
-// is deferred until set-down + 0.5s idle, with a fading border. Left-click outside the box also
-// sets it down.
+// Scaling is visual only while you work: handles, wheel and setSize just change the box and the
+// overlay stretches the original lifted pixels into it with drawImage — no resizeImage per event.
+// The real resample happens once, when the float is set down (Enter / right-click) and it has been
+// idle for 0.5s since the last size change; meanwhile a thin border fades out. That resampled
+// result is what goes into history. A left-click outside the box, or anything that goes through
+// Editor#commitPending (tool switch, undo, menu commands), lands it immediately instead.
 import { cloneImage, cropImage, stampImage } from '../core/image.js';
 import { scaleMask, translateMask, maskBounds } from '../core/mask.js';
 import { resizeImage } from '../core/transform.js';
@@ -68,7 +71,10 @@ function hitHandle(e, box) {
 /** True if pointer is inside the box (not just the border). */
 function insideBox(e, box) {
   const zoom = e?.zoom;
-  if (!box || !(zoom > 0) || e.ox == null) return false;
+  if (!box) return false;
+  if (!(zoom > 0) || e.ox == null || e.sx == null) {
+    return e.x >= box.x && e.x <= box.x + box.w && e.y >= box.y && e.y <= box.y + box.h;
+  }
   const x0 = e.ox + box.x * zoom, y0 = e.oy + box.y * zoom;
   const x1 = x0 + box.w * zoom, y1 = y0 + box.h * zoom;
   return e.sx >= x0 && e.sx <= x1 && e.sy >= y0 && e.sy <= y1;
@@ -130,6 +136,19 @@ function drawHandles(ctx, box, v, fade = 1) {
   ctx.restore();
 }
 
+/** Thin border shown while a set-down scale waits to be resampled; it fades out as it lands. */
+function drawSettleBorder(ctx, box, v, fade) {
+  if (!box || !v || !(fade > 0)) return;
+  const z = v.zoom || 1;
+  const x = v.ox + box.x * z, y = v.oy + box.y * z, w = box.w * z, h = box.h * z;
+  ctx.save();
+  ctx.globalAlpha = fade;
+  ctx.strokeStyle = 'rgba(70, 130, 220, .95)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+  ctx.restore();
+}
+
 /** Fast visual preview of the lifted pixels stretched into the current box (no CPU resize). */
 function drawPreview(ctx, src, box, v) {
   if (!src || !box || !v) return;
@@ -158,8 +177,23 @@ function finiteSize(w, h) {
 
 function movePixels() {
   let S = null;
+  // A scaled float that has been set down waits here until the pointer has been idle for
+  // SETTLE_MS since the last size change; only then is it resampled and written to history.
+  // While it waits, S.pending is set, a thin border fades out and the stretched preview stays up.
   let fadeTimer = null;
+  let fadeFrame = null;
   let fadeAlpha = 1;
+  const SETTLE_MS = 500;
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : null;
+  const caf = typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame : null;
+
+  const stopFade = () => {
+    if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
+    if (fadeFrame != null && caf) caf(fadeFrame);
+    fadeFrame = null;
+    fadeAlpha = 1;
+  };
 
   const syncAnts = (ed) => {
     if (!S?.mask) { ed.marchOffset = null; return; }
@@ -169,7 +203,8 @@ function movePixels() {
       : { from: S.r, to: S.cur };
   };
 
-  /** Move is stamped immediately. A size change only updates the box; resampling waits until set-down. */
+  /** Move is stamped immediately. A size change only updates the box (the overlay draws a
+   *  stretched preview); resampling waits until set-down plus SETTLE_MS of idle. */
   const renderAt = (s, nr) => {
     nr = {
       x: Math.round(nr.x), y: Math.round(nr.y),
@@ -177,6 +212,7 @@ function movePixels() {
       h: Math.max(1, Math.min(8192, Math.round(nr.h))),
     };
     if (nr.x === s.cur.x && nr.y === s.cur.y && nr.w === s.cur.w && nr.h === s.cur.h) return;
+    if (nr.w !== s.cur.w || nr.h !== s.cur.h) s.scaledAt = now();
     const sized = nr.w !== s.r.w || nr.h !== s.r.h;
     const area = rectUnion(rectUnion(s.cur, nr), s.r);
     stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
@@ -194,10 +230,9 @@ function movePixels() {
 
   /** Undo everything back to the pristine, pre-lift layer. Leaves S cleared. */
   const revert = (ed) => {
-    if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
+    stopFade();
     const s = S;
     S = null;
-    fadeAlpha = 1;
     const area = rectIntersect(s.total, layerRect(s.layer)) || s.r;
     stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
     stampImage(s.layer.img, s.before, s.r.x, s.r.y);
@@ -205,8 +240,8 @@ function movePixels() {
     if (ed) { ed.marchOffset = null; ed.requestOverlay(); }
   };
 
-  /** Bake the current visual into the layer (called after idle or immediate set-down). */
-  const bake = (ed, s) => {
+  /** Resample the lifted pixels into the final box and paint them into the layer. */
+  const bake = (s) => {
     const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
     const img = sized ? resizeImage(s.src, s.cur.w, s.cur.h, 'smooth') : s.src;
     const area = rectUnion({ x: s.r.x, y: s.r.y, w: s.r.w, h: s.r.h }, s.cur);
@@ -216,61 +251,55 @@ function movePixels() {
     s.total = rectUnion(s.total, area);
   };
 
-  /** Write the floated content into the document as one undo step. Leaves S cleared.
-   *  Pixel resample is delayed 0.5s after set-down; border fades during the wait. */
-  const settle = (ed) => {
-    if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
+  /** Bake (if scaled) and write the float into the document as one undo step. Leaves S cleared. */
+  const finalize = (ed, s) => {
+    stopFade();
+    if (S === s) S = null;
+    const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
+    if (sized) bake(s);
+    ed.marchOffset = null;
+    ed.requestOverlay();
+    const total = rectIntersect(s.total, layerRect(s.layer));
+    const original = cropImage(s.base, total);
+    stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y);
+    const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
+    ed.doc.transaction(name, () => {
+      ed.doc.commitRegion(s.layer, total, original, name);
+      if (s.mask) ed.doc.setSelection(null, 'Deselect');
+    });
+  };
+
+  /** Finish a set-down that is still waiting out its idle time, right now. */
+  const flush = (ed) => { if (S?.pending) finalize(ed, S); };
+
+  /** Set the float down. A plain move lands at once. A scale lands once it has been idle for
+   *  SETTLE_MS since its last size change (with a fading border meanwhile), or at once when
+   *  `immediate` (outside click, tool switch, undo, any command via Editor#commitPending). */
+  const settle = (ed, { immediate = false } = {}) => {
     const s = S;
     if (!s) return;
+    if (s.pending) { if (immediate) finalize(ed, s); return; }
     const moved = s.cur.x !== s.r.x || s.cur.y !== s.r.y;
     const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
-    if (!moved && !sized) {
-      S = null;
-      fadeAlpha = 1;
-      const area = rectIntersect(s.total, layerRect(s.layer)) || s.r;
-      stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
-      stampImage(s.layer.img, s.before, s.r.x, s.r.y);
-      s.layer.touch(s.total);
-      ed.marchOffset = null;
-      ed.requestOverlay();
-      return;
+    if (!moved && !sized) { revert(ed); return; }
+    s.dragging = null;
+    const wait = sized && !immediate ? Math.max(0, SETTLE_MS - (now() - (s.scaledAt ?? 0))) : 0;
+    if (wait <= 0 || !ed.doc) { finalize(ed, s); return; }
+    s.pending = true;
+    stopFade();
+    const start = now();
+    if (raf) {
+      const step = () => {
+        fadeFrame = null;
+        if (S !== s || !s.pending) return;
+        fadeAlpha = Math.max(0, 1 - (now() - start) / wait);
+        ed.requestOverlay();
+        if (fadeAlpha > 0) fadeFrame = raf(step);
+      };
+      fadeFrame = raf(step);
     }
-    const commit = () => {
-      const total = rectIntersect(s.total, layerRect(s.layer));
-      const original = cropImage(s.base, total);
-      stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y);
-      const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
-      ed.doc.transaction(name, () => {
-        ed.doc.commitRegion(s.layer, total, original, name);
-        if (s.mask) ed.doc.setSelection(null, 'Deselect');
-      });
-    };
-    if (!sized) {
-      S = null;
-      fadeAlpha = 1;
-      ed.marchOffset = null;
-      ed.requestOverlay();
-      commit();
-      return;
-    }
-    fadeAlpha = 1;
-    const start = performance.now();
-    const step = () => {
-      const t = (performance.now() - start) / 500;
-      fadeAlpha = Math.max(0, 1 - t);
-      ed.requestOverlay();
-      if (t < 1) requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-    fadeTimer = setTimeout(() => {
-      fadeTimer = null;
-      bake(ed, s);
-      S = null;
-      fadeAlpha = 1;
-      ed.marchOffset = null;
-      ed.requestOverlay();
-      commit();
-    }, 500);
+    fadeTimer = setTimeout(() => { fadeTimer = null; if (S === s && s.pending) finalize(ed, s); }, wait);
+    ed.requestOverlay();
   };
 
   const lift = (ed) => {
@@ -314,7 +343,8 @@ function movePixels() {
       const box = boxNow(ed);
       const sized = S && (S.cur.w !== S.r.w || S.cur.h !== S.r.h);
       if (sized && S.src && box) drawPreview(ctx, S.src, box, v);
-      drawHandles(ctx, box, v, fadeAlpha);
+      if (S?.pending) drawSettleBorder(ctx, box, v, fadeAlpha);
+      else drawHandles(ctx, box, v);
     },
     /** Live width and height for the options bar. */
     metrics(ed) {
@@ -326,6 +356,7 @@ function movePixels() {
       const size = finiteSize(w, h);
       const box = boxNow(ed);
       if (!box) return false;
+      if (S?.pending) return false; // already set down; it lands in a moment
       if (!S && size.w === box.w && size.h === box.h) return false;
       if (!S && !lift(ed)) return false;
       renderAt(S, { x: S.cur.x, y: S.cur.y, w: size.w, h: size.h });
@@ -336,6 +367,7 @@ function movePixels() {
     /** Scroll scales the selection from its centre. Ctrl-scroll is left to the view, and so is scroll with nothing selected. */
     wheel(e, ed) {
       if (e.ctrlKey || e.metaKey) return false;
+      flush(ed);
       if (!S && !ed.doc?.selection) return false;
       if (!S && !lift(ed)) return false;
       const k = e.deltaMode === 1 ? 16 : 1;
@@ -350,11 +382,13 @@ function movePixels() {
       return true;
     },
     down(e, ed) {
+      // A set-down scale still waiting for its idle time: any click lands it now and is used up.
+      if (S?.pending) { flush(ed); return; }
       if (S) {
         if (e.button === 2) { settle(ed); return; }
-        // Left-click outside the box sets it down
+        // Left-click outside the box sets it down straight away (no idle wait).
         if (e.button === 0 && !insideBox(e, S.cur) && !hitHandle(e, S.cur)) {
-          settle(ed);
+          settle(ed, { immediate: true });
           return;
         }
         const handle = hitHandle(e, S.cur);
@@ -380,8 +414,10 @@ function movePixels() {
       S.dragging = null;
       // Stay floating — parked here until Enter/right-click/outside-click sets it down or Escape cancels it.
     },
-    deactivate(ed) { if (S) settle(ed); },
-    cancel(ed) { if (S) revert(ed); },
+    /** Enter sets down (a scale waits out its idle time); `immediate` from Editor#commitPending lands it now. */
+    deactivate(ed, opts) { if (S) settle(ed, opts); },
+    /** Escape reverts a float. Once it has been set down it is no longer floating, so it lands instead. */
+    cancel(ed) { if (S?.pending) flush(ed); else if (S) revert(ed); },
   };
 }
 
