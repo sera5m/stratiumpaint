@@ -43,6 +43,10 @@ export class MeshView {
     this.dist = 1;
     this.target = [0, 0, 0];
     this.cam = { solid: null, flat: null };
+    this.offsets = [];
+    this.hidden = [];
+    this.selectedGroup = 0;
+    this.objectDrag = null;
     this.dragging = null;
     this.painting = false;
     this._texDirty = true;
@@ -56,6 +60,10 @@ export class MeshView {
     this.hud = h('div', { class: 'mesh-tools' },
       h('div', { class: 'seg tools' }, tool('paint', 'Paint'), tool('move', 'Move')),
       h('div', { class: 'seg shape' }, shape('solid', 'Solid'), shape('flat', 'Flat')),
+      h('div', { class: 'seg objects' },
+        h('select', { class: 'obj-select', 'aria-label': 'Object', onChange: (e) => { this.selectedGroup = +e.target.value; this.#syncHide(); } }),
+        h('button', { type: 'button', class: 'seg-btn obj-hide', onClick: () => this.#toggleHide() }, 'Hide'),
+        h('button', { type: 'button', class: 'seg-btn', onClick: () => this.#resetOffsets() }, 'Reset')),
       this.hint);
     const face = (id, label) => h('div', { class: `vc-face ${id}`, 'data-view': id }, label);
     this.cube = h('div', { class: 'vc-cube' },
@@ -87,7 +95,7 @@ export class MeshView {
     this.mode = mode;
     for (const b of this.hud.querySelectorAll('.seg.tools .seg-btn')) b.classList.toggle('on', b.dataset.mode === mode);
     this.hint.textContent = mode === 'move'
-      ? 'Drag the open image · scroll sizes it'
+      ? 'Drag the open image · Shift-drag moves the selected object'
       : 'Scroll zooms · middle-drag slides · Alt-drag turns';
   }
 
@@ -129,18 +137,124 @@ export class MeshView {
     gl.clearColor(0.07, 0.08, 0.1, 1);
   }
 
+  #resetOffsets() {
+    this.offsets = [];
+    this.hidden = [];
+    this.paintBvh = null;
+    this.faceMap = null;
+    this._paintKey = '';
+    const mount = this.ed.doc?.mount;
+    if (mount) this.#uploadGeom(mount);
+    this.#syncHide();
+    this.#request();
+  }
+
+  #toggleHide() {
+    const mount = this.ed.doc?.mount;
+    if (!mount?.groups?.length) return;
+    const gi = Math.min(this.selectedGroup, mount.groups.length - 1);
+    if (!this.hidden[gi]) this.hidden[gi] = true;
+    else this.hidden[gi] = false;
+    this.#uploadGeom(mount);
+    this.#syncHide();
+    this.#request();
+  }
+
+  #syncHide() {
+    const mount = this.ed.doc?.mount;
+    const btn = this.hud.querySelector('.obj-hide');
+    if (!btn || !mount?.groups?.length) return;
+    const gi = Math.min(this.selectedGroup, mount.groups.length - 1);
+    const on = !!this.hidden[gi];
+    btn.textContent = on ? 'Show' : 'Hide';
+    btn.classList.toggle('on', on);
+  }
+
+  #syncObjects() {
+    const mount = this.ed.doc?.mount;
+    const seg = this.hud.querySelector('.seg.objects');
+    if (!seg) return;
+    const groups = mount?.groups || [];
+    seg.hidden = groups.length < 2;
+    if (groups.length < 2) return;
+    const sel = seg.querySelector('.obj-select');
+    const names = groups.map((g, i) => g.name || `object ${i + 1}`).join('\n');
+    if (sel.dataset.names !== names) {
+      sel.dataset.names = names;
+      sel.innerHTML = '';
+      groups.forEach((g, i) => {
+        const o = document.createElement('option');
+        o.value = String(i);
+        o.textContent = g.name || `object ${i + 1}`;
+        sel.append(o);
+      });
+    }
+    this.selectedGroup = Math.min(this.selectedGroup, groups.length - 1);
+    sel.value = String(this.selectedGroup);
+    this.#syncHide();
+  }
+
+  #groupAt(t, groups) {
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      if (t >= g.start && t < g.start + g.count) return i;
+    }
+    return -1;
+  }
+
+  /** Solid-view positions with temporary offsets, and hidden groups left out of the raycast. */
+  #refreshPaintMesh(mount) {
+    if (this.shape === 'flat') { this.paintBvh = null; this.faceMap = null; return; }
+    const groups = mount.groups || [];
+    const off = this.offsets || [];
+    const hid = this.hidden || [];
+    let live = false;
+    for (let i = 0; i < groups.length; i++) {
+      const o = off[i];
+      if (hid[i] || (o && (o[0] || o[1] || o[2]))) live = true;
+    }
+    if (!live) { this.paintBvh = null; this.faceMap = null; this._paintKey = ''; return; }
+    const key = `${off.map((o) => o ? o.join(',') : '').join(';')}|${hid.map((h) => h ? 1 : 0).join('')}`;
+    if (this._paintKey === key && this.paintBvh) return;
+    this._paintKey = key;
+    const n = mount.indices.length / 3;
+    const map = [];
+    const pos = [];
+    const corners = [];
+    for (let t = 0; t < n; t++) {
+      const gi = this.#groupAt(t, groups);
+      if (gi >= 0 && hid[gi]) continue;
+      const o = gi >= 0 && off[gi] ? off[gi] : [0, 0, 0];
+      map.push(t);
+      for (let k = 0; k < 3; k++) {
+        const v = mount.indices[t * 3 + k];
+        corners.push(pos.length / 3);
+        pos.push(mount.positions[v * 3] + o[0], mount.positions[v * 3 + 1] + o[1], mount.positions[v * 3 + 2] + o[2]);
+      }
+    }
+    this.faceMap = map;
+    this.paintBvh = map.length ? buildBVH(Float32Array.from(pos), Uint32Array.from(corners)) : null;
+  }
+
   #attach() {
     const mount = this.ed.doc?.mount;
-    if (!mount || !this.gl) { this.bvh = null; return; }
+    if (!mount || !this.gl) { this.bvh = null; this.#syncObjects(); return; }
     const key = mount;
     if (key !== this._geomKey) {
       this._geomKey = key;
       this.flatBvh = null;
       this.cam = { solid: null, flat: null };
+      this.offsets = [];
+      this.hidden = [];
+      this.selectedGroup = 0;
+      this.paintBvh = null;
+      this.faceMap = null;
+      this._paintKey = '';
       this.bvh = buildBVH(mount.positions, mount.indices);
       this.#frame(mount);
       this.#uploadGeom(mount);
     } else if (this.shape === 'flat') this.#ensureFlat(mount);
+    this.#syncObjects();
     this._texDirty = true;
     this.#resize();
   }
@@ -182,14 +296,21 @@ export class MeshView {
     const nrm = new Float32Array(n * 9);
     const uv = new Float32Array(n * 6);
     const flat = this.shape === 'flat';
+    const groups = mount.groups || [];
+    const off = this.offsets || [];
+    const hid = this.hidden || [];
+    let w = 0;
     for (let t = 0; t < n; t++) {
+      const gi = flat ? -1 : this.#groupAt(t, groups);
+      if (!flat && gi >= 0 && hid[gi]) continue;
+      const o = !flat && gi >= 0 && off[gi] ? off[gi] : [0, 0, 0];
       const ia = indices[t * 3], ib = indices[t * 3 + 1], ic = indices[t * 3 + 2];
       const p = flat
         ? [0, 1, 2].map((k) => {
           const c = t * 3 + k;
           return [((uvs[c * 2] ?? 0) - 0.5) * 2, 0, ((uvs[c * 2 + 1] ?? 0) - 0.5) * 2];
         })
-        : [ia, ib, ic].map((i) => [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]]);
+        : [ia, ib, ic].map((i) => [positions[i * 3] + o[0], positions[i * 3 + 1] + o[1], positions[i * 3 + 2] + o[2]]);
       const e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
       const e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
       let nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2], nz = e1[0] * e2[1] - e1[1] * e2[0];
@@ -197,15 +318,17 @@ export class MeshView {
       nx /= len; ny /= len; nz /= len;
       if (flat) { nx = 0; ny = 1; nz = 0; }
       for (let k = 0; k < 3; k++) {
-        pos[(t * 3 + k) * 3] = p[k][0]; pos[(t * 3 + k) * 3 + 1] = p[k][1]; pos[(t * 3 + k) * 3 + 2] = p[k][2];
-        nrm[(t * 3 + k) * 3] = nx; nrm[(t * 3 + k) * 3 + 1] = ny; nrm[(t * 3 + k) * 3 + 2] = nz;
-        uv[(t * 3 + k) * 2] = uvs[(t * 3 + k) * 2];
-        uv[(t * 3 + k) * 2 + 1] = uvs[(t * 3 + k) * 2 + 1];
+        pos[(w * 3 + k) * 3] = p[k][0]; pos[(w * 3 + k) * 3 + 1] = p[k][1]; pos[(w * 3 + k) * 3 + 2] = p[k][2];
+        nrm[(w * 3 + k) * 3] = nx; nrm[(w * 3 + k) * 3 + 1] = ny; nrm[(w * 3 + k) * 3 + 2] = nz;
+        uv[(w * 3 + k) * 2] = uvs[(t * 3 + k) * 2];
+        uv[(w * 3 + k) * 2 + 1] = uvs[(t * 3 + k) * 2 + 1];
       }
+      w++;
     }
     const put = (buf, data) => { gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); };
     put(this.buf.pos, pos); put(this.buf.nrm, nrm); put(this.buf.uv, uv);
-    this.count = n * 3;
+    this.count = w * 3;
+    this.#refreshPaintMesh(mount);
   }
 
   #resize() {
@@ -313,19 +436,20 @@ export class MeshView {
   /** Hit under the cursor: UV (v down), the 3D point, or null. */
   #hit(e) {
     if (!this.bvh || !this.ed.doc?.mount) return null;
-    const bvh = this.shape === 'flat' ? this.flatBvh : this.bvh;
+    const bvh = this.shape === 'flat' ? this.flatBvh : (this.paintBvh || this.bvh);
     if (!bvh) return null;
     const { origin, dir } = this.#ray(e);
     const hit = raycastMesh(bvh, origin, dir);
     if (!hit) return null;
     const mount = this.ed.doc.mount;
-    const i = hit.tri * 3;
+    const face = this.shape !== 'flat' && this.faceMap ? this.faceMap[hit.tri] : hit.tri;
+    const i = face * 3;
     const b0 = 1 - hit.u - hit.v, b1 = hit.u, b2 = hit.v;
     return {
       u: b0 * mount.uvs[i * 2] + b1 * mount.uvs[(i + 1) * 2] + b2 * mount.uvs[(i + 2) * 2],
       v: b0 * mount.uvs[i * 2 + 1] + b1 * mount.uvs[(i + 1) * 2 + 1] + b2 * mount.uvs[(i + 2) * 2 + 1],
       p3: [origin[0] + dir[0] * hit.t, origin[1] + dir[1] * hit.t, origin[2] + dir[2] * hit.t],
-      face: hit.tri,
+      face,
     };
   }
 
@@ -360,7 +484,7 @@ export class MeshView {
       this.#visit(hit);
       return;
     }
-    const step = seamStep(this.stroke, hit, this.#gap(), this.shape === 'flat' ? null : this.ed.doc?.mount);
+    const step = seamStep(this.stroke, hit, this.#gap(), this.shape === 'flat' || this.ed.opts.wrapShapes === false ? null : this.ed.doc?.mount);
     if (step.wrapped) {
       this.stroke.wrapped = true;
       this.stroke.offU = step.offU;
@@ -418,6 +542,11 @@ export class MeshView {
         this.dragging = { x: e.clientX, y: e.clientY, mode: e.altKey ? 'rotate' : 'pan' };
         return;
       }
+      if (this.mode === 'move' && e.button === 0 && e.shiftKey && ed.doc.mount.groups?.length) {
+        const n = ed.doc.mount.groups.length;
+        this.objectDrag = { x: e.clientX, y: e.clientY, gi: Math.min(this.selectedGroup, n - 1) };
+        return;
+      }
       if (this.mode === 'move' && e.button === 0) {
         const source = this.#source();
         const uv = this.#hit(e);
@@ -455,6 +584,24 @@ export class MeshView {
         this.#request();
         return;
       }
+      if (this.objectDrag) {
+        const dx = e.clientX - this.objectDrag.x, dy = e.clientY - this.objectDrag.y;
+        this.objectDrag.x = e.clientX; this.objectDrag.y = e.clientY;
+        const gi = this.objectDrag.gi;
+        const eye = this.#eye();
+        const forward = norm(sub(this.target, eye));
+        const right = norm(cross(forward, [0, 1, 0]));
+        const up = cross(right, forward);
+        const s = this.dist * 0.0025;
+        if (!this.offsets[gi]) this.offsets[gi] = [0, 0, 0];
+        const o = this.offsets[gi];
+        o[0] += (right[0] * dx + up[0] * -dy) * s;
+        o[1] += (right[1] * dx + up[1] * -dy) * s;
+        o[2] += (right[2] * dx + up[2] * -dy) * s;
+        this.#uploadGeom(ed.doc.mount);
+        this.#request();
+        return;
+      }
       if (this.moving) {
         const uv = this.#hit(e);
         if (!uv) return;
@@ -476,6 +623,7 @@ export class MeshView {
     });
     const end = () => {
       this.dragging = null;
+      this.objectDrag = null;
       this.moving = null;
       this.stroke = null;
       if (!this.painting) return;

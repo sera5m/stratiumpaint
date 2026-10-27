@@ -9,6 +9,7 @@ export const DEFAULT_OPTS = {
   tolerance: 30, flood: 'contiguous', sampling: 'image',
   selMode: 'replace',
   shape: 'outline',
+  wrapShapes: true, // 3D: continue a shape across UV seams instead of stopping at the chart
   sides: 5,
   gradient: 'linear',
   gradientMode: 'color',

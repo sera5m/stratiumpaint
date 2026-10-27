@@ -169,7 +169,7 @@ function movePixels() {
       : { from: S.r, to: S.cur };
   };
 
-  /** Update box only (visual). Pixel bake is deferred. */
+  /** Move is stamped immediately. A size change only updates the box; resampling waits until set-down. */
   const renderAt = (s, nr) => {
     nr = {
       x: Math.round(nr.x), y: Math.round(nr.y),
@@ -177,7 +177,11 @@ function movePixels() {
       h: Math.max(1, Math.min(8192, Math.round(nr.h))),
     };
     if (nr.x === s.cur.x && nr.y === s.cur.y && nr.w === s.cur.w && nr.h === s.cur.h) return;
-    const area = rectUnion(s.cur, nr);
+    const sized = nr.w !== s.r.w || nr.h !== s.r.h;
+    const area = rectUnion(rectUnion(s.cur, nr), s.r);
+    stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
+    if (!sized) paintImage(s.layer.img, s.src, nr.x, nr.y);
+    s.layer.touch(area);
     s.cur = nr;
     s.total = rectUnion(s.total, area);
   };
@@ -231,7 +235,24 @@ function movePixels() {
       ed.requestOverlay();
       return;
     }
-    // Start fade + delayed bake
+    const commit = () => {
+      const total = rectIntersect(s.total, layerRect(s.layer));
+      const original = cropImage(s.base, total);
+      stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y);
+      const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
+      ed.doc.transaction(name, () => {
+        ed.doc.commitRegion(s.layer, total, original, name);
+        if (s.mask) ed.doc.setSelection(null, 'Deselect');
+      });
+    };
+    if (!sized) {
+      S = null;
+      fadeAlpha = 1;
+      ed.marchOffset = null;
+      ed.requestOverlay();
+      commit();
+      return;
+    }
     fadeAlpha = 1;
     const start = performance.now();
     const step = () => {
@@ -248,17 +269,8 @@ function movePixels() {
       fadeAlpha = 1;
       ed.marchOffset = null;
       ed.requestOverlay();
-      const total = rectIntersect(s.total, layerRect(s.layer));
-      const original = cropImage(s.base, total);
-      stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y);
-      const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
-      ed.doc.transaction(name, () => {
-        ed.doc.commitRegion(s.layer, total, original, name);
-        if (s.mask) ed.doc.setSelection(null, 'Deselect');
-      });
+      commit();
     }, 500);
-    // Keep S alive so overlay can still draw the preview + fading border during the wait
-    // (cleared in the timeout)
   };
 
   const lift = (ed) => {
@@ -300,7 +312,8 @@ function movePixels() {
     },
     overlay(ctx, ed, v) {
       const box = boxNow(ed);
-      if (S?.src && box) drawPreview(ctx, S.src, box, v);
+      const sized = S && (S.cur.w !== S.r.w || S.cur.h !== S.r.h);
+      if (sized && S.src && box) drawPreview(ctx, S.src, box, v);
       drawHandles(ctx, box, v, fadeAlpha);
     },
     /** Live width and height for the options bar. */

@@ -88,6 +88,7 @@ const OPTIONS = {
   flood: { type: 'select', label: 'Fill', items: [['contiguous', 'Contiguous'], ['global', 'Global']] },
   sampling: { type: 'select', label: 'Sample', items: [['image', 'Image'], ['layer', 'Layer']] },
   shape: { type: 'select', label: 'Style', items: [['outline', 'Outline'], ['fill', 'Filled'], ['both', 'Outline + fill']] },
+  wrapShapes: { type: 'toggle', label: 'Wrap seams', title: 'Continue shapes across UV seams so they stay one surface' },
   sides: { type: 'range', label: 'Sides', min: 3, max: 16, unit: '' },
   gradient: { type: 'select', label: 'Type', items: GRADIENT_TYPES },
   gradientMode: { type: 'select', label: 'Blend', items: GRADIENT_MODES },

@@ -149,10 +149,10 @@ function makeShape({ id, name, kind, key }) {
 
   return {
     id, name, key, group: 'shape', cursor: 'crosshair',
-    options: kind === 'line' ? ['size', 'opacity', 'aa']
-      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'opacity', 'aa']
-      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'opacity', 'aa']
-      : ['size', 'shape', 'opacity', 'aa'],
+    options: kind === 'line' ? ['size', 'opacity', 'aa', 'wrapShapes']
+      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'opacity', 'aa', 'wrapShapes']
+      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'opacity', 'aa', 'wrapShapes']
+      : ['size', 'shape', 'opacity', 'aa', 'wrapShapes'],
 
     down(e, ed) {
       const layer = ed.editableLayer();
@@ -259,7 +259,7 @@ function makeCurve() {
 
   return {
     id: 'line', name: 'Line / Curve', key: 'O', group: 'shape', cursor: 'crosshair',
-    options: ['size', 'opacity', 'aa'],
+    options: ['size', 'opacity', 'aa', 'wrapShapes'],
     down(e, ed) {
       if (S?.editing) {
         if (e.button === 2) { settle(ed); return; }

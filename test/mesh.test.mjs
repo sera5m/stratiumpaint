@@ -196,3 +196,33 @@ test('demo mine unwraps and a ray hits the body', () => {
   const hit = raycastMesh(bvh, [0, 0.03, 1], [0, 0, -1]);
   assert.ok(hit && hit.t > 0 && hit.t < 2);
 });
+
+test('faces that do not share a vertex become separate objects', () => {
+  const obj = `
+o parts
+v 0 0 0
+v 1 0 0
+v 0 1 0
+v 5 0 0
+v 6 0 0
+v 5 1 0
+f 1 2 3
+f 4 5 6
+`;
+  const mesh = parseOBJ(obj, 'parts.obj');
+  assert.equal(mesh.groups.length, 2);
+  assert.deepEqual(mesh.groups.map((g) => g.name), ['parts 1', 'parts 2']);
+  assert.equal(mesh.groups[0].count + mesh.groups[1].count, 2);
+  assert.equal(mesh.indices.length / 3, 2);
+  const joined = parseOBJ(`
+o wing
+v 0 0 0
+v 1 0 0
+v 0 1 0
+v 1 1 0
+f 1 2 3
+f 2 4 3
+`, 'wing.obj');
+  assert.equal(joined.groups.length, 1);
+  assert.equal(joined.groups[0].name, 'wing');
+});

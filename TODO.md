@@ -8,9 +8,9 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 - Possible further: switch final bake to canvas/OffscreenCanvas for consistency; investigate any pure-JS resize libs if needed.
 
 ## 3D features
-- [x] Connected-component split: objects are separated if not connected by shared geometry (in mesh.js finish).
-- [x] Temporary move of objects (MeshView: select object, Shift-drag in Move mode offsets it; Reset objects button).
-- [x] Configuration toggle for shape brush behavior: wrapShapes (default on) continues shapes across seams; off = per-chart only.
+- [x] Connected-component split: a group that does not share vertices becomes separate objects (`body 1`, `body 2`). Named groups that are connected stay as named.
+- [x] Temporary object move: object list on the model pane when there are 2+ objects. Move mode, Shift-drag slides the selected object. Hide/Show drops it from the view and the raycast. Reset puts them back.
+- [x] Shape option **Wrap seams** (on by default). Off stops a shape at the UV chart instead of continuing across the weld.
 
 ## Shape brushes
 Current: curve, rect, roundrect, ellipse, triangle, diamond, pentagon, hexagon, polygon, star, arrow (fill/outline/both, radius, sides).
