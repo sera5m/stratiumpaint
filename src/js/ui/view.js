@@ -1,7 +1,7 @@
 // The canvas viewport: draws the document, the selection outline and tool overlays, and turns
 // mouse/touch/pen input into tool events in document coordinates.
 import { maskOutline } from '../core/mask.js';
-import { clamp } from '../core/util.js';
+import { clamp, rectUnion } from '../core/util.js';
 import { h, raf } from './dom.js';
 import { requestedRenderer, chooseRenderer } from '../gpu/backend.js';
 import { getGPU, onDeviceLost } from '../gpu/device.js';
@@ -45,6 +45,8 @@ export class View {
     this._gpuFailed = false;
 
     this._draw = raf(() => this.#paint());
+    this.paintStats = { frames: 0, pixels: 0 }; // screen pixels redrawn, for tests and benchmarks
+    this._damage = 'all';
     this._needBase = true;
     this._needOverlay = true;
 
@@ -54,8 +56,9 @@ export class View {
     this.#bindWheel();
 
     ed.on('doc', (doc) => this.attach(doc));
-    ed.on('doc:render', () => this.requestRender());
-    ed.on('doc:float', () => this.requestRender()); // a drag: redraw only, coalesced to one frame
+    // Changes carry their document rect: only that part of the screen is redrawn (one rAF).
+    ed.on('doc:render', (r) => this.requestDamage(r));
+    ed.on('doc:float', (r) => this.requestDamage(r)); // a drag: where the float was ∪ is
     ed.on('doc:size', () => { const s = ed.doc?.viewState; if (s) s.fitted = true; this.fit(); });
     ed.on('doc:selection', () => this.requestOverlay());
     ed.on('overlay', () => this.requestOverlay());
@@ -176,11 +179,38 @@ export class View {
 
   // ------------------------------------------------------------------ drawing
 
-  requestRender() { this._needBase = true; this._needOverlay = true; this._draw(); }
+  /** Redraw everything (pan, zoom, resize, new document…). */
+  requestRender() { this._damage = 'all'; this._needBase = true; this._needOverlay = true; this._draw(); }
+  /** Redraw only document rect `r` (none = everything) on the next frame. */
+  requestDamage(r) {
+    if (!r) { this.requestRender(); return; }
+    if (this._damage !== 'all') this._damage = this._damage ? rectUnion(this._damage, r) : { ...r };
+    this._needBase = true; this._needOverlay = true; this._draw();
+  }
+  /** Screen rect (CSS px, whole pixels, a pixel of margin for smoothing) of document rect r. */
+  #screenRect(r) {
+    const z = this.zoom;
+    const x0 = Math.max(0, Math.floor(this.ox + r.x * z) - 1), y0 = Math.max(0, Math.floor(this.oy + r.y * z) - 1);
+    const x1 = Math.min(this.width, Math.ceil(this.ox + (r.x + r.w) * z) + 1), y1 = Math.min(this.height, Math.ceil(this.oy + (r.y + r.h) * z) + 1);
+    return x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
+  }
   requestOverlay() { this._needOverlay = true; this._draw(); }
 
   #paint() {
-    if (this._needBase) { this._needBase = false; this.#paintBase(); }
+    if (this._needBase) {
+      this._needBase = false;
+      const damage = this._damage ?? 'all';
+      this._damage = null;
+      // A different document / zoom / pan / size since the last frame means a full redraw.
+      if (this._paintDoc !== this.ed.doc) { this._paintDoc = this.ed.doc; this._paintKey = null; }
+      const key = `${this.ox}|${this.oy}|${this.zoom}|${this.width}|${this.height}|${this.dpr}|${this.renderer}`;
+      const full = damage === 'all' || key !== this._paintKey;
+      this._paintKey = key;
+      const rect = full ? null : this.#screenRect(damage);
+      if (full || rect) this.#paintBase(rect);
+      this.paintStats.frames++;
+      this.paintStats.pixels += full ? this.width * this.height : rect ? rect.w * rect.h : 0;
+    }
     if (this._needOverlay) { this._needOverlay = false; this.#paintOverlay(); }
   }
 
@@ -245,7 +275,7 @@ export class View {
     this.ed.emit('renderer', this.renderer);
   }
 
-  #paintBase() {
+  #paintBase(rect = null) {
     const doc = this.ed.doc;
     if (this.gpu) {
       const ok = !doc || this.gpu.canDraw(doc);
@@ -254,7 +284,7 @@ export class View {
       this.gpuCanvas.style.visibility = ok ? '' : 'hidden';
       if (ok) {
         try {
-          this.gpu.present(doc, { ox: this.ox, oy: this.oy, zoom: this.zoom, width: this.width, height: this.height, dpr: this.dpr });
+          this.gpu.present(doc, { ox: this.ox, oy: this.oy, zoom: this.zoom, width: this.width, height: this.height, dpr: this.dpr }, rect);
           return;
         } catch (err) {
           console.error(err);
@@ -262,13 +292,21 @@ export class View {
         }
       }
     }
-    this.#paintBase2D();
+    this.#paintBase2D(rect);
   }
 
-  #paintBase2D() {
+  #paintBase2D(rect = null) {
     const { ctx, dpr } = this, doc = this.ed.doc;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, this.width, this.height);
+    ctx.save();
+    if (rect) { ctx.beginPath(); ctx.rect(rect.x, rect.y, rect.w, rect.h); ctx.clip(); }
+    this.#paintBase2DIn(rect || { x: 0, y: 0, w: this.width, h: this.height }, ctx, doc);
+    ctx.restore();
+  }
+
+  /** Checkerboard + composite, clipped by the caller to `r` (screen CSS px). */
+  #paintBase2DIn(r, ctx, doc) {
+    ctx.clearRect(r.x, r.y, r.w, r.h);
     if (!doc) return;
     const z = this.zoom, w = doc.width * z, hh = doc.height * z;
     ctx.save();
@@ -281,7 +319,19 @@ export class View {
     ctx.restore();
     ctx.imageSmoothingEnabled = z < 1;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(doc.composite(), this.ox, this.oy, w, hh);
+    const comp = doc.composite();
+    if (r.w >= this.width && r.h >= this.height) { ctx.drawImage(comp, this.ox, this.oy, w, hh); return; }
+    // Partial: draw only the matching part of the composite (plus the filter's footprint, which
+    // the caller's clip trims), so a small change does not filter / mipmap the whole image.
+    // Zoomed out, the browser filters through mipmaps: start the sub-rect on a mip-block boundary
+    // so its mip levels are the same pixels as the whole image's.
+    const m = Math.ceil(2 / Math.min(1, z)) + 1;
+    const al = z < 1 ? Math.min(256, 2 ** (Math.ceil(Math.log2(1 / z)) + 1)) : 1;
+    const down = (v) => Math.floor(v / al) * al, up = (v) => Math.ceil(v / al) * al;
+    const sx0 = clamp(down(Math.floor((r.x - this.ox) / z) - m), 0, doc.width), sy0 = clamp(down(Math.floor((r.y - this.oy) / z) - m), 0, doc.height);
+    const sx1 = clamp(up(Math.ceil((r.x + r.w - this.ox) / z) + m), 0, doc.width), sy1 = clamp(up(Math.ceil((r.y + r.h - this.oy) / z) + m), 0, doc.height);
+    if (sx1 <= sx0 || sy1 <= sy0) return;
+    ctx.drawImage(comp, sx0, sy0, sx1 - sx0, sy1 - sy0, this.ox + sx0 * z, this.oy + sy0 * z, (sx1 - sx0) * z, (sy1 - sy0) * z);
   }
 
   #paintOverlay() {
@@ -360,20 +410,27 @@ export class View {
         return [tcx + dx * cos - dy * sin, tcy + dx * sin + dy * cos];
       }
       : (x, y) => [x + (off.dx || 0), y + (off.dy || 0)];
-    c.beginPath();
-    for (let i = 0; i < segs.length; i += 4) {
-      const a = map(segs[i], segs[i + 1]), b = map(segs[i + 2], segs[i + 3]);
-      c.moveTo(this.ox + a[0] * z + 0.5, this.oy + a[1] * z + 0.5);
-      c.lineTo(this.ox + b[0] * z + 0.5, this.oy + b[1] * z + 0.5);
+    // The outline path only changes with the mask, its offset or the view; the 130 ms ant
+    // animation and other overlay redraws reuse it.
+    const key = `${JSON.stringify(off)}|${z}|${this.ox}|${this.oy}`;
+    let path = this._antsPath;
+    if (!path || this._antsMask !== mask || this._antsKey !== key) {
+      path = new Path2D();
+      for (let i = 0; i < segs.length; i += 4) {
+        const a = map(segs[i], segs[i + 1]), b = map(segs[i + 2], segs[i + 3]);
+        path.moveTo(this.ox + a[0] * z + 0.5, this.oy + a[1] * z + 0.5);
+        path.lineTo(this.ox + b[0] * z + 0.5, this.oy + b[1] * z + 0.5);
+      }
+      this._antsPath = path; this._antsMask = mask; this._antsKey = key;
     }
     c.lineWidth = 1;
     c.setLineDash([]);
     c.strokeStyle = '#fff';
-    c.stroke();
+    c.stroke(path);
     c.setLineDash([4, 4]);
     c.lineDashOffset = -this.antPhase;
     c.strokeStyle = '#000';
-    c.stroke();
+    c.stroke(path);
     c.setLineDash([]);
   }
 

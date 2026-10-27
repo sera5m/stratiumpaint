@@ -3,14 +3,14 @@
 //
 // Events: 'render' (pixels changed) · 'layers' · 'selection' · 'size' · 'history' · 'meta'
 //         'float' (a floating move/scale/rotate changed: the view redraws, nothing else re-reads pixels)
-import { Emitter, clamp } from '../core/util.js';
+import { Emitter, clamp, rectUnion, rectIntersect } from '../core/util.js';
 import { History } from '../core/history.js';
 import { cropImage, cloneImage } from '../core/image.js';
 import { flipImage, rotateImage, resizeImage, resizeCanvas } from '../core/transform.js';
 import { invertMask, maskBounds, rectMask } from '../core/mask.js';
 import { Layer } from './layer.js';
 import { paintImage, createCanvas } from './raster.js';
-import { floatMatrix, floatPlacement, resampleFloat } from '../core/xform.js';
+import { floatMatrix, floatPlacement, resampleFloat, rotatedBounds } from '../core/xform.js';
 
 const HAS_DOM = typeof document !== 'undefined';
 
@@ -36,10 +36,14 @@ export class Doc extends Emitter {
     this._tx = null;
     this._layerCount = 0;
     this._comp = null;
+    // What the cached composite still lacks: false (up to date), true (everything) or a rect.
+    // 'render' / 'float' events carry the changed rect too (none = everything), so the view and
+    // the 3D texture redraw / upload only that.
     this._compDirty = true;
     // Content being moved / scaled / rotated by a move tool, drawn over its layer with a transform
     // until it is set down: { layer, src, box, angle }. See setFloat.
     this.float = null;
+    this.compStats = { pixels: 0 }; // pixels recomposited (Canvas 2D), for tests and benchmarks
     this._floatSeq = 0;
     this._floatCache = null;
     this.history.on('change', () => { this.emit('history'); this.emit('meta'); });
@@ -70,13 +74,26 @@ export class Doc extends Emitter {
   }
 
   _adopt(layer) {
-    layer.onTouch = () => this._invalidate();
+    layer.onTouch = (r) => this._invalidate(r);
     return layer;
   }
 
-  _invalidate() {
-    this._compDirty = true;
-    this.emit('render');
+  /** Something changed inside `r` (document pixels; none = anywhere). */
+  _invalidate(r) {
+    r = r && rectIntersect(r, { x: 0, y: 0, w: this.width, h: this.height });
+    this._damage(r || null);
+    this.emit('render', r || undefined);
+  }
+
+  _damage(r) {
+    if (!r || this._compDirty === true) this._compDirty = true;
+    else this._compDirty = this._compDirty ? rectUnion(this._compDirty, r) : { ...r };
+  }
+
+  /** Bounds the float covers on the document (whole pixels). */
+  _floatBounds(f = this.float) {
+    if (!f) return null;
+    return rectIntersect(rotatedBounds(f.box, f.angle), { x: 0, y: 0, w: this.width, h: this.height });
   }
 
   // ------------------------------------------------------------------ history plumbing
@@ -141,7 +158,7 @@ export class Doc extends Emitter {
     }
     if (!src) src = { width: canvas.width, height: canvas.height, data: null };
     this.float = { id: ++this._floatSeq, version: 0, content: 0, layer, src, canvas, box: { ...box }, angle, alpha };
-    this.emit('float');
+    this.emit('float', this._floatBounds() || undefined);
     return this.float;
   }
 
@@ -149,30 +166,40 @@ export class Doc extends Emitter {
   updateFloatContent(box) {
     const f = this.float;
     if (!f) return;
+    const was = this._floatBounds(f);
     if (f.src.data === null) { f.src.width = f.canvas.width; f.src.height = f.canvas.height; }
     if (box) f.box = { ...box };
     f.content++;
     f.version++;
     f.view = null;
-    this.emit('float');
+    this.#emitFloat(was);
   }
 
   /** The float moved / was resized / turned. Cheap: the view just redraws on the next frame. */
   updateFloat(box, angle) {
     const f = this.float;
     if (!f) return;
+    const was = this._floatBounds(f);
     if (box) f.box = { ...box };
     if (angle !== undefined) f.angle = angle;
     f.version++;
-    this.emit('float');
+    this.#emitFloat(was);
+  }
+
+  /** 'float' with the area that changed: where it was ∪ where it is now. */
+  #emitFloat(was) {
+    const now = this._floatBounds();
+    const r = was && now ? rectUnion(was, now) : was || now;
+    if (r) this.emit('float', r);
   }
 
   clearFloat() {
     if (!this.float) return;
+    const was = this._floatBounds();
     this.float = null;
     this._floatCache = null;
-    this._compDirty = true;
-    this.emit('float');
+    this._compDirty = true; // full: the float frame grouped the layers above differently (8-bit rounding)
+    this.emit('float', was || undefined);
   }
 
   /** Draw the float into a 2D context with its transform. */
@@ -239,7 +266,8 @@ export class Doc extends Emitter {
   #compositeFloat() {
     const f = this.float, w = this.width, hh = this.height;
     const i = this.layers.indexOf(f.layer);
-    const key = `${w}x${hh}|${i}|` + this.layers.map((l) => `${l.id}:${l.version}:${l.visible}:${l.opacity}:${l.blend}`).join(',');
+    // The float's own layer is drawn live each frame, so its pixel version is not part of the key.
+    const key = `${w}x${hh}|${i}|` + this.layers.map((l, k) => `${l.id}:${k === i ? '' : l.version}:${l.visible}:${l.opacity}:${l.blend}`).join(',');
     let c = this._floatCache;
     if (!c || c.key !== key) {
       const below = c?.below || createCanvas(w, hh), above = c?.above || createCanvas(w, hh);
@@ -248,15 +276,24 @@ export class Doc extends Emitter {
       const up = this.layers.slice(i + 1);
       const groupable = up.every((l) => !l.visible || l.blend === 'source-over');
       if (groupable) this.#drawStack(above.getContext('2d'), up);
-      c = this._floatCache = { key, below, above, groupable, up, tmp: c?.tmp || null, frame: -1, fid: -1 };
+      c = this._floatCache = { key, below, above, groupable, up, tmp: c?.tmp || null, frame: -1, fid: -1, bounds: null };
     }
     if (!this._comp) this._comp = createCanvas(w, hh);
     if (this._comp.width !== w || this._comp.height !== hh) { this._comp.width = w; this._comp.height = hh; }
     if (c.fid === f.id && c.frame === f.version && !this._compDirty) return this._comp;
+    // Only where the float was / is, plus whatever else changed, once this frame is warm.
+    const now = this._floatBounds(f);
+    let R = { x: 0, y: 0, w, h: hh };
+    if (c.fid === f.id && c.bounds !== null && this._compDirty !== true) {
+      R = [c.bounds, now, this._compDirty || null].filter(Boolean).reduce((a, b) => rectUnion(a, b), null);
+    }
+    c.bounds = now || { x: 0, y: 0, w: 0, h: 0 };
     const ctx = this._comp.getContext('2d');
+    ctx.save();
+    if (R && (R.w < w || R.h < hh)) { ctx.beginPath(); ctx.rect(R.x, R.y, R.w, R.h); ctx.clip(); }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
-    ctx.clearRect(0, 0, w, hh);
+    if (R) ctx.clearRect(R.x, R.y, R.w, R.h);
     ctx.drawImage(c.below, 0, 0);
     const l = f.layer;
     if (l.visible && l.opacity > 0) {
@@ -267,9 +304,12 @@ export class Doc extends Emitter {
         if (!c.tmp) c.tmp = createCanvas(w, hh);
         if (c.tmp.width !== w || c.tmp.height !== hh) { c.tmp.width = w; c.tmp.height = hh; }
         const t = c.tmp.getContext('2d');
+        t.save();
+        if (R && (R.w < w || R.h < hh)) { t.beginPath(); t.rect(R.x, R.y, R.w, R.h); t.clip(); }
         t.clearRect(0, 0, w, hh);
         t.drawImage(l.canvas, 0, 0);
         Doc.drawFloat(t, f);
+        t.restore();
         ctx.globalAlpha = l.opacity;
         ctx.globalCompositeOperation = l.blend;
         ctx.drawImage(c.tmp, 0, 0);
@@ -279,8 +319,10 @@ export class Doc extends Emitter {
     }
     if (c.groupable) ctx.drawImage(c.above, 0, 0);
     else this.#drawStack(ctx, c.up);
+    ctx.restore();
     c.fid = f.id; c.frame = f.version;
     this._compDirty = false;
+    this.compStats.pixels += R ? R.w * R.h : 0;
     return this._comp;
   }
 
@@ -295,18 +337,23 @@ export class Doc extends Emitter {
     }
     if (this._compDirty) {
       const ctx = this._comp.getContext('2d');
+      const full = this._compDirty === true;
+      const r = full ? { x: 0, y: 0, w: this.width, h: this.height } : this._compDirty;
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
-      ctx.clearRect(0, 0, this.width, this.height);
+      ctx.clearRect(r.x, r.y, r.w, r.h);
       for (const l of this.layers) {
         if (!l.visible || l.opacity <= 0) continue;
         ctx.globalAlpha = l.opacity;
         ctx.globalCompositeOperation = l.blend;
-        ctx.drawImage(l.canvas, 0, 0);
+        // Only the changed rectangle of each layer (blend modes are per pixel, so this is exact).
+        if (full) ctx.drawImage(l.canvas, 0, 0);
+        else ctx.drawImage(l.canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
       this._compDirty = false;
+      this.compStats.pixels += r.w * r.h;
     }
     return this._comp;
   }

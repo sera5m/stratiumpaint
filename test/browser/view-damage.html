@@ -1,0 +1,198 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Run by npm run test:gpu. The view redraws only what changed (a dirty rect per frame). This
+     makes changes (brush stroke, float drag, layer edits, undo) at several zooms and checks that
+     the partially redrawn screen equals a full redraw, and that small changes redraw little. -->
+<style>#stage { position: relative; width: 500px; height: 400px; } #stage canvas { position: absolute; inset: 0; }</style>
+<div id="stage"></div>
+<pre id="out"></pre>
+<script>
+const bail = (m) => { document.getElementById('out').textContent += '\nERROR ' + m; document.title = 'FAIL'; };
+addEventListener('error', (e) => bail(e.message + ' ' + (e.error?.stack || '')));
+addEventListener('unhandledrejection', (e) => bail(String(e.reason?.stack || e.reason)));
+</script>
+<script type="module">
+import { Editor } from '../../src/js/ui/editor.js';
+import { Doc } from '../../src/js/doc/document.js';
+import { View } from '../../src/js/ui/view.js';
+import { cloneImage } from '../../src/js/core/image.js';
+import { getGPU } from '../../src/js/gpu/device.js';
+import { GpuCompositor } from '../../src/js/gpu/compositor.js';
+
+const out = [], fails = [];
+if (location.search.includes('fullsrc')) window.__fullSrc = true;
+const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+const ev = (x, y) => ({ x, y, sx: x, sy: y, button: 0, shift: false, ctrl: false, alt: false });
+const W = 720, H = 720;
+let seed = 3;
+const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+
+function makeDoc() {
+  const doc = new Doc(W, H);
+  const d = doc.layers[0].img.data;
+  for (let i = 0; i < d.length; i += 4) { const x = (i / 4) % W, y = (i / 4 / W) | 0; d[i] = (x * 7) & 255; d[i + 1] = (y * 3) & 255; d[i + 2] = rnd() * 255; d[i + 3] = 255; }
+  doc.layers[0].touch();
+  const top = doc.addLayer();
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (((x >> 5) + (y >> 5)) & 1) top.img.data.set([250, 40, 40, 120], (y * W + x) * 4);
+  top.touch(); top.blend = 'multiply';
+  return doc;
+}
+
+/** The edits, driven like the user would; each returns after its frame has been drawn. */
+async function edits(ed, doc, after) {
+  ed.opts.size = 18; ed.opts.opacity = 80; ed.opts.hardness = 50;
+  ed.setTool('brush');
+  ed.pointer('down', ev(100, 100)); await after('brush down');
+  for (let i = 1; i <= 6; i++) { ed.pointer('move', ev(100 + i * 25, 100 + i * 9)); await after('brush move'); }
+  ed.pointer('up', ev(250, 154)); await after('brush up');
+  const L = doc.layer, part = cloneImage(L.img);
+  for (let y = 400; y < 430; y++) for (let x = 500; x < 560; x++) L.img.data.set([0, 200, 255, 255], (y * W + x) * 4);
+  L.touch({ x: 500, y: 400, w: 60, h: 30 }); await after('layer touch');
+  // A lifted piece moved, scaled and rotated, then dropped.
+  doc.setFloat({ layer: L, src: { width: 60, height: 40, data: new Uint8ClampedArray(60 * 40 * 4).fill(200) }, box: { x: 300, y: 300, w: 60, h: 40 }, angle: 0 });
+  await after('float lift');
+  for (let i = 1; i <= 4; i++) { doc.updateFloat({ x: 300 + i * 30, y: 300 + i * 12, w: 60 + i * 15, h: 40 + i * 10 }, i * 0.2); await after('float move'); }
+  doc.clearFloat(); await after('float drop');
+  doc.undo(); await after('undo');
+  void part;
+}
+
+const shot = (view) => view.ctx.getImageData(0, 0, view.canvas.width, view.canvas.height).data;
+// Nearest-neighbour zoom (> 1): a screen pixel whose centre lands exactly on a doc-pixel edge can
+// take either neighbour depending on how the draw was clipped; ignore just those pixels.
+function tieDiff(a, b, v) {
+  const cw = v.canvas.width, z = v.zoom * 1, tie = (s, o) => { const t = ((s + 0.5) / v.dpr - o) / v.zoom; return Math.abs(t - Math.round(t)) < 1e-6; };
+  let m = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    let d = 0;
+    for (let k = 0; k < 4; k++) d = Math.max(d, Math.abs(a[i + k] - b[i + k]));
+    if (!d || d <= m) continue;
+    const x = (i / 4) % cw, y = (i / 4 / cw) | 0;
+    if (z > 1 && (tie(x, v.ox) || tie(y, v.oy))) continue;
+    m = d;
+  }
+  return m;
+}
+const unite = (d, r) => d === 'all' || !r ? 'all' : !d ? { ...r } : { x: Math.min(d.x, r.x), y: Math.min(d.y, r.y), w: Math.max(d.x + d.w, r.x + r.w) - Math.min(d.x, r.x), h: Math.max(d.y + d.h, r.y + r.h) - Math.min(d.y, r.y) };
+/** Pixels of a screen shot outside screen rect r (CSS px, shrunk by 3 px) zeroed. */
+function within(a, v, r) {
+  if (!r) return a;
+  const o = new Uint8ClampedArray(a.length), cw = v.canvas.width, d = v.dpr;
+  const x0 = Math.ceil((r.x + 3) * d), y0 = Math.ceil((r.y + 3) * d), x1 = Math.floor((r.x + r.w - 3) * d), y1 = Math.floor((r.y + r.h - 3) * d);
+  for (let y = Math.max(0, y0); y < Math.min(v.canvas.height, y1); y++) for (let x = Math.max(0, x0); x < Math.min(cw, x1); x++) { const i = (y * cw + x) * 4; o.set(a.subarray(i, i + 4), i); }
+  return o;
+}
+const maxDiff = (a, b) => { let m = 0; for (let i = 0; i < a.length; i++) { const d = Math.abs(a[i] - b[i]); if (d > m) m = d; } return m; };
+
+// ---- Canvas 2D view ----
+for (const zoom of [1, 0.37, 2, 3, 2.5]) {
+  const ed = new Editor(), doc = makeDoc();
+  ed.addDoc(doc);
+  const stage = document.getElementById('stage'); stage.innerHTML = '';
+  const view = new View(ed, stage);
+  await frame();
+  // Chrome moves a canvas from GPU to CPU raster after a few getImageData calls; settle that first so
+  // every compared frame comes from the same rasterizer.
+  for (let i = 0; i < 6; i++) { shot(view); view.requestRender(); await frame(); }
+  ed.setTool('brush'); ed.pointer('down', ev(600, 600)); ed.pointer('up', ev(610, 600)); doc.undo(); // same for the composite's first edit
+  for (let i = 0; i < 3; i++) { shot(view); view.requestRender(); await frame(); }
+  view.zoom = zoom; view.ox = zoom > 1 ? -80 : 17; view.oy = zoom > 1 ? -60 : 9; view.requestRender(); await frame();
+  let worst = 0, worstAt = '', small = 0, dmg = null;
+  doc.on('render', (r) => { dmg = unite(dmg, r); }); doc.on('float', (r) => { dmg = unite(dmg, r); });
+  await edits(ed, doc, async (what) => {
+    const p0 = view.paintStats.pixels;
+    const dm = dmg; dmg = null;
+    const sr = dm && dm !== 'all' ? { x: view.ox + dm.x * view.zoom, y: view.oy + dm.y * view.zoom, w: dm.w * view.zoom, h: dm.h * view.zoom } : null;
+    await frame(); const pr = window.__lastRect;
+    const redrawn = view.paintStats.pixels - p0;
+    const partial = shot(view);
+    view.requestRender(); await frame();
+    const full = shot(view);
+    // Zoomed out, Chrome's 'high' downscale of a canvas differs between a frame where it just
+    // changed and one where it did not (two full redraws disagree), so compare only where this
+    // frame redrew; coverage itself is checked at the document level below.
+    const d = zoom < 1 ? tieDiff(within(partial, view, sr), within(full, view, sr), view) : tieDiff(partial, full, view);
+    if (d > worst) { worst = d; worstAt = what;
+      if (location.search.includes('debug')) { let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1; const cw = view.canvas.width; window.__n = 0;
+        for (let i = 0; i < full.length; i += 4) if (Math.abs(full[i] - partial[i]) + Math.abs(full[i + 1] - partial[i + 1]) + Math.abs(full[i + 2] - partial[i + 2]) + Math.abs(full[i + 3] - partial[i + 3]) > 0) { window.__n = (window.__n || 0) + 1; if (window.__n < 6) log(`   px ${(i / 4) % cw},${(i / 4 / cw) | 0} full ${[...full.slice(i, i + 4)]} partial ${[...partial.slice(i, i + 4)]}`); const x = (i / 4) % cw, y = (i / 4 / cw) | 0; x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+        log(`  n ${window.__n} diff bbox screen ${x0},${y0}-${x1},${y1}; view ox ${view.ox} oy ${view.oy} z ${view.zoom} dpr ${view.dpr}; partial frame ${JSON.stringify(pr)}`); } }
+    if (what === 'brush move' || what === 'layer touch') small = Math.max(small, redrawn / (view.width * view.height));
+  });
+  log(`Canvas 2D zoom ${zoom}: partial vs full redraw max ${worst}${worstAt ? ` (${worstAt})` : ''}, biggest small-edit redraw ${(small * 100).toFixed(1)}% of the view`);
+  // Zoomed out: Chrome's downscale filter itself varies by a few levels (see above).
+  if (worst > (zoom < 1 ? 8 : 0)) fails.push(`Canvas 2D zoom ${zoom}: partial redraw differs from a full one by ${worst} after ${worstAt}`);
+  if (small > 0.25) fails.push(`Canvas 2D zoom ${zoom}: a small edit redrew ${(small * 100).toFixed(0)}% of the view`);
+  { // pan → full
+    const p0 = view.paintStats.pixels; view.ox += 5; view.requestRender(); await frame();
+    if (view.paintStats.pixels - p0 < view.width * view.height) fails.push('pan did not redraw the whole view');
+  }
+  { // many requests in one frame → one redraw
+    const f0 = view.paintStats.frames;
+    for (let i = 0; i < 20; i++) doc.layer.touch({ x: i * 10, y: 5, w: 4, h: 4 });
+    await frame();
+    if (view.paintStats.frames - f0 !== 1) fails.push(`20 changes in one frame gave ${view.paintStats.frames - f0} redraws`);
+  }
+}
+
+// ---- Coverage: every composite pixel an edit changes is inside the rect it reported ----
+{
+  const ed = new Editor(), doc = makeDoc(); ed.addDoc(doc);
+  const px = () => { const c = doc.composite(); return c.getContext('2d').getImageData(0, 0, W, H).data.slice(); };
+  let dmg = null, prev = px(), bad = 0, steps = 0;
+  doc.on('render', (r) => { dmg = unite(dmg, r); }); doc.on('float', (r) => { dmg = unite(dmg, r); });
+  await edits(ed, doc, async (what) => {
+    const cur = px(), dm = dmg; dmg = null; steps++;
+    if (dm !== 'all') for (let i = 0; i < cur.length; i += 4) {
+      if (cur[i] === prev[i] && cur[i + 1] === prev[i + 1] && cur[i + 2] === prev[i + 2] && cur[i + 3] === prev[i + 3]) continue;
+      const x = (i / 4) % W, y = (i / 4 / W) | 0;
+      if (!dm || x < dm.x || y < dm.y || x >= dm.x + dm.w || y >= dm.y + dm.h) { if (!bad++) fails.push(`${what}: pixel ${x},${y} changed outside the reported rect ${JSON.stringify(dm)}`); }
+    }
+    prev = cur;
+  });
+  log(`coverage: ${steps} edits, ${bad} changed pixels outside their reported rect`);
+}
+
+// ---- WebGPU present ----
+const gpu = await getGPU().catch(() => null);
+if (!gpu) log('WebGPU: no adapter, skipped');
+else {
+  const canvas = document.createElement('canvas'); canvas.width = 500; canvas.height = 400;
+  const comp = new GpuCompositor(gpu, canvas);
+  const d = gpu.device, TW = 500, TH = 400;
+  const mk = (copy) => d.createTexture({ size: [TW, TH], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | (copy ? GPUTextureUsage.COPY_DST : 0) });
+  const A = mk(true), B = mk(false);
+  const bpr = Math.ceil(TW * 4 / 256) * 256;
+  async function read(tex) {
+    const buf = d.createBuffer({ size: bpr * TH, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = d.createCommandEncoder(); enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: bpr }, [TW, TH]); d.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ); const a = new Uint8Array(buf.getMappedRange().slice(0)); buf.unmap(); buf.destroy(); return a;
+  }
+  for (const zoom of [1, 0.37, 2, 3, 2.5]) {
+    const ed = new Editor(), doc = makeDoc(); ed.addDoc(doc);
+    const v = { ox: zoom > 1 ? -80 : 17, oy: zoom > 1 ? -60 : 9, zoom, width: TW, height: TH, dpr: 1 };
+    let damage = null;
+    const add = (r) => { if (damage === 'all') return; if (!r) { damage = 'all'; return; } damage = damage ? { x: Math.min(damage.x, r.x), y: Math.min(damage.y, r.y), w: Math.max(damage.x + damage.w, r.x + r.w) - Math.min(damage.x, r.x), h: Math.max(damage.y + damage.h, r.y + r.h) - Math.min(damage.y, r.y) } : { ...r }; };
+    doc.on('render', add); doc.on('float', add);
+    comp.renderView(doc, v, A, null);
+    let worst = 0, worstAt = '', small = 0;
+    await edits(ed, doc, async (what) => {
+      const r = damage; damage = null;
+      const rect = r === 'all' || !r ? (r ? null : { x: 0, y: 0, w: 0, h: 0 }) : { x: v.ox + r.x * zoom, y: v.oy + r.y * zoom, w: r.w * zoom, h: r.h * zoom };
+      const p0 = comp.stats.presentPixels;
+      comp.renderView(doc, v, A, rect);
+      const redrawn = comp.stats.presentPixels - p0;
+      comp.renderView(doc, v, B, null);
+      const dd = maxDiff(await read(A), await read(B));
+      if (dd > worst) { worst = dd; worstAt = what; }
+      if (what === 'brush move' || what === 'layer touch') small = Math.max(small, redrawn / (TW * TH));
+    });
+    log(`WebGPU zoom ${zoom}: partial vs full present max ${worst}${worstAt ? ` (${worstAt})` : ''}, biggest small-edit redraw ${(small * 100).toFixed(1)}% of the view`);
+    if (worst > 0) fails.push(`WebGPU zoom ${zoom}: partial present differs by ${worst} after ${worstAt}`);
+    if (small > 0.25) fails.push(`WebGPU zoom ${zoom}: a small edit redrew ${(small * 100).toFixed(0)}% of the view`);
+  }
+}
+log(fails.length ? `FAIL\n${fails.join('\n')}` : 'PASS');
+document.title = fails.length ? 'FAIL' : 'PASS';
+</script>

@@ -99,7 +99,13 @@ async function measure(label, W, H, c, render, { gpuStats = null, mesh = null } 
   await frame(); await frame();
   const draw = async () => { if (render === 'view') await frame(); else await render(doc); };
   await draw();
-  const C = window.__c, snap = () => ({ ...C, up: gpuStats ? gpuStats().uploadPixels ?? 0 : 0 });
+  const C = window.__c, snap = () => ({ ...C, up: gpuStats ? gpuStats().uploadPixels ?? 0 : 0,
+    redraw: (view?.paintStats?.pixels ?? 0) + (gpuStats ? gpuStats().presentPixels ?? 0 : 0), comp: doc.compStats?.pixels ?? 0 });
+  if (render !== 'view') { // like the View: collect the changed document rect for the present pass
+    window.__damage = 'all';
+    const add = (r) => { if (window.__damage === 'all') return; window.__damage = !r ? 'all' : window.__damage ? { x: Math.min(window.__damage.x, r.x), y: Math.min(window.__damage.y, r.y), w: Math.max(window.__damage.x + window.__damage.w, r.x + r.w) - Math.min(window.__damage.x, r.x), h: Math.max(window.__damage.y + window.__damage.h, r.y + r.h) - Math.min(window.__damage.y, r.y) } : { ...r }; };
+    doc.on('render', add); doc.on('float', add);
+  }
   const [sx, sy] = c.start ? c.start(doc) : c.path(doc, 0, 0);
   let t = performance.now(); const r0 = C.raf;
   ed.pointer('down', ev(sx, sy));
@@ -121,7 +127,7 @@ async function measure(label, W, H, c, render, { gpuStats = null, mesh = null } 
   await draw();
   const up = upJs + (C.raf - r1);
   const st = Brush.brushStats ? ` copied at start ${(Brush.brushStats.startCopied / 1e3).toFixed(0)}k px` : '';
-  log(`  ${label.padEnd(10)} ${c.name.padEnd(22)} start ${f1(down)} ms | frame median ${f1(med(frames))} p90 ${f1(p90(frames))} ms | commit ${f1(up)} ms | per frame: uploaded ${((b.put + b.tex + b.up - a.put - a.tex - a.up) / FRAMES / 1e3).toFixed(1)}k px, read back ${((b.get - a.get) / FRAMES / 1e3).toFixed(1)}k px${st}`);
+  log(`  ${label.padEnd(10)} ${c.name.padEnd(22)} start ${f1(down)} ms | frame median ${f1(med(frames))} p90 ${f1(p90(frames))} ms | commit ${f1(up)} ms | per frame: uploaded ${((b.put + b.tex + b.up - a.put - a.tex - a.up) / FRAMES / 1e3).toFixed(1)}k px, read back ${((b.get - a.get) / FRAMES / 1e3).toFixed(1)}k px, recomposited ${((b.comp - a.comp) / FRAMES / 1e3).toFixed(1)}k px, screen redrawn ${((b.redraw - a.redraw) / FRAMES / 1e3).toFixed(1)}k px${st}`);
   view?.destroy?.(); mv?.destroy?.();
   document.getElementById('stage').replaceChildren(); document.getElementById('pane').replaceChildren();
 }
@@ -140,9 +146,14 @@ try {
       if (gpu) {
         const cv = document.createElement('canvas'); cv.width = 1600; cv.height = 1000;
         const comp = new GpuCompositor(gpu, cv);
-        const target = gpu.device.createTexture({ size: [1600, 1000], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+        const target = gpu.device.createTexture({ size: [1600, 1000], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
         const z = Math.min(1, 1600 / W, 1000 / H);
-        await measure('WebGPU', W, H, c, async (doc) => { comp.renderView(doc, { ox: 0, oy: 0, zoom: z, width: 1600, height: 1000, dpr: 1 }, target); await gpu.device.queue.onSubmittedWorkDone(); }, { gpuStats: () => comp.stats });
+        await measure('WebGPU', W, H, c, async (doc) => {
+          const r = window.__damage; window.__damage = null;
+          const rect = r && r !== 'all' ? { x: r.x * z, y: r.y * z, w: r.w * z, h: r.h * z } : r === 'all' ? null : { x: 0, y: 0, w: 0, h: 0 };
+          comp.renderView(doc, { ox: 0, oy: 0, zoom: z, width: 1600, height: 1000, dpr: 1 }, target, rect);
+          await gpu.device.queue.onSubmittedWorkDone();
+        }, { gpuStats: () => comp.stats });
         comp.destroy();
       }
     }

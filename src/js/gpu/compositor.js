@@ -30,14 +30,15 @@ export class GpuCompositor {
     this.canvas = canvas;
     this.ctx = canvas.getContext('webgpu');
     if (!this.ctx) throw new Error('canvas has no webgpu context');
-    this.ctx.configure({ device: this.device, format: this.format, alphaMode: 'premultiplied' });
+    // COPY_DST: a frame is drawn into a resident view texture (only the changed part) and copied in.
+    this.ctx.configure({ device: this.device, format: this.format, alphaMode: 'premultiplied', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
     this.maxTexture = this.device.limits.maxTextureDimension2D;
     this.layers = new WeakMap(); // Layer → { tex, w, h }
     this.acc = null; // { a, b, w, h }
     this.stacks = new Map(); // 'main' | 'below' | 'above' → resident composite of a run of layers
     this.frame = null; // resident composite while something floats
     this.floatTex = null; // { id, tex } the lifted pixels
-    this.stats = { passes: 0, uploads: 0, uploadPixels: 0, fullRecomposites: 0 }; // for the benchmark
+    this.stats = { passes: 0, uploads: 0, uploadPixels: 0, fullRecomposites: 0, presentPixels: 0 }; // for the benchmark
     this.uniforms = null;
     this.uniformSlots = 0;
     this.#pipelines();
@@ -247,9 +248,9 @@ export class GpuCompositor {
     const now = rotatedBounds(f.box, f.angle);
     const grow = (r) => ({ x: r.x - 2, y: r.y - 2, w: r.w + 4, h: r.h + 4 });
     const r = fr.base === base && fr.bounds ? clampRect(unionRect(grow(fr.bounds), grow(now)), w, h) : { x: 0, y: 0, w, h };
-    if (r.w === w && r.h === h) this.stats.fullRecomposites++;
     fr.base = base; fr.version = f.version; fr.bounds = now;
     if (!r) return fr.res;
+    if (r.w === w && r.h === h) this.stats.fullRecomposites++;
     const { a, b } = this.#targets(w, h);
     this.#uniformsFor(2 + aboveLayers.length);
     const enc = d.createCommandEncoder({ label: 'float frame' });
@@ -308,14 +309,41 @@ export class GpuCompositor {
   }
 
   /** Draw the document into the canvas. v: { ox, oy, zoom, width, height, dpr } in CSS pixels. */
-  present(doc, v) { this.renderView(doc, v, this.ctx.getCurrentTexture()); }
+  /** rect: screen rect (CSS px) that changed, or null for everything. */
+  present(doc, v, rect = null) { this.renderView(doc, v, this.ctx.getCurrentTexture(), rect); }
 
-  /** The present pass into any texture of the canvas format (the canvas, or an offscreen target in tests). */
-  renderView(doc, v, target) {
+  /**
+   * The present pass into any texture of the canvas format (the canvas, or an offscreen target in
+   * tests). A target that allows COPY_DST gets the frame through a resident view texture: only
+   * `rect` (CSS px) is re-shaded when the view itself did not move, then one texture copy.
+   */
+  renderView(doc, v, target, rect = null) {
     const d = this.device;
     const comp = doc ? this.composite(doc) : this.empty;
     const enc = d.createCommandEncoder({ label: 'present' });
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }] });
+    const tw = target.width, th = target.height;
+    const viaView = (target.usage & GPUTextureUsage.COPY_DST) !== 0;
+    let dest = target, full = true;
+    if (viaView) {
+      if (!this.viewTex || this.viewTex.width !== tw || this.viewTex.height !== th || this.viewTex.format !== target.format) {
+        this.viewTex?.destroy();
+        this.viewTex = d.createTexture({ label: 'view', size: [tw, th], format: target.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+        this.viewKey = null;
+      }
+      const key = `${v.ox}|${v.oy}|${v.zoom}|${v.width}|${v.height}|${v.dpr}|${doc ? doc.width + 'x' + doc.height : ''}`;
+      full = !rect || key !== this.viewKey || this.viewDoc !== doc;
+      this.viewKey = key; this.viewDoc = doc;
+      dest = this.viewTex;
+    }
+    let sc = null;
+    if (!full) {
+      const x0 = Math.max(0, Math.floor(rect.x * v.dpr) - 1), y0 = Math.max(0, Math.floor(rect.y * v.dpr) - 1);
+      const x1 = Math.min(tw, Math.ceil((rect.x + rect.w) * v.dpr) + 1), y1 = Math.min(th, Math.ceil((rect.y + rect.h) * v.dpr) + 1);
+      sc = x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : { x: 0, y: 0, w: 0, h: 0 };
+    }
+    this.stats.presentPixels += full ? tw * th : sc.w * sc.h;
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: dest.createView(), loadOp: full ? 'clear' : 'load', storeOp: 'store', clearValue: [0, 0, 0, 0] }] });
+    if (sc) pass.setScissorRect(sc.x, sc.y, sc.w, sc.h);
     if (doc) {
       const z = v.zoom;
       const taps = z < 1 ? Math.min(4, Math.max(1, Math.ceil(1 / (z * v.dpr)))) : 1;
@@ -330,9 +358,10 @@ export class GpuCompositor {
       });
       pass.setPipeline(this.presPipe);
       pass.setBindGroup(0, group);
-      pass.draw(3);
+      if (!sc || sc.w) pass.draw(3);
     }
     pass.end();
+    if (viaView) enc.copyTextureToTexture({ texture: this.viewTex }, { texture: target }, [tw, th]);
     d.queue.submit([enc.finish()]);
   }
 
@@ -370,6 +399,7 @@ export class GpuCompositor {
     this.stacks.clear();
     this.frame?.res.destroy(); this.frame = null;
     this.floatTex?.tex.destroy(); this.floatTex = null;
+    this.viewTex?.destroy(); this.viewTex = null;
     this.uniforms?.destroy();
     this.viewBuf?.destroy();
     this.empty?.destroy();
