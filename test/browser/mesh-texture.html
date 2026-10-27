@@ -19,6 +19,8 @@ if (location.search.includes('gl1')) { // force the WebGL1 path
 import { Editor } from '../../src/js/ui/editor.js';
 import { Doc } from '../../src/js/doc/document.js';
 import { MeshView } from '../../src/js/ui/meshview.js';
+import { getGPU } from '../../src/js/gpu/device.js';
+import { GpuCompositor } from '../../src/js/gpu/compositor.js';
 
 const out = [], fails = [];
 const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
@@ -95,6 +97,54 @@ log(`texture vs composite after ${steps.length} edits: max diff ${worst}`);
 log(`uploads: ${mv.texStats.full - s0.full} full, ${mv.texStats.partial - s0.partial} partial; biggest brush/edit upload ${maxSmall} px of ${W * H}`);
 if (maxSmall > (W * H) / 8) fails.push(`a small edit uploaded ${maxSmall} px`);
 if (mv.texStats.full - s0.full > 1) fails.push(`${mv.texStats.full - s0.full} full uploads during small edits`);
+// ---- WebGPU 3D view: same device as the 2D compositor, samples its resident texture ----
+const gpu = location.search.includes('gl1') ? null : await getGPU().catch(() => null);
+if (!gpu) log('WebGPU: skipped');
+else {
+  const glShot = () => { const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4); gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px); return px; };
+  const cw = mv.canvas.width, ch = mv.canvas.height;
+  const comp = new GpuCompositor(gpu, document.createElement('canvas'));
+  const target = gpu.device.createTexture({ size: [cw, ch], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  const bpr = Math.ceil(cw * 4 / 256) * 256;
+  async function gpuShot() {
+    const buf = gpu.device.createBuffer({ size: bpr * ch, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = gpu.device.createCommandEncoder(); enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr }, [cw, ch]); gpu.device.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ); const a = new Uint8Array(buf.getMappedRange().slice(0)); buf.unmap(); buf.destroy();
+    const o = new Uint8Array(cw * ch * 4), bgra = gpu.format.startsWith('bgra');
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) { // GL rows are bottom-up
+      const s0 = y * bpr + x * 4, d0 = ((ch - 1 - y) * cw + x) * 4;
+      o[d0] = a[s0 + (bgra ? 2 : 0)]; o[d0 + 1] = a[s0 + 1]; o[d0 + 2] = a[s0 + (bgra ? 0 : 2)]; o[d0 + 3] = a[s0 + 3];
+    }
+    return o;
+  }
+  const compare = (A, B) => { let sum = 0, big = 0; for (let i = 0; i < A.length; i += 4) { let m = 0; for (let k = 0; k < 3; k++) m = Math.max(m, Math.abs(A[i + k] - B[i + k])); sum += m; if (m > 24) big++; } return { mean: sum / (A.length / 4), big: big / (A.length / 4) }; };
+  // reference: WebGL frame of the current state
+  await frame(); const ref = glShot();
+  mv._gpuTarget = target;
+  ed.gpuCompositor = comp; ed.emit('renderer', 'webgpu');
+  await frame();
+  if (mv.backend !== 'webgpu') fails.push(`3D backend is ${mv.backend}, expected webgpu`);
+  const g = await gpuShot();
+  const c0 = compare(ref, g);
+  log(`WebGPU 3D vs WebGL render: mean diff ${c0.mean.toFixed(2)}, ${(c0.big * 100).toFixed(2)}% of pixels off by > 24`);
+  if (c0.mean > 2 || c0.big > 0.01) fails.push('WebGPU 3D render differs from WebGL');
+  // edits: no GL uploads, compositor uploads only the touched rects, render follows
+  const t0 = { ...mv.texStats }, u0 = comp.stats.uploadPixels, r0 = comp.stats.fullRecomposites;
+  ed.pointer('down', ev(40, 30));
+  for (let i = 1; i <= 5; i++) { ed.pointer('move', ev(40 + i * 30, 30 + i * 25)); await frame(); }
+  ed.pointer('up', ev(190, 155)); await frame();
+  const up = comp.stats.uploadPixels - u0;
+  log(`WebGPU 3D stroke: GL uploads ${mv.texStats.pixels - t0.pixels} px, compositor layer uploads ${up} px (${(up / 6).toFixed(0)} px per frame), full recomposites ${comp.stats.fullRecomposites - r0}`);
+  if (mv.texStats.pixels !== t0.pixels) fails.push('the WebGL texture was uploaded on the WebGPU path');
+  if (up / 6 > (W * H) / 8) fails.push(`compositor uploaded ${up} px for a small stroke`);
+  const g2 = await gpuShot();
+  ed.gpuCompositor = null; ed.emit('renderer', 'canvas'); await frame(); // back to WebGL: full upload, same picture
+  if (mv.backend !== 'webgl') fails.push('did not fall back to WebGL');
+  const ref2 = glShot(), c1 = compare(ref2, g2), moved = compare(g, g2);
+  log(`after the stroke: WebGPU vs WebGL mean diff ${c1.mean.toFixed(2)}; the stroke changed the render (mean ${moved.mean.toFixed(2)})`);
+  if (c1.mean > 2 || c1.big > 0.01) fails.push('after a stroke the WebGPU 3D render differs from WebGL');
+  if (moved.mean === 0) fails.push('the WebGPU 3D render did not follow the stroke');
+}
 log(fails.length ? `FAIL\n${fails.join('\n')}` : 'PASS');
 document.title = fails.length ? 'FAIL' : 'PASS';
 </script>

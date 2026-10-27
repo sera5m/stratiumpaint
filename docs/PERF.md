@@ -38,6 +38,26 @@ harness does not time — the pixel counter is the measure. `test/browser/mesh-t
 float lift/move/drop and undo the GL texture equals the composite exactly, small edits upload
 ≤ 962 of 60,000 px, no full uploads, row 0 = top of the image.
 
+**Now (WebGPU, step 2):** when the 2D view runs on WebGPU, the 3D view draws with the same device
+(`src/js/gpu/mesh.js`, `GpuMeshRenderer`) and samples the compositor's resident composite texture
+directly. A paint stroke (2D or on the model) only `writeTexture`s the touched layer rectangle in
+the compositor, and the 3D view has nothing to upload or read back at all. The compositor now
+keeps resident stacks / float frame per document (LRU of 3), so the 2D view's document and the 3D
+view's atlas no longer evict each other. Same shading as WebGL, 4× MSAA like `antialias: true`.
+WebGL stays the fallback (no WebGPU, device lost → back to WebGL with one full upload).
+
+| bench:3d WebGPU, brush 24, per frame | 720 | 2048² |
+|---|---|---|
+| uploaded px (layer rect only) | 2.0k | 6.0k |
+| 3D texture uploads | 0 | 0 |
+| frame incl. 2D present + 20k-triangle MSAA mesh pass (SwiftShader, software) | 27 ms | 33 ms |
+
+The frame time here is SwiftShader rasterizing 800×800 with 4× MSAA on the CPU; on a real GPU this
+pass is far below a millisecond (unverified). `mesh-texture.html` checks the WebGPU 3D render
+against the WebGL one (mean diff 0.08 levels, 0.16 % of pixels > 24 — antialiased edges), 0 GL
+uploads and ~1.6k px of layer uploads per stroke frame on the WebGPU path, the render following
+the stroke, and falling back to WebGL.
+
 ## 2. Brushes (paintbrush, pencil, eraser, clone)
 
 **Was:** every mouse-down copied the whole layer (48 MB at 4000×3000) and zeroed a coverage plane

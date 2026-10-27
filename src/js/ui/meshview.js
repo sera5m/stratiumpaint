@@ -6,6 +6,7 @@ import { seamStep, uvCharts } from '../core/seam.js';
 import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
 import { rectUnion } from '../core/util.js';
+import { GpuMeshRenderer } from '../gpu/mesh.js';
 
 const VS = `
 attribute vec3 aPos;
@@ -96,9 +97,45 @@ export class MeshView {
     // document reach the atlas through reproject(), which reports 'model-texture'.
     ed.on('doc:render', () => this.#watchTexture());
     ed.on('model-texture', () => this.#damageTex(null));
+    // When the 2D view runs on WebGPU the model is drawn with the same device, straight from the
+    // compositor's resident texture (no uploads at all); otherwise WebGL as before.
+    ed.on('renderer', () => this.#backend());
     ed.on('layout', () => requestAnimationFrame(() => this.#resize()));
     this.#bind();
     this.#attach();
+    this.#backend();
+  }
+
+  /** Pick WebGPU (sharing the 2D compositor) or WebGL for drawing. Never throws. */
+  #backend() {
+    const comp = this.gl ? this.ed.gpuCompositor : null;
+    if (comp && this.gpuMesh?.comp === comp) return;
+    if (this.gpuMesh) {
+      try { this.gpuMesh.destroy(); } catch { /* device gone */ }
+      this.gpuMesh = null;
+      this.gpuCanvas?.remove(); this.gpuCanvas = null;
+      this.canvas.style.opacity = '';
+      this.backend = 'webgl';
+    }
+    if (comp) {
+      try {
+        // Under the GL canvas, which stays on top (invisible) and keeps receiving the pointer.
+        const c = h('canvas', { class: 'mesh-canvas mesh-gpu-canvas' });
+        c.style.pointerEvents = 'none';
+        c.width = this.canvas.width; c.height = this.canvas.height;
+        this.canvas.before(c);
+        this.gpuMesh = new GpuMeshRenderer(comp, c);
+        this.gpuCanvas = c;
+        if (this._geom) this.gpuMesh.setGeometry(this._geom.pos, this._geom.nrm, this._geom.uv, this._geom.count);
+        this.canvas.style.opacity = '0';
+        this.backend = 'webgpu';
+      } catch (err) {
+        console.warn('Stratum: 3D view stays on WebGL', err);
+        this.gpuCanvas?.remove(); this.gpuCanvas = null; this.gpuMesh = null;
+        this.backend = 'webgl';
+      }
+    } else this.backend = 'webgl';
+    this.#damageTex(null);
   }
 
   #tool(mode) {
@@ -356,6 +393,8 @@ export class MeshView {
     const put = (buf, data) => { gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); };
     put(this.buf.pos, pos); put(this.buf.nrm, nrm); put(this.buf.uv, uv);
     this.count = w * 3;
+    this._geom = { pos, nrm, uv, count: this.count };
+    this.gpuMesh?.setGeometry(pos, nrm, uv, this.count);
     this.#refreshPaintMesh(mount);
   }
 
@@ -365,6 +404,7 @@ export class MeshView {
     const dpr = window.devicePixelRatio || 1;
     this.canvas.width = Math.round(w * dpr);
     this.canvas.height = Math.round(h * dpr);
+    if (this.gpuCanvas) { this.gpuCanvas.width = this.canvas.width; this.gpuCanvas.height = this.canvas.height; }
     this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this.#request();
   }
@@ -452,6 +492,15 @@ export class MeshView {
     const gl = this.gl, doc = this.ed.doc, mount = doc?.mount;
     if (!gl || !mount || this.pane.hidden || !this.canvas.width) return;
     this.#syncCube();
+    const eye0 = this.#eye();
+    if (this.gpuMesh) {
+      // The compositor keeps the texture current from layer dirty rects; just draw.
+      this._texDirty = false; this._texDamage = null;
+      this.#watchTexture();
+      const mvp = mul(perspective(0.7, this.canvas.width / this.canvas.height, 0.01, this.dist * 20 + 10), lookAt(eye0, this.target, [0, 1, 0]));
+      try { this.gpuMesh.render(atlasOf(doc) || doc, mvp, this._gpuTarget || null); } catch (err) { console.warn(err); this.ed.gpuCompositor = null; this.#backend(); }
+      return;
+    }
     if (this._texDirty) {
       this._texDirty = false;
       this.#watchTexture();

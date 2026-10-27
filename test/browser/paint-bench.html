@@ -57,6 +57,7 @@ function makeDoc(W, H) {
   return doc;
 }
 
+const MVP = new Float32Array([1.2, 0, 0, 0, 0, 1.2, 0, 0, 0, 0, -0.2, -1, 0, 0, 2.5, 3]);
 function sphere(n) { // UV sphere, per-corner UVs (v down), n x n quads
   const pos = [], idx = [], uvs = [];
   for (let j = 0; j <= n; j++) for (let i = 0; i <= n; i++) {
@@ -88,13 +89,16 @@ function shapeCase(tool, shape) {
   };
 }
 
-async function measure(label, W, H, c, render, { gpuStats = null, mesh = null } = {}) {
+async function measure(label, W, H, c, render, { gpuStats = null, mesh = null, gpuComp = null } = {}) {
   const ed = new Editor();
   const doc = makeDoc(W, H);
   if (mesh) doc.mount = mesh;
   ed.addDoc(doc);
   const view = render === 'view' ? new View(ed, document.getElementById('stage')) : null;
+  if (gpuComp) ed.gpuCompositor = gpuComp; // 3D view on WebGPU, sharing the compositor
   const mv = mesh ? new MeshView(ed, document.getElementById('pane')) : null;
+  if (mv && gpuComp) mv._gpuTarget = gpuComp.device.createTexture({ size: [mv.canvas.width || 800, mv.canvas.height || 800], format: gpuComp.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  window.__mv = mv;
   c.setup(ed);
   await frame(); await frame();
   const draw = async () => { if (render === 'view') await frame(); else await render(doc); };
@@ -153,8 +157,10 @@ try {
           const r = window.__damage; window.__damage = null;
           const rect = r && r !== 'all' ? { x: r.x * z, y: r.y * z, w: r.w * z, h: r.h * z } : r === 'all' ? null : { x: 0, y: 0, w: 0, h: 0 };
           comp.renderView(doc, { ox: 0, oy: 0, zoom: z, width: 1600, height: 1000, dpr: 1 }, target, rect);
+          const gm = window.__mv?.gpuMesh; // and the model, as the 3D view draws it each frame
+          if (gm) gm.render(doc, MVP, window.__mv._gpuTarget);
           await gpu.device.queue.onSubmittedWorkDone();
-        }, { gpuStats: () => comp.stats });
+        }, { gpuStats: () => comp.stats, mesh, gpuComp: CASE === '3d' ? comp : null });
         comp.destroy();
       }
     }

@@ -248,6 +248,7 @@ export class View {
       this.renderer = 'webgpu';
       this.rendererReason = 'ok';
       this.canvas.style.visibility = 'hidden';
+      this.ed.gpuCompositor = this.gpu; // the 3D view draws with it too
       console.info('Stratum: WebGPU renderer active');
       this.requestRender();
       this.ed.emit('renderer', this.renderer);
@@ -264,6 +265,7 @@ export class View {
     try { this.gpu?.destroy(); } catch { /* ignore */ }
     this._offLost?.();
     this.gpu = null;
+    if (this.ed.gpuCompositor) this.ed.gpuCompositor = null;
     this.gpuCanvas?.remove();
     this.gpuCanvas = null;
     this.canvas.style.visibility = '';

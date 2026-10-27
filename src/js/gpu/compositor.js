@@ -35,7 +35,8 @@ export class GpuCompositor {
     this.maxTexture = this.device.limits.maxTextureDimension2D;
     this.layers = new WeakMap(); // Layer → { tex, w, h }
     this.acc = null; // { a, b, w, h }
-    this.stacks = new Map(); // 'main' | 'below' | 'above' → resident composite of a run of layers
+    this.docStates = new Map(); // Doc → { stacks, frame, floatTex }, LRU (see composite)
+    this.stacks = new Map(); // current doc's: 'main' | 'below' | 'above' → resident composite of a run of layers
     this.frame = null; // resident composite while something floats
     this.floatTex = null; // { id, tex } the lifted pixels
     this.stats = { passes: 0, uploads: 0, uploadPixels: 0, fullRecomposites: 0, presentPixels: 0 }; // for the benchmark
@@ -294,7 +295,32 @@ export class GpuCompositor {
   }
 
   /** The document's composite as a resident texture, recomposited only where it changed. */
+  /**
+   * Resident composite of `doc` (premultiplied rgba16float). Each document keeps its own resident
+   * stacks / float frame (the 2D view's document and the 3D view's atlas can differ), the three
+   * most recently used ones stay on the GPU.
+   */
   composite(doc) {
+    let st = this.docStates.get(doc);
+    if (!st) st = { stacks: new Map(), frame: null, floatTex: null };
+    this.docStates.delete(doc);
+    this.docStates.set(doc, st); // most recent last
+    while (this.docStates.size > 3) {
+      const [old, os] = this.docStates.entries().next().value;
+      this.docStates.delete(old);
+      this.#freeState(os);
+    }
+    this.stacks = st.stacks; this.frame = st.frame; this.floatTex = st.floatTex;
+    try { return this.#composite(doc); } finally { st.frame = this.frame; st.floatTex = this.floatTex; }
+  }
+
+  #freeState(st) {
+    for (const x of st.stacks.values()) x.res.destroy();
+    st.frame?.res.destroy();
+    st.floatTex?.tex.destroy();
+  }
+
+  #composite(doc) {
     const w = doc.width, h = doc.height;
     const f = doc.float;
     const i = f ? doc.layers.indexOf(f.layer) : -1;
@@ -395,10 +421,9 @@ export class GpuCompositor {
 
   destroy() {
     this.acc?.a.destroy(); this.acc?.b.destroy();
-    for (const st of this.stacks.values()) st.res.destroy();
-    this.stacks.clear();
-    this.frame?.res.destroy(); this.frame = null;
-    this.floatTex?.tex.destroy(); this.floatTex = null;
+    for (const st of this.docStates.values()) this.#freeState(st);
+    this.docStates.clear();
+    this.stacks = new Map(); this.frame = null; this.floatTex = null;
     this.viewTex?.destroy(); this.viewTex = null;
     this.uniforms?.destroy();
     this.viewBuf?.destroy();
