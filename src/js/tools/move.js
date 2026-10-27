@@ -10,6 +10,10 @@
 // Both tools also scale. The border of the box — corners and the whole of each edge, not only
 // the knobs — resizes it (Shift keeps the proportions). Width and height in the options bar do
 // the same. The scroll wheel scales from the centre while a selection is active.
+//
+// Interactive scale is visual only (canvas stretch of the original lift). Actual pixel resampling
+// is deferred until set-down + 0.5s idle, with a fading border. Left-click outside the box also
+// sets it down.
 import { cloneImage, cropImage, stampImage } from '../core/image.js';
 import { scaleMask, translateMask, maskBounds } from '../core/mask.js';
 import { resizeImage } from '../core/transform.js';
@@ -61,6 +65,15 @@ function hitHandle(e, box) {
   return 'e';
 }
 
+/** True if pointer is inside the box (not just the border). */
+function insideBox(e, box) {
+  const zoom = e?.zoom;
+  if (!box || !(zoom > 0) || e.ox == null) return false;
+  const x0 = e.ox + box.x * zoom, y0 = e.oy + box.y * zoom;
+  const x1 = x0 + box.w * zoom, y1 = y0 + box.h * zoom;
+  return e.sx >= x0 && e.sx <= x1 && e.sy >= y0 && e.sy <= y1;
+}
+
 /** New box while dragging `id`. The opposite side stays put. Shift locks the original aspect. */
 function scaledRect(id, box, px, py, shift, aspect) {
   const L = box.x, T = box.y, R = box.x + box.w, B = box.y + box.h;
@@ -98,11 +111,12 @@ function scaledRect(id, box, px, py, shift, aspect) {
   };
 }
 
-function drawHandles(ctx, box, v) {
+function drawHandles(ctx, box, v, fade = 1) {
   if (!box || !v) return;
   const z = v.zoom || 1;
   const x = v.ox + box.x * z, y = v.oy + box.y * z, w = box.w * z, h = box.h * z;
   ctx.save();
+  ctx.globalAlpha = fade;
   ctx.strokeStyle = 'rgba(70, 130, 220, .95)';
   ctx.lineWidth = 1;
   ctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
@@ -116,6 +130,25 @@ function drawHandles(ctx, box, v) {
   ctx.restore();
 }
 
+/** Fast visual preview of the lifted pixels stretched into the current box (no CPU resize). */
+function drawPreview(ctx, src, box, v) {
+  if (!src || !box || !v) return;
+  const z = v.zoom || 1;
+  const x = v.ox + box.x * z, y = v.oy + box.y * z, w = box.w * z, h = box.h * z;
+  // Build a temporary canvas from the ImageData once per src if needed
+  if (!src._preview) {
+    const c = document.createElement('canvas');
+    c.width = src.width; c.height = src.height;
+    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(src.data), src.width, src.height), 0, 0);
+    src._preview = c;
+  }
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'medium';
+  ctx.drawImage(src._preview, x, y, w, h);
+  ctx.restore();
+}
+
 function finiteSize(w, h) {
   return {
     w: Math.max(1, Math.min(8192, Math.round(w))),
@@ -125,6 +158,8 @@ function finiteSize(w, h) {
 
 function movePixels() {
   let S = null;
+  let fadeTimer = null;
+  let fadeAlpha = 1;
 
   const syncAnts = (ed) => {
     if (!S?.mask) { ed.marchOffset = null; return; }
@@ -134,7 +169,7 @@ function movePixels() {
       : { from: S.r, to: S.cur };
   };
 
-  /** Redraw the floated pixels into `nr`. Always sampled from the original lift, so a scale is not generational. */
+  /** Update box only (visual). Pixel bake is deferred. */
   const renderAt = (s, nr) => {
     nr = {
       x: Math.round(nr.x), y: Math.round(nr.y),
@@ -142,11 +177,7 @@ function movePixels() {
       h: Math.max(1, Math.min(8192, Math.round(nr.h))),
     };
     if (nr.x === s.cur.x && nr.y === s.cur.y && nr.w === s.cur.w && nr.h === s.cur.h) return;
-    const img = nr.w === s.src.width && nr.h === s.src.height ? s.src : resizeImage(s.src, nr.w, nr.h, 'smooth');
     const area = rectUnion(s.cur, nr);
-    stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
-    paintImage(s.layer.img, img, nr.x, nr.y);
-    s.layer.touch(area);
     s.cur = nr;
     s.total = rectUnion(s.total, area);
   };
@@ -159,8 +190,10 @@ function movePixels() {
 
   /** Undo everything back to the pristine, pre-lift layer. Leaves S cleared. */
   const revert = (ed) => {
+    if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
     const s = S;
     S = null;
+    fadeAlpha = 1;
     const area = rectIntersect(s.total, layerRect(s.layer)) || s.r;
     stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
     stampImage(s.layer.img, s.before, s.r.x, s.r.y);
@@ -168,32 +201,64 @@ function movePixels() {
     if (ed) { ed.marchOffset = null; ed.requestOverlay(); }
   };
 
-  /** Write the floated content into the document as one undo step. Leaves S cleared. */
+  /** Bake the current visual into the layer (called after idle or immediate set-down). */
+  const bake = (ed, s) => {
+    const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
+    const img = sized ? resizeImage(s.src, s.cur.w, s.cur.h, 'smooth') : s.src;
+    const area = rectUnion({ x: s.r.x, y: s.r.y, w: s.r.w, h: s.r.h }, s.cur);
+    stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
+    paintImage(s.layer.img, img, s.cur.x, s.cur.y);
+    s.layer.touch(area);
+    s.total = rectUnion(s.total, area);
+  };
+
+  /** Write the floated content into the document as one undo step. Leaves S cleared.
+   *  Pixel resample is delayed 0.5s after set-down; border fades during the wait. */
   const settle = (ed) => {
+    if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
     const s = S;
-    S = null;
-    ed.marchOffset = null;
-    ed.requestOverlay();
+    if (!s) return;
     const moved = s.cur.x !== s.r.x || s.cur.y !== s.r.y;
     const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
     if (!moved && !sized) {
+      S = null;
+      fadeAlpha = 1;
       const area = rectIntersect(s.total, layerRect(s.layer)) || s.r;
       stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
       stampImage(s.layer.img, s.before, s.r.x, s.r.y);
       s.layer.touch(s.total);
+      ed.marchOffset = null;
+      ed.requestOverlay();
       return;
     }
-    const total = rectIntersect(s.total, layerRect(s.layer));
-    // Undo image only: the layer before the lift (hole filled). The layer itself already
-    // has the floated result from the drag — do not rewrite it or the move snaps back.
-    const original = cropImage(s.base, total);
-    stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y);
-    const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
-    ed.doc.transaction(name, () => {
-      ed.doc.commitRegion(s.layer, total, original, name);
-      // Set down: clear the selection in the same undo step.
-      if (s.mask) ed.doc.setSelection(null, 'Deselect');
-    });
+    // Start fade + delayed bake
+    fadeAlpha = 1;
+    const start = performance.now();
+    const step = () => {
+      const t = (performance.now() - start) / 500;
+      fadeAlpha = Math.max(0, 1 - t);
+      ed.requestOverlay();
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    fadeTimer = setTimeout(() => {
+      fadeTimer = null;
+      bake(ed, s);
+      S = null;
+      fadeAlpha = 1;
+      ed.marchOffset = null;
+      ed.requestOverlay();
+      const total = rectIntersect(s.total, layerRect(s.layer));
+      const original = cropImage(s.base, total);
+      stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y);
+      const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
+      ed.doc.transaction(name, () => {
+        ed.doc.commitRegion(s.layer, total, original, name);
+        if (s.mask) ed.doc.setSelection(null, 'Deselect');
+      });
+    }, 500);
+    // Keep S alive so overlay can still draw the preview + fading border during the wait
+    // (cleared in the timeout)
   };
 
   const lift = (ed) => {
@@ -233,13 +298,17 @@ function movePixels() {
       const id = hitHandle(e, boxNow(ed));
       return id ? HANDLE_CURSOR[id] : 'move';
     },
-    overlay(ctx, ed, v) { drawHandles(ctx, boxNow(ed), v); },
+    overlay(ctx, ed, v) {
+      const box = boxNow(ed);
+      if (S?.src && box) drawPreview(ctx, S.src, box, v);
+      drawHandles(ctx, box, v, fadeAlpha);
+    },
     /** Live width and height for the options bar. */
     metrics(ed) {
       const b = boxNow(ed);
       return b ? { w: b.w, h: b.h } : null;
     },
-    /** Scale from the top-left of the current box. Floats until Enter / right-click. */
+    /** Scale from the top-left of the current box. Floats until Enter / right-click / outside click. */
     setSize(ed, w, h) {
       const size = finiteSize(w, h);
       const box = boxNow(ed);
@@ -270,6 +339,11 @@ function movePixels() {
     down(e, ed) {
       if (S) {
         if (e.button === 2) { settle(ed); return; }
+        // Left-click outside the box sets it down
+        if (e.button === 0 && !insideBox(e, S.cur) && !hitHandle(e, S.cur)) {
+          settle(ed);
+          return;
+        }
         const handle = hitHandle(e, S.cur);
         S.dragging = handle
           ? { kind: 'scale', id: handle, box: { ...S.cur } }
@@ -291,8 +365,7 @@ function movePixels() {
       if (!S?.dragging) return;
       applyDrag(e, ed);
       S.dragging = null;
-      // Stay floating — parked here until Enter/right-click sets it down or Escape cancels it —
-      // so it can be picked up again (even after going off-canvas) without losing anything.
+      // Stay floating — parked here until Enter/right-click/outside-click sets it down or Escape cancels it.
     },
     deactivate(ed) { if (S) settle(ed); },
     cancel(ed) { if (S) revert(ed); },
@@ -385,6 +458,10 @@ function moveSelection() {
     down(e, ed) {
       if (S) {
         if (e.button === 2) { settle(ed); return; }
+        if (e.button === 0 && !insideBox(e, S.cur) && !hitHandle(e, S.cur)) {
+          settle(ed);
+          return;
+        }
         const handle = hitHandle(e, S.cur);
         S.dragging = handle
           ? { kind: 'scale', id: handle, box: { ...S.cur } }
