@@ -120,7 +120,7 @@ export const CLEAR_WGSL = `${FULLSCREEN}
  * premultiplied bilinear filter (exact at identity), so a drag only changes this matrix.
  */
 export const FLOAT_WGSL = `${FULLSCREEN}
-struct FP { opacity: f32, mode: u32, _a: u32, _b: u32, m0: vec4f, m1: vec4f };
+struct FP { opacity: f32, mode: u32, falpha: f32, _b: u32, m0: vec4f, m1: vec4f };
 @group(0) @binding(0) var dstTex: texture_2d<f32>;
 @group(0) @binding(1) var layerTex: texture_2d<f32>;
 @group(0) @binding(2) var floatTex: texture_2d<f32>;
@@ -144,7 +144,7 @@ fn floatAt(p: vec2f) -> vec4f {
   let p = vec2i(in.pos.xy);
   let d = textureLoad(dstTex, p, 0);
   let base = textureLoad(layerTex, p, 0);
-  let fl = floatAt(in.pos.xy);
+  let fl = floatAt(in.pos.xy) * F.falpha;
   let comb = fl + vec4f(base.rgb * base.a, base.a) * (1.0 - fl.a); // float over the layer, premultiplied
   var cs = vec3f(0.0);
   if (comb.a > 0.0) { cs = comb.rgb / comb.a; }

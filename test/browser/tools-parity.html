@@ -1,0 +1,124 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Browser-only tool checks (run by npm run test:gpu): shapes and brushes against reference
+     output, live preview vs committed result, history/undo, and work counters. -->
+<pre id="out"></pre>
+<script>
+window.__c = { get: 0 };
+const P = CanvasRenderingContext2D.prototype, _get = P.getImageData;
+P.getImageData = function (x, y, w, h) { window.__c.get += w * h; return _get.apply(this, arguments); };
+</script>
+<script type="module">
+import { Editor } from '../../src/js/ui/editor.js';
+import { Doc } from '../../src/js/doc/document.js';
+import { rectMask } from '../../src/js/core/mask.js';
+import { cloneImage } from '../../src/js/core/image.js';
+import { paintImage, rasterize } from '../../src/js/doc/raster.js';
+import * as Shapes from '../../src/js/tools/shapes.js';
+
+const out = [], fails = [];
+const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+const ev = (x, y, extra = {}) => ({ x, y, sx: x, sy: y, button: 0, shift: false, ctrl: false, alt: false, ...extra });
+const maxDiff = (a, b) => { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; };
+const W = 160, H = 120;
+
+function session({ selection = false, blend = 'source-over' } = {}) {
+  const ed = new Editor();
+  const doc = new Doc(W, H);
+  const d = doc.layers[0].img.data;
+  for (let i = 0; i < d.length; i += 4) { d[i] = (i / 4) % 255; d[i + 1] = 90; d[i + 2] = 200; d[i + 3] = 255; }
+  doc.layers[0].touch();
+  const mid = doc.addLayer();
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if ((x >> 4) & 1) mid.img.data.set([250, 30, 30, 160], (y * W + x) * 4);
+  mid.touch(); mid.blend = blend;
+  const top = doc.addLayer();
+  for (let y = 0; y < H; y += 2) for (let x = 0; x < W; x++) top.img.data.set([0, 0, 0, 70], (y * W + x) * 4);
+  top.touch();
+  doc.active = 1;
+  ed.addDoc(doc);
+  if (selection) doc.setSelection(rectMask(W, H, 30, 20, 120, 90));
+  ed.primary = { r: 20, g: 200, b: 40, a: 1 };
+  ed.secondary = { r: 240, g: 240, b: 0, a: 1 };
+  return { ed, doc };
+}
+
+/** The old behaviour, computed directly: rasterize the final path and blend it into the layer. */
+function reference(layerImg, region, drawShape, selection, opacity) {
+  const ref = cloneImage(layerImg);
+  const img = rasterize(region.w, region.h, (ctx) => { ctx.translate(-region.x, -region.y); drawShape(ctx); });
+  paintImage(ref, img, region.x, region.y, selection, opacity);
+  return ref;
+}
+
+for (const opts of [{ shape: 'outline' }, { shape: 'both', selection: true }, { shape: 'fill', blend: 'multiply', opacity: 60 }, { shape: 'outline', aa: false, shapeAngle: 25 }]) {
+  const { ed, doc } = session(opts);
+  Object.assign(ed.opts, { size: 7, opacity: 100, aa: true, shapeAngle: 0 }, opts);
+  ed.setTool('ellipse');
+  const layer = doc.layer, before = cloneImage(layer.img), v0 = layer.version, h0 = doc.history.index, g0 = window.__c.get;
+  ed.pointer('down', ev(20, 15));
+  for (let i = 1; i <= 10; i++) ed.pointer('move', ev(20 + i * 11, 15 + i * 8));
+  const preview = doc.composite().getContext('2d').getImageData(0, 0, W, H).data.slice(); // (counted: test read)
+  const readsDuringDrag = window.__c.get - g0 - W * H;
+  const touched = layer.version - v0;
+  ed.pointer('up', ev(130, 95));
+  const after = doc.composite().getContext('2d').getImageData(0, 0, W, H).data;
+  const label = JSON.stringify(opts);
+  // Reference: same geometry through the old one-shot path.
+  const o = ed.opts, pad = Math.ceil(o.size / 2) + 3;
+  const x0 = 20, y0 = 15, x1 = 130, y1 = 95;
+  let region = { x: x0 - pad, y: y0 - pad, w: x1 - x0 + pad * 2, h: y1 - y0 + pad * 2 };
+  const turn = (o.shapeAngle || 0) * Math.PI / 180;
+  const drawShape = (ctx) => {
+    ctx.save();
+    if (turn) { const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2; ctx.translate(cx, cy); ctx.rotate(turn); ctx.translate(-cx, -cy); }
+    ctx.beginPath(); ctx.ellipse((x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2, 0, 0, Math.PI * 2);
+    ctx.lineWidth = o.size; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const css = (c) => `rgba(${c.r},${c.g},${c.b},${c.a})`;
+    if (o.shape === 'outline') { ctx.strokeStyle = css(ed.primary); ctx.stroke(); }
+    else if (o.shape === 'fill') { ctx.fillStyle = css(ed.primary); ctx.fill(); }
+    else { ctx.fillStyle = css(ed.secondary); ctx.fill(); ctx.strokeStyle = css(ed.primary); ctx.stroke(); }
+    ctx.restore();
+  };
+  if (turn) { const { rotatedBounds } = await import('../../src/js/core/xform.js'); region = rotatedBounds(region, turn); }
+  region = { x: Math.max(0, region.x), y: Math.max(0, region.y), w: Math.min(W, region.x + region.w) - Math.max(0, region.x), h: Math.min(H, region.y + region.h) - Math.max(0, region.y) };
+  if (o.aa !== false) {
+    const ref = reference(before, region, drawShape, doc.selection, (o.opacity ?? 100) / 100);
+    const d = maxDiff(ref.data, layer.img.data);
+    log(`ellipse ${label}: committed vs reference max ${d}`);
+    if (d > 2) fails.push(`${label}: committed shape differs from the reference by ${d}`);
+  }
+  const pd = maxDiff(preview, after);
+  if (pd > 3) fails.push(`${label}: preview differs from the committed result by ${pd}`);
+  if (touched !== 0) fails.push(`${label}: layer written ${touched} times while dragging`);
+  if (o.aa !== false && readsDuringDrag !== 0) fails.push(`${label}: ${readsDuringDrag} px read back while dragging`);
+  if (doc.history.index - h0 !== 1) fails.push(`${label}: expected one history step`);
+  doc.undo();
+  const ud = maxDiff(before.data, layer.img.data);
+  if (ud !== 0) fails.push(`${label}: undo left a difference of ${ud}`);
+  if (doc.float) fails.push(`${label}: float left behind`);
+}
+{ // Escape mid-drag leaves the layer untouched and no history.
+  const { ed, doc } = session();
+  ed.setTool('rect');
+  const before = cloneImage(doc.layer.img), h0 = doc.history.index;
+  ed.pointer('down', ev(10, 10)); ed.pointer('move', ev(80, 60));
+  ed.cancelTool();
+  if (maxDiff(before.data, doc.layer.img.data) || doc.history.index !== h0 || doc.float) fails.push('cancel changed something');
+  else log('rect cancel: layer and history untouched');
+}
+{ // Curve: preview while editing, one step on Enter.
+  const { ed, doc } = session();
+  ed.setTool('line');
+  const v0 = doc.layer.version, h0 = doc.history.index;
+  ed.pointer('down', ev(10, 100)); ed.pointer('move', ev(80, 30)); ed.pointer('move', ev(150, 100)); ed.pointer('up', ev(150, 100));
+  ed.pointer('down', ev(10 + 140 / 3, 100)); ed.pointer('move', ev(40, 10)); ed.pointer('up', ev(40, 10)); // bend
+  const wrote = doc.layer.version - v0;
+  ed.commitTool();
+  log(`curve: layer writes before Enter ${wrote}, history +${doc.history.index - h0}`);
+  if (wrote !== 0 || doc.history.index - h0 !== 1) fails.push('curve wrote the layer before set-down, or history is wrong');
+}
+log(`shape snapshot pixels total ${Shapes.shapeStats?.snapshotPixels}`);
+log(fails.length ? `FAIL\n${fails.join('\n')}` : 'PASS');
+document.title = fails.length ? 'FAIL' : 'PASS';
+</script>

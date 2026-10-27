@@ -131,15 +131,30 @@ export class Doc extends Emitter {
    * numbers per frame: no pixel copies, no layer uploads, no history, no 3D texture refresh.
    * The pixels are turned into a canvas (Canvas 2D) / texture (WebGPU) once, here.
    */
-  setFloat({ layer, src, box, angle = 0 }) {
-    let canvas = null;
-    if (HAS_DOM) {
+  setFloat({ layer, src = null, canvas = null, box, angle = 0, alpha = 1 }) {
+    // `canvas` instead of `src`: a live preview drawn with Canvas 2D (shapes); its pixels never
+    // come back to JS, the GPU path copies the canvas GPU-side. Call updateFloatContent after
+    // redrawing it.
+    if (!canvas && HAS_DOM && src) {
       canvas = createCanvas(src.width, src.height);
       canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(src.data), src.width, src.height), 0, 0);
     }
-    this.float = { id: ++this._floatSeq, version: 0, layer, src, canvas, box: { ...box }, angle };
+    if (!src) src = { width: canvas.width, height: canvas.height, data: null };
+    this.float = { id: ++this._floatSeq, version: 0, content: 0, layer, src, canvas, box: { ...box }, angle, alpha };
     this.emit('float');
     return this.float;
+  }
+
+  /** A canvas float was redrawn (and maybe resized / moved to `box`). */
+  updateFloatContent(box) {
+    const f = this.float;
+    if (!f) return;
+    if (f.src.data === null) { f.src.width = f.canvas.width; f.src.height = f.canvas.height; }
+    if (box) f.box = { ...box };
+    f.content++;
+    f.version++;
+    f.view = null;
+    this.emit('float');
   }
 
   /** The float moved / was resized / turned. Cheap: the view just redraws on the next frame. */
@@ -173,6 +188,7 @@ export class Doc extends Emitter {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.imageSmoothingEnabled = false;
+    ctx.globalAlpha = f.alpha ?? 1;
     if (p.exact) ctx.drawImage(f.canvas, f.box.x, f.box.y);
     else if (p.bounds.w * p.bounds.h <= FLOAT_VIEW_MAX) ctx.drawImage(Doc.floatView(f, p), p.bounds.x, p.bounds.y);
     else { // absurdly large (scaled far past the document): draw it transformed, no cache
@@ -304,7 +320,7 @@ export class Doc extends Emitter {
     const out = { width: this.width, height: this.height, data: new Uint8ClampedArray(this.width * this.height * 4) };
     for (const l of this.layers) {
       if (!l.visible) continue;
-      if (this.float?.layer === l) { // tests / no DOM: resample the float the slow way
+      if (this.float?.layer === l && this.float.src.data) { // tests / no DOM: resample the float the slow way
         const tmp = cloneImage(l.img), r = resampleFloat(this.float.src, this.float.box, this.float.angle);
         paintImage(tmp, r.img, Math.round(r.x), Math.round(r.y));
         paintImage(out, tmp, 0, 0, null, l.opacity);

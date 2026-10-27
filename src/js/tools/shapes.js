@@ -1,11 +1,14 @@
-// Line, rectangle, rounded rectangle and ellipse. The shape is drawn live into the layer while
-// dragging (so what you see is what you get) and recorded as one history step on release.
+// Line, rectangle, rounded rectangle and ellipse. While dragging, the shape is drawn into a small
+// canvas the size of its bounds and shown as a *float* over its layer (Doc#setFloat), so it
+// previews in place (layers above, blend mode and opacity all apply) without touching the layer:
+// no layer copy at mouse-down, no pixel readback or CPU blend per frame. On release it is
+// rasterized once into the layer and only that rectangle goes to history.
 // Box shapes can be drawn turned (Rotate option, degrees about the shape's centre); it is a
 // vector rotation of the path, so edges stay crisp. To turn a shape that is already drawn,
 // select it and use Move Selected Pixels' rotate knob.
-import { cloneImage, cropImage, stampImage } from '../core/image.js';
+import { cropImage } from '../core/image.js';
 import { rectUnion, rectIntersect, rectGrow } from '../core/util.js';
-import { paintImage, rasterize, hardenAlpha } from '../doc/raster.js';
+import { paintImage, rasterize, hardenAlpha, createCanvas } from '../doc/raster.js';
 import { layerRect, rgbaCss } from './common.js';
 import { rotatedBounds } from '../core/xform.js';
 
@@ -82,6 +85,81 @@ function constrain(kind, x0, y0, x1, y1) {
   return [x0 + (dx < 0 ? -d : d), y0 + (dy < 0 ? -d : d)];
 }
 
+/** Counters for tests and benchmarks: pixels copied out of the layer, layer writes. */
+export const shapeStats = { snapshotPixels: 0, layerWrites: 0, previewFrames: 0 };
+
+/** The selection as an alpha-only canvas, built once per mask (shape previews clip to it). */
+const maskCanvases = new WeakMap();
+function maskCanvas(mask) {
+  let c = maskCanvases.get(mask);
+  if (c) return c;
+  c = createCanvas(mask.width, mask.height);
+  const id = new ImageData(mask.width, mask.height), d = id.data, m = mask.data;
+  for (let i = 0; i < m.length; i++) d[i * 4 + 3] = m[i];
+  c.getContext('2d').putImageData(id, 0, 0);
+  maskCanvases.set(mask, c);
+  return c;
+}
+
+/**
+ * Show `drawShape(ctx)` (document coordinates) as the live preview of `s` over its layer, clipped
+ * to `region`. The preview canvas is reused; nothing is read back except when antialiasing is off
+ * (the hard edge needs the pixels).
+ */
+function preview(ed, s, region, opacity, aa, drawShape) {
+  const owner = ed.surface?.() || ed.doc;
+  if (!region) { if (s.float) { owner.clearFloat(); s.float = null; } return; }
+  // CPU-rasterized like the commit (rasterize()), so the preview's antialiased edges are exactly
+  // what lands; GPU path rasterizers cover the outermost edge pixels differently.
+  if (!s.canvas) { s.canvas = createCanvas(region.w, region.h); s.canvas.getContext('2d', { willReadFrequently: true }); }
+  const c = s.canvas;
+  if (c.width !== region.w || c.height !== region.h) { c.width = region.w; c.height = region.h; }
+  const ctx = c.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.save();
+  ctx.translate(-region.x, -region.y);
+  drawShape(ctx);
+  ctx.restore();
+  if (!aa) {
+    const id = ctx.getImageData(0, 0, c.width, c.height);
+    hardenAlpha(id);
+    ctx.putImageData(id, 0, 0);
+  }
+  const sel = ed.doc.selection;
+  if (sel) {
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.drawImage(maskCanvas(sel), region.x, region.y, region.w, region.h, 0, 0, region.w, region.h);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  if (!s.float || owner.float !== s.float) s.float = owner.setFloat({ layer: s.layer, canvas: c, box: region, alpha: opacity });
+  else { s.float.alpha = opacity; owner.updateFloatContent(region); }
+  shapeStats.previewFrames++;
+}
+
+/** Drop the preview and write the shape into the layer once: one history step over `region`. */
+function commitShape(ed, s, region, drawShape, aa, opacity, name) {
+  const owner = ed.surface?.() || ed.doc;
+  if (s.float && owner.float === s.float) owner.clearFloat();
+  s.float = null;
+  if (!region) return;
+  const img = rasterize(region.w, region.h, (ctx) => { ctx.translate(-region.x, -region.y); drawShape(ctx); });
+  if (!aa) hardenAlpha(img);
+  const before = cropImage(s.layer.img, region); // the layer was never touched while dragging
+  shapeStats.snapshotPixels += region.w * region.h;
+  paintImage(s.layer.img, img, region.x, region.y, ed.doc.selection, opacity);
+  shapeStats.layerWrites++;
+  s.layer.touch(region);
+  ed.doc.commitRegion(s.layer, region, before, name);
+}
+
+function cancelShape(ed, s) {
+  const owner = ed?.surface?.() || ed?.doc;
+  if (owner && s.float && owner.float === s.float) owner.clearFloat();
+  s.float = null;
+}
+
 function makeShape({ id, name, kind, key }) {
   let S = null;
 
@@ -92,12 +170,12 @@ function makeShape({ id, name, kind, key }) {
     return { x0, y0, x1, y1 };
   };
 
-  const draw = (ed, s) => {
-    const { layer, orig } = s, o = ed.opts, g = geometry(s);
+  /** Bounds the shape can touch (union over wrap pieces), and the vector drawing itself. */
+  const plan = (ed, s) => {
+    const { layer } = s, o = ed.opts, g = geometry(s);
     // Read colour live rather than what was captured at mousedown, so changing the primary/secondary
     // colour mid-drag (e.g. via a keyboard shortcut) updates the shape before it's released.
     const stroke = s.swap ? ed.secondary : ed.primary, fill = s.swap ? ed.primary : ed.secondary;
-    if (s.prev) stampImage(layer.img, cropImage(orig, s.prev), s.prev.x, s.prev.y);
     const pad = Math.ceil(o.size / 2) + 3;
     // A drag that crossed a weld carries one piece per lip: the shape lives in
     // continuous pixels and each piece shifts a copy back onto that lip.
@@ -124,7 +202,6 @@ function makeShape({ id, name, kind, key }) {
       b = b && rectIntersect(b, layerRect(layer));
       if (b) region = region ? rectUnion(region, b) : b;
     }
-    if (!region) { s.prev = null; return; }
     const paint = (ctx) => {
       ctx.lineWidth = Math.max(1, o.size);
       ctx.lineCap = 'round';
@@ -133,8 +210,7 @@ function makeShape({ id, name, kind, key }) {
       else if (o.shape === 'fill') { ctx.fillStyle = rgbaCss(stroke); ctx.fill(); }
       else { ctx.fillStyle = rgbaCss(fill); ctx.fill(); ctx.strokeStyle = rgbaCss(stroke); ctx.stroke(); }
     };
-    const img = rasterize(region.w, region.h, (ctx) => {
-      ctx.translate(-region.x, -region.y);
+    const drawShape = (ctx) => {
       for (const piece of pieces) {
         ctx.save();
         if (piece.clip) {
@@ -147,12 +223,13 @@ function makeShape({ id, name, kind, key }) {
         paint(ctx);
         ctx.restore();
       }
-    });
-    if (!o.aa) hardenAlpha(img);
-    paintImage(layer.img, img, region.x, region.y, ed.doc.selection, o.opacity / 100);
-    layer.touch(s.prev ? rectUnion(s.prev, region) : region);
-    s.prev = region;
-    s.all = rectUnion(s.all, region);
+    };
+    return { region, drawShape, aa: o.aa, opacity: o.opacity / 100 };
+  };
+
+  const draw = (ed, s) => {
+    const p = plan(ed, s);
+    preview(ed, s, p.region, p.opacity, p.aa, p.drawShape);
   };
 
   return {
@@ -166,9 +243,8 @@ function makeShape({ id, name, kind, key }) {
       const layer = ed.editableLayer();
       if (!layer) return;
       S = {
-        layer, orig: cloneImage(layer.img), x0: e.x, y0: e.y, x1: e.x, y1: e.y, shift: e.shift,
-        swap: e.button === 2,
-        prev: null, all: null, moved: false, wrap: e.wrap || null,
+        layer, x0: e.x, y0: e.y, x1: e.x, y1: e.y, shift: e.shift,
+        swap: e.button === 2, moved: false, wrap: e.wrap || null, float: null, canvas: null,
       };
     },
     move(e, ed) {
@@ -185,13 +261,15 @@ function makeShape({ id, name, kind, key }) {
       if (!S) return;
       const s = S;
       S = null;
-      if (s.moved && s.all) ed.doc.commitRegion(s.layer, s.all, cropImage(s.orig, s.all), name);
+      if (!s.moved) { cancelShape(ed, s); return; }
+      const p = plan(ed, s);
+      commitShape(ed, s, p.region, p.drawShape, p.aa, p.opacity, name);
     },
-    cancel() {
+    cancel(ed) {
       if (!S) return;
       const s = S;
       S = null;
-      if (s.all) { s.layer.img.data.set(s.orig.data); s.layer.touch(); }
+      cancelShape(ed, s);
     },
   };
 }
@@ -219,16 +297,13 @@ function makeCurve() {
     return { x: Math.floor(x0 - pad), y: Math.floor(y0 - pad), w: Math.ceil(x1 - x0 + pad * 2), h: Math.ceil(y1 - y0 + pad * 2) };
   };
 
-  const draw = (ed) => {
-    const s = S, o = ed.opts, layer = s.layer;
+  const plan = (ed, s) => {
+    const o = ed.opts;
     const stroke = s.swap ? ed.secondary : ed.primary;
-    if (s.prev) stampImage(layer.img, cropImage(s.orig, s.prev), s.prev.x, s.prev.y);
     const pts = samples(s.a, s.c0, s.c1, s.b);
     const pad = Math.ceil(o.size / 2) + 3;
-    let region = rectIntersect(boundsOf(pts, pad), layerRect(layer));
-    if (!region) { s.prev = null; return; }
-    const img = rasterize(region.w, region.h, (ctx) => {
-      ctx.translate(-region.x, -region.y);
+    const region = rectIntersect(boundsOf(pts, pad), layerRect(s.layer));
+    const drawShape = (ctx) => {
       ctx.beginPath();
       ctx.moveTo(s.a.x, s.a.y);
       ctx.bezierCurveTo(s.c0.x, s.c0.y, s.c1.x, s.c1.y, s.b.x, s.b.y);
@@ -236,22 +311,24 @@ function makeCurve() {
       ctx.lineCap = 'round';
       ctx.strokeStyle = rgbaCss(stroke);
       ctx.stroke();
-    });
-    if (!o.aa) hardenAlpha(img);
-    paintImage(layer.img, img, region.x, region.y, ed.doc.selection, o.opacity / 100);
-    layer.touch(s.prev ? rectUnion(s.prev, region) : region);
-    s.prev = region;
-    s.all = s.all ? rectUnion(s.all, region) : region;
+    };
+    return { region, drawShape, aa: o.aa, opacity: o.opacity / 100 };
+  };
+
+  const draw = (ed) => {
+    const p = plan(ed, S);
+    preview(ed, S, p.region, p.opacity, p.aa, p.drawShape);
   };
 
   const settle = (ed) => {
     const s = S; S = null;
-    if (s?.moved && s.all) ed.doc.commitRegion(s.layer, s.all, cropImage(s.orig, s.all), 'Line / Curve');
+    if (s?.moved) { const p = plan(ed, s); commitShape(ed, s, p.region, p.drawShape, p.aa, p.opacity, 'Line / Curve'); }
+    else if (s) cancelShape(ed, s);
     ed.requestOverlay();
   };
   const revert = (ed) => {
     const s = S; S = null;
-    if (s?.all) { stampImage(s.layer.img, cropImage(s.orig, s.all), s.all.x, s.all.y); s.layer.touch(s.all); }
+    if (s) cancelShape(ed, s);
     ed?.requestOverlay();
   };
 
@@ -279,8 +356,8 @@ function makeCurve() {
       if (!layer) return;
       const p = { x: e.x, y: e.y };
       S = {
-        layer, orig: cloneImage(layer.img), a: { ...p }, b: { ...p }, c0: { ...p }, c1: { ...p },
-        shift: e.shift, swap: e.button === 2, prev: null, all: null, moved: false, editing: false, dragging: 'b',
+        layer, a: { ...p }, b: { ...p }, c0: { ...p }, c1: { ...p },
+        shift: e.shift, swap: e.button === 2, moved: false, editing: false, dragging: 'b', float: null, canvas: null,
       };
     },
     move(e, ed) {

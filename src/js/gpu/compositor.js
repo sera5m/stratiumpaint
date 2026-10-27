@@ -37,7 +37,7 @@ export class GpuCompositor {
     this.stacks = new Map(); // 'main' | 'below' | 'above' → resident composite of a run of layers
     this.frame = null; // resident composite while something floats
     this.floatTex = null; // { id, tex } the lifted pixels
-    this.stats = { passes: 0, uploads: 0, fullRecomposites: 0 }; // for the benchmark
+    this.stats = { passes: 0, uploads: 0, uploadPixels: 0, fullRecomposites: 0 }; // for the benchmark
     this.uniforms = null;
     this.uniformSlots = 0;
     this.#pipelines();
@@ -105,6 +105,7 @@ export class GpuCompositor {
       this.stats.uploads++;
       const r = dirty === 'all' ? { x: 0, y: 0, w, h } : clampRect(dirty, w, h);
       if (r) {
+        this.stats.uploadPixels = (this.stats.uploadPixels || 0) + r.w * r.h;
         this.device.queue.writeTexture(
           { texture: e.tex, origin: [r.x, r.y] },
           img.data,
@@ -213,13 +214,23 @@ export class GpuCompositor {
   }
 
   #floatTexture(f) {
-    if (this.floatTex?.id === f.id) return this.floatTex.tex;
-    this.floatTex?.tex.destroy();
+    const ft = this.floatTex;
+    if (ft?.id === f.id && ft.content === (f.content || 0)) return ft.tex;
     const { width: w, height: h, data } = f.src;
-    const tex = this.device.createTexture({ label: 'float', size: [w, h], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    this.device.queue.writeTexture({ texture: tex }, data, { bytesPerRow: w * 4, rowsPerImage: h }, [w, h]); // once per lift
+    // A live canvas float (shape preview) changes size as it is dragged: keep a texture with
+    // headroom and copy the canvas into its corner (the shader is told the used size).
+    let tex = ft?.tex;
+    if (!tex || ft.w < w || ft.h < h || (data && (ft.w !== w || ft.h !== h))) {
+      tex?.destroy();
+      const cw = data ? w : Math.ceil(w * 1.25) + 16, ch = data ? h : Math.ceil(h * 1.25) + 16;
+      tex = this.device.createTexture({ label: 'float', size: [cw, ch], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+      this.floatTex = { id: f.id, content: -1, tex, w: cw, h: ch };
+    }
+    if (data) this.device.queue.writeTexture({ texture: tex }, data, { bytesPerRow: w * 4, rowsPerImage: h }, [w, h]); // once per lift
+    else this.device.queue.copyExternalImageToTexture({ source: f.canvas }, { texture: tex, premultipliedAlpha: false }, [w, h]); // GPU-side copy
     this.stats.uploads++;
-    this.floatTex = { id: f.id, tex };
+    this.stats.uploadPixels = (this.stats.uploadPixels || 0) + w * h;
+    Object.assign(this.floatTex, { id: f.id, content: f.content || 0 });
     return tex;
   }
 
@@ -247,6 +258,7 @@ export class GpuCompositor {
     const u = new ArrayBuffer(48);
     new Float32Array(u, 0, 1)[0] = l.visible ? l.opacity : 0;
     new Uint32Array(u, 4, 1)[0] = modeIndex(l.blend);
+    new Float32Array(u, 8, 1)[0] = f.alpha ?? 1;
     new Float32Array(u, 16, 8).set([inv[0], inv[1], inv[2], inv[3], inv[4], inv[5], f.src.width, f.src.height]);
     d.queue.writeBuffer(this.uniforms, 0, u);
     const pass = enc.beginRenderPass({ colorAttachments: [{ view: a.createView(), loadOp: 'load', storeOp: 'store' }] });

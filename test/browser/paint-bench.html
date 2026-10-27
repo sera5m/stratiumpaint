@@ -1,0 +1,161 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Brush / shape / 3D benchmark (npm run bench:brush | bench:shape | bench:3d).
+     Canvas 2D: the real View (and MeshView for 3D) in a 1600x1000 stage; a frame's cost is the JS
+     of its pointer events plus every requestAnimationFrame callback that ran for it (view,
+     overlay, 3D view). WebGPU: the same events, then the compositor's present pass into an
+     offscreen target + onSubmittedWorkDone. Counters: pixels uploaded (putImageData into layer
+     mirrors / composite, WebGL tex uploads, WebGPU writeTexture) and read back (getImageData).
+     ?case=brush|shape|3d  ?quick (skip the large document) -->
+<style>#stage, #pane { position: relative; width: 1600px; height: 1000px; } #pane { width: 800px; height: 800px; }</style>
+<div id="stage"></div><div id="pane"></div>
+<pre id="out"></pre>
+<script>
+// Instrumentation, installed before any app module runs.
+window.__c = { put: 0, get: 0, tex: 0, raf: 0 };
+const _raf = window.requestAnimationFrame.bind(window);
+window.requestAnimationFrame = (fn) => _raf((t) => { const s = performance.now(); try { fn(t); } finally { window.__c.raf += performance.now() - s; } });
+const P = CanvasRenderingContext2D.prototype;
+const _put = P.putImageData, _get = P.getImageData;
+P.putImageData = function (id, x, y, dx, dy, dw, dh) { window.__c.put += dw != null ? dw * dh : id.width * id.height; return _put.apply(this, arguments); };
+P.getImageData = function (x, y, w, h) { window.__c.get += w * h; return _get.apply(this, arguments); };
+for (const G of [window.WebGLRenderingContext, window.WebGL2RenderingContext].filter(Boolean)) {
+  const ti = G.prototype.texImage2D, ts = G.prototype.texSubImage2D;
+  G.prototype.texImage2D = function (...a) { const src = a[a.length - 1]; window.__c.tex += a.length >= 9 ? a[3] * a[4] : (src?.width || 0) * (src?.height || 0); return ti.apply(this, a); };
+  G.prototype.texSubImage2D = function (...a) { window.__c.tex += a.length >= 9 ? a[4] * a[5] : (a[a.length - 1]?.width || 0) * (a[a.length - 1]?.height || 0); return ts.apply(this, a); };
+}
+</script>
+<script type="module">
+import { Editor } from '../../src/js/ui/editor.js';
+import { Doc } from '../../src/js/doc/document.js';
+import { View } from '../../src/js/ui/view.js';
+import { MeshView } from '../../src/js/ui/meshview.js';
+import { buildBVH, raycastMesh } from '../../src/js/core/mesh.js';
+import { getGPU } from '../../src/js/gpu/device.js';
+import { GpuCompositor } from '../../src/js/gpu/compositor.js';
+import * as Brush from '../../src/js/tools/brush.js';
+
+const q = new URLSearchParams(location.search);
+const CASE = q.get('case') || 'brush';
+const FRAMES = +q.get('frames') || 40, EV = 4;
+const out = [];
+const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+const med = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : NaN; };
+const p90 = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length * 0.9)] : NaN; };
+const f1 = (v) => (Number.isFinite(v) ? v.toFixed(1) : '-');
+const ev = (x, y) => ({ x, y, sx: x, sy: y, button: 0, shift: false, ctrl: false, alt: false });
+const frame = () => new Promise((r) => _raf(() => _raf(r))); // let every pending rAF callback run
+
+function makeDoc(W, H) {
+  const doc = new Doc(W, H);
+  const fill = (layer, f) => { const d = layer.img.data; for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) f(d, (y * W + x) * 4, x, y); layer.touch(); };
+  fill(doc.layers[0], (d, i, x, y) => { d[i] = x & 255; d[i + 1] = y & 255; d[i + 2] = 128; d[i + 3] = 255; });
+  fill(doc.addLayer(), (d, i, x, y) => { if ((x >> 5) & 1) { d[i] = 255; d[i + 1] = (x ^ y) & 255; d[i + 3] = 200; } });
+  fill(doc.addLayer(), (d, i, x, y) => { d[i + 2] = 255; d[i + 3] = ((x >> 6) + (y >> 6)) & 1 ? 60 : 0; });
+  doc.active = 1;
+  return doc;
+}
+
+function sphere(n) { // UV sphere, per-corner UVs (v down), n x n quads
+  const pos = [], idx = [], uvs = [];
+  for (let j = 0; j <= n; j++) for (let i = 0; i <= n; i++) {
+    const th = (j / n) * Math.PI, ph = (i / n) * Math.PI * 2;
+    pos.push(Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph));
+  }
+  const uvOf = (i, j) => [i / n, j / n];
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const a = j * (n + 1) + i, b = a + 1, c = a + n + 1, d = c + 1;
+    for (const [v, ii, jj] of [[a, i, j], [c, i, j + 1], [b, i + 1, j], [b, i + 1, j], [c, i, j + 1], [d, i + 1, j + 1]]) { idx.push(v); uvs.push(...uvOf(ii, jj)); }
+  }
+  return { positions: new Float32Array(pos), indices: new Uint32Array(idx), uvs: new Float32Array(uvs), groups: [] };
+}
+
+// --- the interaction under test: returns { down(ed, doc), move(ed, doc, f, k), up(ed, doc) }
+function brushCase(tool, size) {
+  return {
+    name: `${tool} size ${size}`,
+    setup(ed) { ed.setTool(tool); ed.setOpt?.('size', size); ed.opts.size = size; ed.opts.hardness = 50; ed.opts.opacity = 80; },
+    path(doc, f, k) { const t = (f * EV + k) / (FRAMES * EV); return [doc.width * (0.1 + 0.8 * t), doc.height * (0.5 + 0.3 * Math.sin(t * 6.28))]; },
+  };
+}
+function shapeCase(tool, shape) {
+  return {
+    name: `${tool} (${shape})`,
+    setup(ed) { ed.setTool(tool); ed.opts.size = 6; ed.opts.shape = shape; ed.opts.opacity = 100; },
+    path(doc, f, k) { const t = (f * EV + k + 1) / (FRAMES * EV); return [doc.width * (0.1 + 0.6 * t), doc.height * (0.1 + 0.6 * t)]; },
+    start: (doc) => [doc.width * 0.1, doc.height * 0.1],
+  };
+}
+
+async function measure(label, W, H, c, render, { gpuStats = null, mesh = null } = {}) {
+  const ed = new Editor();
+  const doc = makeDoc(W, H);
+  if (mesh) doc.mount = mesh;
+  ed.addDoc(doc);
+  const view = render === 'view' ? new View(ed, document.getElementById('stage')) : null;
+  const mv = mesh ? new MeshView(ed, document.getElementById('pane')) : null;
+  c.setup(ed);
+  await frame(); await frame();
+  const draw = async () => { if (render === 'view') await frame(); else await render(doc); };
+  await draw();
+  const C = window.__c, snap = () => ({ ...C, up: gpuStats ? gpuStats().uploadPixels ?? 0 : 0 });
+  const [sx, sy] = c.start ? c.start(doc) : c.path(doc, 0, 0);
+  let t = performance.now(); const r0 = C.raf;
+  ed.pointer('down', ev(sx, sy));
+  const downJs = performance.now() - t;
+  await draw();
+  const down = downJs + (C.raf - r0);
+  const frames = [], a = snap();
+  for (let f = 0; f < FRAMES; f++) {
+    const r = C.raf; t = performance.now();
+    for (let k = 0; k < EV; k++) { const [x, y] = c.path(doc, f, k); ed.pointer('move', ev(x, y)); }
+    const js = performance.now() - t;
+    if (render === 'view') { await draw(); frames.push(js + (C.raf - r)); } else { await draw(); frames.push(performance.now() - t); }
+  }
+  const b = snap();
+  const [lx, ly] = c.path(doc, FRAMES - 1, EV - 1);
+  const r1 = C.raf; t = performance.now();
+  ed.pointer('up', ev(lx, ly));
+  const upJs = performance.now() - t;
+  await draw();
+  const up = upJs + (C.raf - r1);
+  const st = Brush.brushStats ? ` copied at start ${(Brush.brushStats.startCopied / 1e3).toFixed(0)}k px` : '';
+  log(`  ${label.padEnd(10)} ${c.name.padEnd(22)} start ${f1(down)} ms | frame median ${f1(med(frames))} p90 ${f1(p90(frames))} ms | commit ${f1(up)} ms | per frame: uploaded ${((b.put + b.tex + b.up - a.put - a.tex - a.up) / FRAMES / 1e3).toFixed(1)}k px, read back ${((b.get - a.get) / FRAMES / 1e3).toFixed(1)}k px${st}`);
+  view?.destroy?.(); mv?.destroy?.();
+  document.getElementById('stage').replaceChildren(); document.getElementById('pane').replaceChildren();
+}
+
+try {
+  const gpu = await getGPU();
+  const sizes = CASE === '3d' ? [[720, 720], [2048, 2048]] : [[720, 720], [4000, 3000]];
+  for (const [W, H] of q.has('quick') ? sizes.slice(0, 1) : sizes) {
+    log(`\n=== ${CASE}: document ${W}x${H}, 3 layers, ${FRAMES} frames x ${EV} pointer events`);
+    const cases = CASE === 'brush' ? [brushCase('brush', 12), brushCase('brush', 60), brushCase('eraser', 60)]
+      : CASE === 'shape' ? [shapeCase('rect', 'outline'), shapeCase('ellipse', 'fill')]
+      : [brushCase('brush', 24)];
+    const mesh = CASE === '3d' ? sphere(100) : null; // 20,000 triangles
+    for (const c of cases) {
+      await measure('Canvas 2D', W, H, c, 'view', { mesh });
+      if (gpu) {
+        const cv = document.createElement('canvas'); cv.width = 1600; cv.height = 1000;
+        const comp = new GpuCompositor(gpu, cv);
+        const target = gpu.device.createTexture({ size: [1600, 1000], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+        const z = Math.min(1, 1600 / W, 1000 / H);
+        await measure('WebGPU', W, H, c, async (doc) => { comp.renderView(doc, { ox: 0, oy: 0, zoom: z, width: 1600, height: 1000, dpr: 1 }, target); await gpu.device.queue.onSubmittedWorkDone(); }, { gpuStats: () => comp.stats });
+        comp.destroy();
+      }
+    }
+    if (CASE === '3d') { // picking cost: one ray per pointer event through the cached BVH
+      const t0 = performance.now(); const bvh = buildBVH(mesh.positions, mesh.indices); const tb = performance.now() - t0;
+      const t1 = performance.now(); let hits = 0;
+      for (let i = 0; i < 2000; i++) { const a = i * 0.0031; if (raycastMesh(bvh, [Math.sin(a) * 3, 0.3, Math.cos(a) * 3], [-Math.sin(a), -0.1, -Math.cos(a)])) hits++; }
+      log(`  pick: BVH build ${f1(tb)} ms once; ${((performance.now() - t1) / 2000 * 1000).toFixed(1)} µs per ray (${hits}/2000 hit)`);
+    }
+  }
+  document.title = 'PASS';
+} catch (err) {
+  log(`ERROR ${err.stack || err}`);
+  document.title = 'ERROR';
+}
+</script>
