@@ -8,8 +8,9 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 - Possible further: switch final bake to canvas/OffscreenCanvas for consistency; investigate any pure-JS resize libs if needed.
 
 ## 3D features
-- [ ] Temporary move / hide / isolate of mesh parts so objects can be moved out of the way for painting behind them (with reset).
-- [ ] Configuration toggle for shape brush behavior: wrap across seams for continual surface vs per-chart only. (wrap.pieces path already exists in shapes.js)
+- [x] Connected-component split: objects are separated if not connected by shared geometry (in mesh.js finish).
+- [x] Temporary move of objects (MeshView: select object, Shift-drag in Move mode offsets it; Reset objects button).
+- [x] Configuration toggle for shape brush behavior: wrapShapes (default on) continues shapes across seams; off = per-chart only.
 
 ## Shape brushes
 Current: curve, rect, roundrect, ellipse, triangle, diamond, pentagon, hexagon, polygon, star, arrow (fill/outline/both, radius, sides).
