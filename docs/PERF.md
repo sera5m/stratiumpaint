@@ -11,6 +11,33 @@ point; absolute GPU numbers on real hardware will be much lower.
   uploaded (putImageData / WebGL tex uploads / WebGPU writeTexture + canvas copies) and read back.
 * `npm run bench:move`, `npm run profile:ui` — see docs/WEBGPU_PLAN.md.
 
+## 1. 3D view
+
+**Was:** any change to the document — one brush dab, a layer edit, a float move (throttled to
+10/s) — re-uploaded the *whole* composited texture to the 3D view (`texImage2D` of the full
+atlas, flipped): 520k px per frame at 720×720, 4.2M px at 2048×2048. Picking was already fine
+(cached BVH, 2–3 µs per ray), so it was left alone.
+
+**Now (WebGL fallback, step 1):** the 3D view listens to the texture document itself (the atlas, or
+the document) and its change events carry rectangles (item 4), united per frame (one
+requestAnimationFrame). Only that rectangle is uploaded: WebGL2 `texSubImage2D` straight from the
+composite canvas with `UNPACK_SKIP_PIXELS/ROWS`; WebGL1 copies the rectangle GPU-side into a
+small canvas first. The texture is now stored unflipped (shader samples `vUv` directly) so a rect
+maps 1:1; the rendered model is byte-identical (same render checksum as before). Full uploads only
+on a size change, a new document/atlas or reprojection of a placed source (`model-texture`).
+
+| bench:3d, brush 24, per frame | 720 before | 720 after | 2048² before | 2048² after |
+|---|---|---|---|---|
+| pixels uploaded (layer mirror + 3D texture) | 520k | 4.0k | 4.2M | 12k |
+| Canvas 2D JS frame | 0.7 ms | 0.6 ms | 1.0 ms | 1.1 ms |
+| picking (cached BVH) | 2.8 µs/ray | 2.4 µs/ray | 2.2 µs | 2.4 µs |
+
+JS frame time does not show the upload: the browser does it in the GPU process, which the
+harness does not time — the pixel counter is the measure. `test/browser/mesh-texture.html` (in
+`npm run test:gpu`, run on WebGL2 and on WebGL1 via `?gl1`): after a brush stroke, layer edit,
+float lift/move/drop and undo the GL texture equals the composite exactly, small edits upload
+≤ 962 of 60,000 px, no full uploads, row 0 = top of the image.
+
 ## 2. Brushes (paintbrush, pencil, eraser, clone)
 
 **Was:** every mouse-down copied the whole layer (48 MB at 4000×3000) and zeroed a coverage plane

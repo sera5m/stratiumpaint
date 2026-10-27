@@ -1,0 +1,100 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Run by npm run test:gpu. The 3D view's texture must follow the composite after every kind of
+     edit while uploading only the changed rectangle (WebGL2, and WebGL1 via ?gl1). -->
+<style>#pane { position: relative; width: 400px; height: 400px; } #pane canvas { position: absolute; inset: 0; width: 100%; height: 100%; }</style>
+<div id="pane"></div>
+<pre id="out"></pre>
+<script>
+const bail = (m) => { document.getElementById('out').textContent += '\nERROR ' + m; document.title = 'FAIL'; };
+addEventListener('error', (e) => bail(e.message + ' ' + (e.error?.stack || '')));
+addEventListener('unhandledrejection', (e) => bail(String(e.reason?.stack || e.reason)));
+if (location.search.includes('gl1')) { // force the WebGL1 path
+  const g = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (t, o) { return t === 'webgl2' ? null : g.call(this, t, o); };
+}
+</script>
+<script type="module">
+import { Editor } from '../../src/js/ui/editor.js';
+import { Doc } from '../../src/js/doc/document.js';
+import { MeshView } from '../../src/js/ui/meshview.js';
+
+const out = [], fails = [];
+const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+const ev = (x, y) => ({ x, y, sx: x, sy: y, button: 0, shift: false, ctrl: false, alt: false });
+function sphere(n) {
+  const pos = [], idx = [], uvs = [];
+  for (let j = 0; j <= n; j++) for (let i = 0; i <= n; i++) { const th = (j / n) * Math.PI, ph = (i / n) * Math.PI * 2; pos.push(Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)); }
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const a = j * (n + 1) + i, b = a + 1, c = a + n + 1, d = c + 1;
+    for (const [v, ii, jj] of [[a, i, j], [c, i, j + 1], [b, i + 1, j], [b, i + 1, j], [c, i, j + 1], [d, i + 1, j + 1]]) { idx.push(v); uvs.push(ii / n, jj / n); }
+  }
+  return { positions: new Float32Array(pos), indices: new Uint32Array(idx), uvs: new Float32Array(uvs), groups: [] };
+}
+const W = 300, H = 200; // not square, not a power of two
+const ed = new Editor(), doc = new Doc(W, H);
+const d = doc.layers[0].img.data;
+for (let i = 0; i < d.length; i += 4) { const x = (i / 4) % W, y = (i / 4 / W) | 0; d.set([x * 0.85, y * 1.2, (x ^ y) & 255, 255], i); }
+doc.layers[0].touch();
+for (let y = 0; y < 40; y++) for (let x = 0; x < 60; x++) d.set([255, 0, 0, 255], (y * W + x) * 4); // marker: top-left
+doc.layers[0].touch();
+doc.mount = sphere(40);
+ed.addDoc(doc);
+const mv = new MeshView(ed, document.getElementById('pane'));
+await frame(); await frame();
+const gl = mv.gl;
+log(`context: ${mv.gl2 ? 'WebGL2' : 'WebGL1'}`);
+
+// The rendered model, as a checksum (same before and after the upload change: no flip change visible).
+{
+  const px = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+  gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let h = 0; for (let i = 0; i < px.length; i++) h = (h * 31 + px[i]) >>> 0;
+  log(`render checksum ${h} (${gl.drawingBufferWidth}x${gl.drawingBufferHeight})`);
+}
+
+function texPixels() {
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, mv.tex, 0);
+  const px = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fb);
+  return px; // row 0 = texture row 0 = top of the image
+}
+const comp = () => doc.composite().getContext('2d').getImageData(0, 0, W, H).data;
+function check(what) {
+  const a = texPixels(), b = comp();
+  let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i]));
+  if (m > 0) fails.push(`${what}: texture differs from the composite by ${m}`);
+  return m;
+}
+let worst = check('initial');
+if (texPixels()[0] !== 255 || texPixels()[1] !== 0) fails.push('texture row 0 is not the top of the image');
+
+const s0 = { ...mv.texStats };
+const steps = [];
+const step = async (what, fn) => { const p = mv.texStats.pixels; fn(); await frame(); await new Promise((r) => setTimeout(r, 130)); await frame(); worst = Math.max(worst, check(what)); steps.push([what, mv.texStats.pixels - p]); };
+ed.opts.size = 14; ed.opts.hardness = 50; ed.opts.opacity = 80;
+ed.setTool('brush');
+await step('brush down', () => ed.pointer('down', ev(100, 80)));
+for (let i = 1; i <= 5; i++) await step('brush move', () => ed.pointer('move', ev(100 + i * 20, 80 + i * 9)));
+await step('brush up', () => ed.pointer('up', ev(200, 125)));
+await step('layer edit', () => { const L = doc.layer; for (let y = 150; y < 170; y++) for (let x = 250; x < 290; x++) L.img.data.set([0, 255, 0, 255], (y * W + x) * 4); L.touch({ x: 250, y: 150, w: 40, h: 20 }); });
+await step('float lift', () => doc.setFloat({ layer: doc.layer, src: { width: 30, height: 20, data: new Uint8ClampedArray(30 * 20 * 4).fill(180) }, box: { x: 20, y: 120, w: 30, h: 20 }, angle: 0 }));
+for (let i = 1; i <= 3; i++) await step('float move', () => doc.updateFloat({ x: 20 + i * 25, y: 120 - i * 10, w: 30 + i * 8, h: 20 + i * 5 }, i * 0.3));
+await step('float drop', () => doc.clearFloat());
+await step('undo', () => doc.undo());
+await step('undo', () => doc.undo());
+const small = steps.filter(([w]) => w === 'brush move' || w === 'layer edit');
+const maxSmall = Math.max(...small.map(([, n]) => n));
+log(`texture vs composite after ${steps.length} edits: max diff ${worst}`);
+log(`uploads: ${mv.texStats.full - s0.full} full, ${mv.texStats.partial - s0.partial} partial; biggest brush/edit upload ${maxSmall} px of ${W * H}`);
+if (maxSmall > (W * H) / 8) fails.push(`a small edit uploaded ${maxSmall} px`);
+if (mv.texStats.full - s0.full > 1) fails.push(`${mv.texStats.full - s0.full} full uploads during small edits`);
+log(fails.length ? `FAIL\n${fails.join('\n')}` : 'PASS');
+document.title = fails.length ? 'FAIL' : 'PASS';
+</script>

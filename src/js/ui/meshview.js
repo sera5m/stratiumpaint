@@ -5,6 +5,7 @@ import { buildBVH, raycastMesh } from '../core/mesh.js';
 import { seamStep, uvCharts } from '../core/seam.js';
 import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
+import { rectUnion } from '../core/util.js';
 
 const VS = `
 attribute vec3 aPos;
@@ -26,7 +27,7 @@ varying vec3 vN;
 varying vec2 vUv;
 uniform sampler2D uTex;
 void main() {
-  vec4 tex = texture2D(uTex, vec2(vUv.x, 1.0 - vUv.y));
+  vec4 tex = texture2D(uTex, vUv); // texture row 0 = top of the image (uploaded unflipped)
   vec3 n = normalize(vN);
   float light = 0.62 + 0.38 * max(dot(n, normalize(vec3(0.35, 0.8, 0.4))), 0.0);
   gl_FragColor = vec4(tex.rgb * light, 1.0);
@@ -77,7 +78,12 @@ export class MeshView {
       view('bottom', 'Bottom'),
       h('div', { class: 'vc-fb' }, view('front', 'Front'), view('back', 'Back')));
     pane.append(this.canvas, this.hud, this.cubeWidget);
-    this.gl = this.canvas.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: true });
+    // WebGL2 when available: it can upload a sub-rectangle straight from the composite canvas.
+    const glOpts = { antialias: true, alpha: false, preserveDrawingBuffer: true };
+    this.gl = this.canvas.getContext('webgl2', glOpts) || this.canvas.getContext('webgl', glOpts);
+    this.gl2 = typeof WebGL2RenderingContext !== 'undefined' && this.gl instanceof WebGL2RenderingContext;
+    this.texStats = { full: 0, partial: 0, pixels: 0 }; // texture uploads, for tests and benchmarks
+    this._texDamage = 'all'; // 'all' | {x,y,w,h} in texture (atlas) pixels | null
     if (this.gl) {
       try { this.#initGL(); } catch (err) { console.error(err); this.gl = null; }
     }
@@ -85,14 +91,11 @@ export class MeshView {
     this._frame = () => this.#draw();
     new ResizeObserver(() => this.#resize()).observe(pane);
     ed.on('doc', () => { this.#attach(); requestAnimationFrame(() => this.#resize()); });
-    ed.on('doc:render', () => { this._texDirty = true; this.#request(); });
-    // A floating move on the texture: refresh at most ~10 times a second so the model follows
-    // without paying a texture upload on every drag frame.
-    ed.on('doc:float', () => {
-      if (this._floatTimer) return;
-      this._floatTimer = setTimeout(() => { this._floatTimer = null; this._texDirty = true; this.#request(); }, 100);
-    });
-    ed.on('model-texture', () => { this._texDirty = true; this.#request(); });
+    // The texture is the atlas's composite (or the document's). Its own change events carry the
+    // changed rectangle, so only that part is re-uploaded (see #watchTexture). Edits of a source
+    // document reach the atlas through reproject(), which reports 'model-texture'.
+    ed.on('doc:render', () => this.#watchTexture());
+    ed.on('model-texture', () => this.#damageTex(null));
     ed.on('layout', () => requestAnimationFrame(() => this.#resize()));
     this.#bind();
     this.#attach();
@@ -279,7 +282,8 @@ export class MeshView {
       this.#uploadGeom(mount);
     } else if (this.shape === 'flat') this.#ensureFlat(mount);
     this.#syncObjects();
-    this._texDirty = true;
+    this.#watchTexture();
+    this.#damageTex(null);
     this.#resize();
   }
 
@@ -365,6 +369,79 @@ export class MeshView {
     this.#request();
   }
 
+  /** Follow change events of the document whose composite is the texture. */
+  #watchTexture() {
+    const src = atlasOf(this.ed.doc) || this.ed.doc || null;
+    if (src === this._texDoc) return;
+    this._texOff?.forEach((off) => off?.());
+    this._texDoc = src;
+    this._texDamage = 'all';
+    if (!src) { this._texOff = null; return; }
+    this._texOff = [
+      src.on('render', (r) => this.#damageTex(r)),
+      // A floating move: refresh at most ~10 times a second, over old ∪ new float bounds.
+      src.on('float', (r) => {
+        this._floatDamage = !r || this._floatDamage === 'all' ? 'all' : rectUnion(this._floatDamage, r);
+        if (this._floatTimer) return;
+        this._floatTimer = setTimeout(() => {
+          const d = this._floatDamage;
+          this._floatTimer = null; this._floatDamage = null;
+          this.#damageTex(d === 'all' ? null : d);
+        }, 100);
+      }),
+    ];
+    this.#request();
+  }
+
+  /** Part of the texture changed (none = all of it); uploaded on the next frame. */
+  #damageTex(r) {
+    if (!r) this._texDamage = 'all';
+    else if (this._texDamage !== 'all') this._texDamage = rectUnion(this._texDamage, r);
+    this._texDirty = true;
+    this.#request();
+  }
+
+  /** Bring the GL texture up to date with the composite: whole on size change, else the dirty rect. */
+  #uploadTexture(src) {
+    const gl = this.gl, W = src.width, H = src.height;
+    let r = this._texDamage;
+    this._texDamage = null;
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    if (r === 'all' || !r || this._texW !== W || this._texH !== H) {
+      // Straight from the composite canvas: the browser copies it GPU-side (no getImageData).
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+      this._texW = W; this._texH = H;
+      this.texStats.full++; this.texStats.pixels += W * H;
+      return;
+    }
+    const x0 = Math.max(0, Math.floor(r.x)), y0 = Math.max(0, Math.floor(r.y));
+    const x1 = Math.min(W, Math.ceil(r.x + r.w)), y1 = Math.min(H, Math.ceil(r.y + r.h));
+    if (x1 <= x0 || y1 <= y0) return;
+    const w = x1 - x0, h = y1 - y0;
+    if (this.gl2) {
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, x0);
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, y0);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, y0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, src);
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+    } else {
+      // WebGL1 cannot take a part of a canvas: copy the part into a small canvas (GPU-side).
+      const st = this._stage || (this._stage = document.createElement('canvas'));
+      if (st.width < w || st.height < h) { st.width = Math.max(st.width, w); st.height = Math.max(st.height, h); }
+      const c = st.getContext('2d');
+      c.globalCompositeOperation = 'copy';
+      c.drawImage(src, x0, y0, w, h, 0, 0, w, h);
+      if (st.width === w && st.height === h) gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, y0, gl.RGBA, gl.UNSIGNED_BYTE, st);
+      else {
+        const t = this._stageExact?.width === w && this._stageExact.height === h ? this._stageExact : (this._stageExact = Object.assign(document.createElement('canvas'), { width: w, height: h }));
+        const tc = t.getContext('2d'); tc.globalCompositeOperation = 'copy'; tc.drawImage(st, 0, 0, w, h, 0, 0, w, h);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, y0, gl.RGBA, gl.UNSIGNED_BYTE, t);
+      }
+    }
+    this.texStats.partial++; this.texStats.pixels += w * h;
+  }
+
   #request() {
     if (this._pending || !this.ed.doc?.mount) return;
     this._pending = true;
@@ -377,13 +454,8 @@ export class MeshView {
     this.#syncCube();
     if (this._texDirty) {
       this._texDirty = false;
-      const atlas = atlasOf(doc) || doc;
-      // Upload straight from the composite canvas: the browser copies it GPU-side, with no
-      // getImageData readback of the whole texture into JS first (that ran every stroke frame).
-      const src = atlas.composite();
-      gl.bindTexture(gl.TEXTURE_2D, this.tex);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+      this.#watchTexture();
+      this.#uploadTexture((atlasOf(doc) || doc).composite());
     }
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
