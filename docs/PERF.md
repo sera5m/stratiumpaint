@@ -11,6 +11,49 @@ point; absolute GPU numbers on real hardware will be much lower.
   uploaded (putImageData / WebGL tex uploads / WebGPU writeTexture + canvas copies) and read back.
 * `npm run bench:move`, `npm run profile:ui` — see docs/WEBGPU_PLAN.md.
 
+## 2. Brushes (paintbrush, pencil, eraser, clone)
+
+**Was:** every mouse-down copied the whole layer (48 MB at 4000×3000) and zeroed a coverage plane
+the size of the document (12 MB); release cropped the stroke's *bounding rectangle* twice (before
+and after) for history, so one diagonal stroke across a big image stored and copied millions of
+untouched pixels. Each dab also fired its own layer update / redraw request, and a stroke inside
+a selection threw (`maskBounds` was never imported).
+
+**Now:** the stroke's backup and coverage live in 64×64 tiles made the first time a dab reaches
+them (nothing is copied at mouse-down). History stores only the painted tiles: their backups
+*are* the "before" pixels (no copy) plus one copy of the tiles after (`Doc#commitPatches`; undo /
+redo write back only those tiles). Cancel restores only those tiles. The dab kernel walks each row
+tile-span by tile-span, uses a coverage function specialised per stroke (same arithmetic as
+`coverage()`), skips pixels/rows outside the dab without a square root, and reuses cached dab masks
+when the centre is on the half-pixel grid (pencil, snapped strokes) where reuse is exact. One
+`layer.touch()` (one upload rect, one redraw request) per pointer event instead of per dab.
+
+| bench:brush, median | 720 before | 720 after | 4000×3000 before | after |
+|---|---|---|---|---|
+| start (mouse-down) | 1.3–2.3 ms | 0.2–1.9 ms | 23–51 ms | 0.2–1.0 ms |
+| release (commit + history) | 1.5–2.0 | 0.6–1.3 | 24–31 | 3.4–6.3 |
+| Canvas 2D frame, brush 12 / 60 | 0.4 / 0.8 | 0.5 / 1.0 | 1.2 / 2.5 | 1.2 / 2.9 |
+| WebGPU frame, brush 12 / 60 | 2.8 / 3.4 | 2.8 / 3.6 | 5.8 / 8.8 | 5.1 / 9.5 |
+| pixels copied at stroke start | 518k | 0 | 12M | 0 |
+
+(before = after item 4, commit 0d514df.) Engine alone in node (`npm run bench:brush-engine`, 160
+events): mouse-down 25–38 ms → 0.05–0.2 ms, release 45–51 ms → 3–6 ms at 4000×3000; per event
+unchanged (0.21 → 0.20 ms brush 12, 0.68 → 0.71 ms brush 60).
+
+**GPU dab stamping: assessed, not done.** Per frame the CPU stamping is 0.2–0.8 ms at 720×720 and
+0.6–2.3 ms at 4000×3000 (bench "pointer events"), and the WebGPU upload is just the touched rect
+(1–21k px, ≤ 90 KB). The rest of a WebGPU frame here is SwiftShader compositing. Moving dabs to
+the GPU would save at most that CPU time, but the CPU pixels are needed synchronously for
+history, the colour picker, fill, selection tools and saving, so they would have to be read back
+(async) at every stroke end — a correctness risk (undo racing a readback) for a gain smaller than
+one frame. Worth revisiting only if profiling on real hardware shows the stamping kernel on top.
+
+`test/brush-parity.test.mjs`: the old engine is kept verbatim in `test/fixtures/` and the new one
+must produce the same bytes for brush / pencil / eraser / clone × every falloff × hardness ×
+antialiasing, random sizes and opacities, odd (non-tile) document sizes, strokes off the edges,
+selections, mirror, radial, repeat and 120 px dabs; plus undo, redo, cancel, history size for a long
+diagonal stroke (< 1/5 of the old bounding-box copy) and one layer update per pointer event.
+
 ## 3. Shapes
 
 **Was:** mouse-down copied the whole layer. Every drag frame restored the previous rectangle from

@@ -112,11 +112,12 @@ async function measure(label, W, H, c, render, { gpuStats = null, mesh = null } 
   const downJs = performance.now() - t;
   await draw();
   const down = downJs + (C.raf - r0);
-  const frames = [], a = snap();
+  const frames = [], evs = [], a = snap();
   for (let f = 0; f < FRAMES; f++) {
     const r = C.raf; t = performance.now();
     for (let k = 0; k < EV; k++) { const [x, y] = c.path(doc, f, k); ed.pointer('move', ev(x, y)); }
     const js = performance.now() - t;
+    evs.push(js);
     if (render === 'view') { await draw(); frames.push(js + (C.raf - r)); } else { await draw(); frames.push(performance.now() - t); }
   }
   const b = snap();
@@ -127,7 +128,7 @@ async function measure(label, W, H, c, render, { gpuStats = null, mesh = null } 
   await draw();
   const up = upJs + (C.raf - r1);
   const st = Brush.brushStats ? ` copied at start ${(Brush.brushStats.startCopied / 1e3).toFixed(0)}k px` : '';
-  log(`  ${label.padEnd(10)} ${c.name.padEnd(22)} start ${f1(down)} ms | frame median ${f1(med(frames))} p90 ${f1(p90(frames))} ms | commit ${f1(up)} ms | per frame: uploaded ${((b.put + b.tex + b.up - a.put - a.tex - a.up) / FRAMES / 1e3).toFixed(1)}k px, read back ${((b.get - a.get) / FRAMES / 1e3).toFixed(1)}k px, recomposited ${((b.comp - a.comp) / FRAMES / 1e3).toFixed(1)}k px, screen redrawn ${((b.redraw - a.redraw) / FRAMES / 1e3).toFixed(1)}k px${st}`);
+  log(`  ${label.padEnd(10)} ${c.name.padEnd(22)} start ${f1(down)} ms | frame median ${f1(med(frames))} p90 ${f1(p90(frames))} ms (pointer events ${f1(med(evs))}) | commit ${f1(up)} ms | per frame: uploaded ${((b.put + b.tex + b.up - a.put - a.tex - a.up) / FRAMES / 1e3).toFixed(1)}k px, read back ${((b.get - a.get) / FRAMES / 1e3).toFixed(1)}k px, recomposited ${((b.comp - a.comp) / FRAMES / 1e3).toFixed(1)}k px, screen redrawn ${((b.redraw - a.redraw) / FRAMES / 1e3).toFixed(1)}k px${st}`);
   view?.destroy?.(); mv?.destroy?.();
   document.getElementById('stage').replaceChildren(); document.getElementById('pane').replaceChildren();
 }

@@ -1,0 +1,212 @@
+// The brush engine as it was before the tiled rewrite (Oct 2026), kept verbatim as the parity
+// reference for test/brush-parity.test.mjs. Only import paths changed (+ the maskBounds import it lacked).
+// Paintbrush, pencil, eraser and clone stamp. They share one stroke engine.
+//
+// A stroke keeps a copy of the layer as it was (`orig`) and a coverage plane (`cov`). Each stamp
+// raises coverage with max(), and pixels are recomputed from `orig` + coverage, so overlapping
+// dabs inside one stroke never build up beyond the chosen opacity (same as Paint.NET).
+import { cloneImage, cropImage, blendPixel } from '../../src/js/core/image.js';
+import { clamp, rectUnion } from '../../src/js/core/util.js';
+import { colorFor } from '../../src/js/tools/common.js';
+import { maskBounds } from '../../src/js/core/mask.js';
+
+/** 0..1 coverage of a dab of radius r at distance d from its centre. */
+export function coverage(d, r, hardness, aa, falloff = 'linear') {
+  if (falloff === 'hard' || hardness >= 0.999) return aa ? clamp(r + 0.5 - d, 0, 1) : d <= r ? 1 : 0;
+  if (d >= r) return 0;
+  const t = d / r;
+  if (falloff === 'gaussian') {
+    const sigma = 0.28 + (1 - hardness) * 0.22;
+    return Math.exp(-0.5 * (t / sigma) ** 2);
+  }
+  if (falloff === 'smooth') {
+    const inner = hardness;
+    if (t <= inner) return 1;
+    const u = (t - inner) / Math.max(1e-4, 1 - inner);
+    return 1 - u * u * (3 - 2 * u);
+  }
+  if (falloff === 'airbrush') return Math.exp(-2.4 * t * t) * (1 - t * 0.35);
+  const inner = r * hardness;
+  if (d <= inner) return 1;
+  return (r - d) / (r - inner);
+}
+
+
+function mirrorPoints(x, y, mode, cx, cy) {
+  const pts = [[x, y]];
+  const hx = 2 * cx - x, vy = 2 * cy - y;
+  if (mode === 'h' || mode === 'both') pts.push([hx, y]);
+  if (mode === 'v' || mode === 'both') pts.push([x, vy]);
+  if (mode === 'both') pts.push([hx, vy]);
+  if (mode === 'radial4' || mode === 'radial8') {
+    const n = mode === 'radial8' ? 8 : 4;
+    const dx = x - cx, dy = y - cy;
+    for (let k = 1; k < n; k++) {
+      const a = (k / n) * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+      pts.push([cx + dx * c - dy * s, cy + dx * s + dy * c]);
+    }
+  }
+  return pts;
+}
+
+function expandPoints(x, y, S) {
+  const base = [[x, y]];
+  const rx = S.repeatX | 0, ry = S.repeatY | 0, n = Math.max(1, S.repeatN | 0);
+  if ((rx || ry) && n > 1) {
+    base.length = 0;
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) base.push([x + i * rx, y + j * ry]);
+  }
+  if (!S.mirror || S.mirror === 'none') return base;
+  const out = [];
+  for (const [px, py] of base) out.push(...mirrorPoints(px, py, S.mirror, S.cx, S.cy));
+  return out;
+}
+
+function stampMany(S, x, y) {
+  for (const [px, py] of expandPoints(x, y, S)) stamp(S, px, py);
+}
+
+function stamp(S, cx, cy) {
+  const { layer, orig, cov, mask, r, hardness, aa, mode } = S;
+  const w = layer.width, h = layer.height, d = layer.img.data, od = orig.data;
+  const x0 = Math.max(0, Math.floor(cx - r - 1)), x1 = Math.min(w - 1, Math.ceil(cx + r + 1));
+  const y0 = Math.max(0, Math.floor(cy - r - 1)), y1 = Math.min(h - 1, Math.ceil(cy + r + 1));
+  if (x1 < x0 || y1 < y0) return;
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - cy;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      const c = Math.round(coverage(Math.sqrt(dx * dx + dy * dy), r, hardness, aa, S.falloff) * 255);
+      const i = y * w + x;
+      if (c <= cov[i]) continue;
+      cov[i] = c;
+      const sel = mask ? mask.data[i] : 255;
+      if (!sel) continue;
+      const a = (c / 255) * (sel / 255) * S.alpha, j = i * 4;
+      d[j] = od[j]; d[j + 1] = od[j + 1]; d[j + 2] = od[j + 2]; d[j + 3] = od[j + 3];
+      if (mode === 'erase') {
+        d[j + 3] = od[j + 3] * (1 - a);
+      } else if (mode === 'clone') {
+        const sx = x + S.ox, sy = y + S.oy;
+        if (sx >= 0 && sy >= 0 && sx < w && sy < h) {
+          const k = (sy * w + sx) * 4;
+          blendPixel(d, j, od[k], od[k + 1], od[k + 2], (od[k + 3] / 255) * a);
+        }
+      } else {
+        blendPixel(d, j, S.color.r, S.color.g, S.color.b, a);
+      }
+    }
+  }
+  const box = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  S.dirty = rectUnion(S.dirty, box);
+  layer.touch(box);
+}
+
+function strokeTo(S, x, y) {
+  const dx = x - S.lx, dy = y - S.ly, len = Math.hypot(dx, dy);
+  if (len === 0) return;
+  let t = S.rem;
+  while (t <= len) {
+    const px = S.lx + (dx * t) / len, py = S.ly + (dy * t) / len;
+    if (S.snap) stampMany(S, Math.floor(px) + 0.5, Math.floor(py) + 0.5);
+    else stampMany(S, px, py);
+    t += S.step;
+  }
+  S.rem = t - len;
+  S.lx = x; S.ly = y;
+  // the spacing loop can stop up to one step short of the pointer: always finish exactly under it
+  if (S.snap) stampMany(S, Math.floor(x) + 0.5, Math.floor(y) + 0.5);
+  else stampMany(S, x, y);
+}
+
+/**
+ * kind: 'brush' | 'pencil' | 'eraser' | 'clone'
+ * The pencil is always 1px, hard and unantialiased; the others use the toolbar options.
+ */
+function makeBrush({ id, name, kind, key, icon }) {
+  let S = null;
+  let source = null; // clone stamp source point
+
+  const begin = (e, ed) => {
+    const layer = ed.editableLayer();
+    if (!layer) return null;
+    const o = ed.opts, pencil = kind === 'pencil';
+    const size = pencil ? 1 : o.size;
+    const color = colorFor(ed, e);
+    return {
+      layer, mode: kind === 'eraser' ? 'erase' : kind === 'clone' ? 'clone' : 'paint',
+      orig: cloneImage(layer.img), cov: new Uint8Array(layer.width * layer.height), mask: ed.surface().selection,
+      r: size / 2, hardness: pencil ? 1 : o.hardness / 100, aa: pencil ? false : o.aa, falloff: pencil ? 'hard' : (o.falloff || 'linear'),
+      step: pencil ? 1 : Math.max(1, size * 0.1), snap: pencil,
+      alpha: (o.opacity / 100) * (kind === 'eraser' || kind === 'clone' ? 1 : color.a ?? 1), color,
+      dirty: null, lx: e.x, ly: e.y, rem: 0, ox: 0, oy: 0,
+      mirror: o.mirror || 'none', repeatX: o.repeatX || 0, repeatY: o.repeatY || 0, repeatN: o.repeatN || 1,
+      cx: 0, cy: 0,
+    };
+  };
+
+  return {
+    id, name, key, icon, group: kind === 'pencil' ? 'pencil' : 'brush', cursor: 'crosshair', ring: kind !== 'pencil',
+    options: kind === 'pencil' ? ['opacity', 'mirror', 'repeatX', 'repeatY', 'repeatN'] : ['size', 'hardness', 'opacity', 'aa', 'mirror', 'repeatX', 'repeatY', 'repeatN'],
+
+    down(e, ed) {
+      if (kind === 'clone' && e.ctrl) {
+        source = { x: e.x, y: e.y };
+        ed.toast('Clone source set. Drag to paint from it.');
+        ed.requestOverlay();
+        return;
+      }
+      if (kind === 'clone' && !source) { ed.toast('Ctrl+click first to choose what to copy from.'); return; }
+      S = begin(e, ed);
+      if (!S) return;
+      const b = ed.doc.selection && maskBounds(ed.doc.selection);
+      S.cx = b ? b.x + b.w / 2 : ed.doc.width / 2;
+      S.cy = b ? b.y + b.h / 2 : ed.doc.height / 2;
+      if (kind === 'clone') { S.ox = Math.round(source.x - e.x); S.oy = Math.round(source.y - e.y); }
+      if (S.snap) stampMany(S, Math.floor(e.x) + 0.5, Math.floor(e.y) + 0.5);
+      else stampMany(S, e.x, e.y);
+      S.rem = S.step;
+    },
+
+    move(e, ed) {
+      if (!S) return;
+      strokeTo(S, e.x, e.y);
+      if (kind === 'clone') ed.requestOverlay();
+    },
+
+    up(e, ed) {
+      if (!S) return;
+      const s = S;
+      S = null;
+      if (s.dirty) ed.surface().commitRegion(s.layer, s.dirty, cropImage(s.orig, s.dirty), name);
+    },
+
+    cancel() {
+      if (!S) return;
+      const s = S;
+      S = null;
+      if (s.dirty) { // put the layer back exactly as it was
+        s.layer.img.data.set(s.orig.data);
+        s.layer.touch();
+      }
+    },
+
+    overlay(ctx, ed, v) {
+      if (kind === 'clone' && source) {
+        const p = v.toScreen(source.x, source.y);
+        ctx.save();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(p.x - 7, p.y); ctx.lineTo(p.x + 7, p.y); ctx.moveTo(p.x, p.y - 7); ctx.lineTo(p.x, p.y + 7); ctx.stroke();
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.restore();
+      }
+    },
+  };
+}
+
+export const brushTools = () => [
+  makeBrush({ id: 'brush', name: 'Paintbrush', kind: 'brush', key: 'B' }),
+  makeBrush({ id: 'pencil', name: 'Pencil', kind: 'pencil', key: 'P' }),
+  makeBrush({ id: 'eraser', name: 'Eraser', kind: 'eraser', key: 'E' }),
+  makeBrush({ id: 'clone', name: 'Clone Stamp', kind: 'clone', key: 'L' }),
+];

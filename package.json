@@ -13,6 +13,7 @@
     "web": "python3 -m http.server 8080 --directory src",
     "test": "node --test test/*.test.mjs",
     "test:gpu": "node --experimental-websocket scripts/gpu-check.mjs && node --experimental-websocket scripts/gpu-check.mjs tools-parity.html && node --experimental-websocket scripts/gpu-check.mjs view-damage.html",
+    "bench:brush-engine": "node scripts/brush-engine-bench.mjs",
     "bench:brush": "node --experimental-websocket scripts/gpu-check.mjs paint-bench.html?case=brush",
     "bench:shape": "node --experimental-websocket scripts/gpu-check.mjs paint-bench.html?case=shape",
     "bench:3d": "node --experimental-websocket scripts/gpu-check.mjs paint-bench.html?case=3d",
