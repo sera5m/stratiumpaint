@@ -14,6 +14,7 @@
     "test": "node --test test/*.test.mjs",
     "test:gpu": "node --experimental-websocket scripts/gpu-check.mjs",
     "bench:move": "node --experimental-websocket scripts/gpu-check.mjs move-bench.html",
+    "uninstall:app": "sh scripts/uninstall.sh",
     "nodes": "node src/js/nodes/cli.js",
     "dist": "npm run build && electron-builder",
     "dist:linux": "npm run build && electron-builder --linux",

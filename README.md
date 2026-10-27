@@ -214,6 +214,33 @@ haven't run `npm install`. It also runs the test suite as part of the build
 (`check()`). Once installed, launch it as `stratum` or from your app menu;
 it registers itself as a handler for common image formats plus `.ora`.
 
+## Uninstalling
+
+**Arch / self-build** (`makepkg -si` above), from the checkout:
+
+```sh
+scripts/uninstall.sh --dry-run   # list exactly what would go, change nothing
+scripts/uninstall.sh             # remove it (asks first); keeps your settings
+scripts/uninstall.sh --purge     # also remove settings and unfinished-work copies
+```
+
+`make uninstall`, `make uninstall-dry-run`, `make purge` and
+`npm run uninstall:app -- --dry-run` run the same script. It removes the pacman
+package (`sudo pacman -R stratum`: `/usr/lib/stratum`, `/usr/bin/stratum`, the
+menu entry, icon and licence) plus what Help → Check for Updates may have put in
+your home folder (`~/.local/share/stratum/app`, its `~/.local/share/applications/stratum.desktop`
+and `~/.local/bin/stratum` launchers). `--purge` also removes `~/.config/stratum`
+(settings, window state, unfinished-work copies). Pictures you saved, and
+`.stratum-backups` folders beside them, are never touched. Electron stays
+installed; `sudo pacman -Rns electron` if nothing else uses it. Without the
+checkout, `sudo pacman -R stratum` removes the system part on its own.
+
+**Windows installer (NSIS):** Settings → Apps → Stratum → Uninstall, or
+`Uninstall Stratum.exe` in the install folder. The portable zip: delete the folder.
+
+**.deb:** `sudo apt remove stratum`. **AppImage:** delete the `.AppImage` file.
+Settings for either live in `~/.config/stratum` (delete it to reset).
+
 ## Project layout
 
 - `src/js/core/` — pure, dependency-free image-editing primitives (color,
