@@ -3,6 +3,9 @@
 import { maskOutline } from '../core/mask.js';
 import { clamp } from '../core/util.js';
 import { h, raf } from './dom.js';
+import { requestedRenderer, chooseRenderer } from '../gpu/backend.js';
+import { getGPU, onDeviceLost } from '../gpu/device.js';
+import { GpuCompositor } from '../gpu/compositor.js';
 
 const MIN_ZOOM = 0.02, MAX_ZOOM = 64;
 const outlines = new WeakMap(); // mask → marching-ants segments (computed once per mask)
@@ -34,11 +37,19 @@ export class View {
     this.octx = this.overlay.getContext('2d');
     this.checker = null;
 
+    // 'canvas' (Canvas 2D, the default) or 'webgpu' (experimental, see gpu/backend.js).
+    this.renderer = 'canvas';
+    this.rendererReason = 'default';
+    this.gpu = null; // GpuCompositor while WebGPU is active
+    this.gpuCanvas = null;
+    this._gpuFailed = false;
+
     this._draw = raf(() => this.#paint());
     this._needBase = true;
     this._needOverlay = true;
 
     new ResizeObserver(() => this.resize()).observe(stage);
+    this.#initRenderer();
     this.#bindPointer();
     this.#bindWheel();
 
@@ -78,7 +89,7 @@ export class View {
     this.dpr = window.devicePixelRatio || 1;
     this.width = w;
     this.height = h;
-    for (const c of [this.canvas, this.overlay]) {
+    for (const c of [this.canvas, this.overlay, this.gpuCanvas].filter(Boolean)) {
       c.width = Math.round(w * this.dpr);
       c.height = Math.round(h * this.dpr);
     }
@@ -183,7 +194,77 @@ export class View {
     return this.checker;
   }
 
+  // ------------------------------------------------------------------ renderer choice
+
+  /** Switch to WebGPU if it was asked for and works; otherwise stay on Canvas 2D. Never throws. */
+  async #initRenderer() {
+    let requested = 'canvas';
+    try { requested = requestedRenderer({ search: location.search, storage: window.localStorage }); } catch { /* no storage */ }
+    if (requested !== 'webgpu') return;
+    const gpu = await getGPU();
+    const choice = chooseRenderer({
+      requested, hasGPU: typeof navigator !== 'undefined' && !!navigator.gpu,
+      adapter: !!gpu?.adapter, device: !!gpu?.device, failed: this._gpuFailed,
+    });
+    if (choice.renderer !== 'webgpu') { this.#fallback(choice.reason); return; }
+    try {
+      const c = h('canvas', { class: 'view-canvas gpu-canvas' });
+      c.width = this.canvas.width; c.height = this.canvas.height;
+      this.canvas.after(c);
+      this.gpuCanvas = c;
+      this.gpu = new GpuCompositor(gpu, c);
+      this._offLost = onDeviceLost((info) => this.#fallback(`WebGPU device lost (${info?.reason || 'unknown'})`));
+      this.renderer = 'webgpu';
+      this.rendererReason = 'ok';
+      this.canvas.style.visibility = 'hidden';
+      console.info('Stratum: WebGPU renderer active');
+      this.requestRender();
+      this.ed.emit('renderer', this.renderer);
+    } catch (err) {
+      console.error(err);
+      this.#fallback(`WebGPU init failed: ${err.message || err}`);
+    }
+  }
+
+  /** Back to Canvas 2D for the rest of the session. */
+  #fallback(reason) {
+    const was = this.renderer;
+    this._gpuFailed = true;
+    try { this.gpu?.destroy(); } catch { /* ignore */ }
+    this._offLost?.();
+    this.gpu = null;
+    this.gpuCanvas?.remove();
+    this.gpuCanvas = null;
+    this.canvas.style.visibility = '';
+    this.renderer = 'canvas';
+    this.rendererReason = reason;
+    console.warn(`Stratum: using the Canvas 2D renderer (${reason})`);
+    if (was === 'webgpu' || reason !== 'default') this.ed.toast(`WebGPU renderer unavailable, using Canvas 2D: ${reason}`);
+    this.requestRender();
+    this.ed.emit('renderer', this.renderer);
+  }
+
   #paintBase() {
+    const doc = this.ed.doc;
+    if (this.gpu) {
+      const ok = !doc || this.gpu.canDraw(doc);
+      // A document too big for a GPU texture draws with Canvas 2D; the next one may fit again.
+      this.canvas.style.visibility = ok ? 'hidden' : '';
+      this.gpuCanvas.style.visibility = ok ? '' : 'hidden';
+      if (ok) {
+        try {
+          this.gpu.present(doc, { ox: this.ox, oy: this.oy, zoom: this.zoom, width: this.width, height: this.height, dpr: this.dpr });
+          return;
+        } catch (err) {
+          console.error(err);
+          this.#fallback(`WebGPU draw failed: ${err.message || err}`);
+        }
+      }
+    }
+    this.#paintBase2D();
+  }
+
+  #paintBase2D() {
     const { ctx, dpr } = this, doc = this.ed.doc;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);

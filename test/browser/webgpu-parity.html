@@ -1,0 +1,121 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Run with `npm run test:gpu` (needs Chrome). Composites the same random layers three ways:
+     the WebGPU compositor, Canvas 2D (Doc#composite, today's renderer) and the JS reference in
+     gpu/blendmath.js, for every blend mode, and reports the largest channel difference. -->
+<pre id="out"></pre>
+<script type="module">
+import { Doc } from '../../src/js/doc/document.js';
+import { BLEND_MODES } from '../../src/js/core/blend.js';
+import { getGPU } from '../../src/js/gpu/device.js';
+import { GpuCompositor } from '../../src/js/gpu/compositor.js';
+import { compositeLayersCPU } from '../../src/js/gpu/blendmath.js';
+
+const out = [];
+const W = 48, H = 32;
+let seed = 7;
+const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+function fill(layer, opaque) {
+  const d = layer.img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i] = rnd() * 256; d[i + 1] = rnd() * 256; d[i + 2] = rnd() * 256;
+    d[i + 3] = opaque ? 255 : (rnd() < 0.15 ? 0 : rnd() * 256);
+  }
+  layer.touch();
+}
+// Canvas 2D stores premultiplied 8-bit, so colours of nearly transparent pixels are coarse.
+// Compare colour only where the result is reasonably opaque; alpha everywhere.
+function diff(a, b) {
+  let max = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    max = Math.max(max, Math.abs(a[i + 3] - b[i + 3]));
+    if (a[i + 3] < 64 || b[i + 3] < 64) continue;
+    for (let k = 0; k < 3; k++) max = Math.max(max, Math.abs(a[i + k] - b[i + k]));
+  }
+  return max;
+}
+try {
+  const gpu = await getGPU();
+  if (!gpu) throw new Error('no WebGPU device');
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  document.body.append(canvas);
+  const comp = new GpuCompositor(gpu, canvas);
+  let worstCpu = 0, worst2d = 0, fails = [];
+  for (const [mode] of BLEND_MODES) {
+    const doc = new Doc(W, H);
+    fill(doc.layers[0], false);
+    const top = doc.addLayer();
+    fill(top, false);
+    top.blend = mode;
+    top.opacity = 0.8;
+    doc._compDirty = true;
+    const g = await comp.readComposite(doc);
+    const c2 = doc.composite().getContext('2d').getImageData(0, 0, W, H).data;
+    const ref = compositeLayersCPU(W, H, doc.layers).data;
+    const dCpu = diff(g.data, ref), d2d = diff(g.data, c2);
+    worstCpu = Math.max(worstCpu, dCpu); worst2d = Math.max(worst2d, d2d);
+    out.push(`${mode.padEnd(12)} gpu-vs-js ${dCpu}  gpu-vs-canvas2d ${d2d}`);
+    if (dCpu > 2) fails.push(`${mode}: gpu vs js reference differs by ${dCpu}`);
+    if (d2d > 6) fails.push(`${mode}: gpu vs canvas 2d differs by ${d2d}`);
+  }
+  // Dirty-rect upload: change a few pixels, recomposite, compare again.
+  const doc = new Doc(W, H);
+  fill(doc.layers[0], true);
+  await comp.readComposite(doc);
+  doc.layers[0].img.data.set([1, 2, 3, 255], (5 * W + 9) * 4);
+  doc.layers[0].touch({ x: 9, y: 5, w: 1, h: 1 });
+  const g2 = await comp.readComposite(doc);
+  const p = [...g2.data.slice((5 * W + 9) * 4, (5 * W + 9) * 4 + 4)];
+  out.push(`dirty-rect upload pixel ${p.join(',')}`);
+  if (p.join(',') !== '1,2,3,255') fails.push('dirty-rect upload did not land');
+  // Present pass smoke test.
+  // What the present pass draws (into an offscreen texture of the canvas format; reading the
+  // canvas texture itself loses the device under headless SwiftShader).
+  async function shown(d, v) {
+    const tex = gpu.device.createTexture({ size: [W, H], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    comp.renderView(d, v, tex);
+    const bpr = Math.ceil((W * 4) / 256) * 256;
+    const buf = gpu.device.createBuffer({ size: bpr * H, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = gpu.device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: bpr }, [W, H]);
+    gpu.device.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const raw = new Uint8Array(buf.getMappedRange());
+    const bgra = tex.format.startsWith('bgra');
+    const px = (x, y) => { const i = y * bpr + x * 4; return bgra ? [raw[i + 2], raw[i + 1], raw[i], raw[i + 3]] : [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]; };
+    const all = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) all.push(px(x, y));
+    buf.unmap();
+    return all;
+  }
+  const s1 = await shown(doc, { ox: 0, oy: 0, zoom: 1, width: W, height: H, dpr: 1 });
+  let pd = 0;
+  s1.forEach((c, i) => { for (let k = 0; k < 3; k++) pd = Math.max(pd, Math.abs(c[k] - doc.layers[0].img.data[i * 4 + k])); });
+  out.push(`present vs layer pixels ${pd}`);
+  if (pd > 1) fails.push(`present output differs from the layer by ${pd}`);
+  // Half-transparent red over the checkerboard: (0,0) sits on a grey cell, (8,0) on a white one.
+  const t = new Doc(W, H);
+  t.layers[0].img.data.set([255, 0, 0, 128], 0);
+  t.layers[0].touch();
+  const s2 = await shown(t, { ox: 0, oy: 0, zoom: 1, width: W, height: H, dpr: 1 });
+  const c0 = s2[0], c1 = s2[8];
+  out.push(`checker cells ${c0.join(',')} / ${c1.join(',')}`);
+  if (Math.abs(c0[0] - 231) > 3 || Math.abs(c0[1] - 103) > 3 || c1.join(',') !== '255,255,255,255') fails.push('checkerboard / alpha over checker wrong');
+  // Panned: left of the document is transparent.
+  const s3 = await shown(doc, { ox: 10, oy: 0, zoom: 1, width: W, height: H, dpr: 1 });
+  out.push(`outside document ${s3[0].join(',')}`);
+  if (s3[0][3] !== 0) fails.push('pixels outside the document are not transparent');
+  // Real canvas presents last: under headless SwiftShader the device is gone after a canvas frame.
+  try { comp.present(doc, { ox: 0, oy: 0, zoom: 1, width: W, height: H, dpr: 1 }); out.push('present ok'); } catch (e) { out.push('present threw ' + e); fails.push('present'); }
+  try { comp.present(doc, { ox: 4, oy: 2, zoom: 0.25, width: W, height: H, dpr: 2 }); out.push('present zoomed-out ok'); } catch (e) { out.push('present2 threw ' + e); fails.push('present2'); }
+  out.push(`worst gpu-vs-js ${worstCpu}, worst gpu-vs-canvas2d ${worst2d}`);
+  out.push(fails.length ? `FAIL\n${fails.join('\n')}` : 'PASS');
+  document.title = fails.length ? 'FAIL' : 'PASS';
+} catch (err) {
+  out.push(`ERROR ${err.stack || err}`);
+  document.title = 'ERROR';
+}
+document.getElementById('out').textContent = out.join('\n');
+</script>

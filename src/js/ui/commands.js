@@ -15,6 +15,7 @@ import * as dlg from './dialogs.js';
 import { putBackup, listBackups, formatWhen } from './backup.js';
 import * as platform from './platform.js';
 import { h } from './dom.js';
+import { STORAGE_KEY as RENDERER_KEY } from '../gpu/backend.js';
 import { executeLine } from '../nodes/script.js';
 import { canRedoGraph, canUndoGraph, ensureGraph, markGraph, redoGraph, undoGraph } from '../nodes/graph.js';
 
@@ -280,6 +281,15 @@ export function createCommands({ ed, view }) {
   add('zoomFit', 'Best Fit', () => view.fit(), { shortcut: 'Ctrl+B|Ctrl+0' });
   add('zoomActual', 'Actual Size (100%)', () => view.setZoom(1), { shortcut: 'Ctrl+Shift+A' });
   add('grid', 'Pixel Grid', () => ed.setOpt('grid', !ed.opts.grid), { checked: () => ed.opts.grid });
+  add('webgpu', 'WebGPU Renderer (Experimental)', () => {
+    let pref = null;
+    try { pref = localStorage.getItem(RENDERER_KEY); } catch { /* no storage */ }
+    const on = view.renderer === 'webgpu' || pref === 'webgpu';
+    try { localStorage.setItem(RENDERER_KEY, on ? 'canvas' : 'webgpu'); } catch { /* no storage */ }
+    ed.toast(on
+      ? 'Canvas 2D renderer from the next start.'
+      : 'WebGPU renderer from the next start (falls back to Canvas 2D if unavailable). Desktop app on Linux: start with --webgpu.');
+  }, { checked: () => view.renderer === 'webgpu' });
 
   // ------------------------------------------------------------------ image
 

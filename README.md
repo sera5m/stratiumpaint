@@ -178,7 +178,11 @@ that copy afterwards. A browser tab just needs a refresh.
 npm run build         # minified production build -> dist/
 npm run build:dev      # unminified, inline sourcemap
 npm test               # runs test/*.test.mjs (Node's built-in test runner)
+npm run test:gpu       # WebGPU compositor parity in headless Chrome (skips without Chrome)
 ```
+
+The WebGPU renderer is experimental and off by default: `?renderer=webgpu` in the
+browser, `--webgpu` for the desktop app. See [docs/WEBGPU_PLAN.md](docs/WEBGPU_PLAN.md).
 
 `dist/index.html` + `app.js` + `app.css` is what Electron loads.
 `dist/stratum.html` is everything inlined into one file
@@ -219,6 +223,8 @@ it registers itself as a handler for common image formats plus `.ora`.
   class (selection, transactions, geometry ops), file I/O.
 - `src/js/tools/` — the 20 interactive tools (selection, move, nav, fill,
   brush family, shapes, text).
+- `src/js/gpu/` — experimental WebGPU renderer: shared device, layer textures,
+  blend-mode compositor (see `docs/WEBGPU_PLAN.md`).
 - `src/js/ui/` — DOM layer: editor session, canvas viewport, menus, panels,
   dialogs, command table, app bootstrap.
 - `electron/` — main process + preload bridge (native dialogs, clipboard,

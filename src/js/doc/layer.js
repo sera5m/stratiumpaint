@@ -24,6 +24,8 @@ export class Layer {
     this.onTouch = null; // set by the owning document
     this._canvas = null;
     this._dirty = null; // rect awaiting upload to the canvas, or 'all'
+    this._gpuTracked = false; // set once the WebGPU compositor mirrors this layer in a texture
+    this._gpuDirty = null; // rect awaiting upload to that texture, or 'all'
   }
 
   get width() { return this.img.width; }
@@ -36,6 +38,10 @@ export class Layer {
       if (!r || this._dirty === 'all') this._dirty = 'all';
       else this._dirty = this._dirty ? rectUnion(this._dirty, r) : r;
     }
+    if (this._gpuTracked) {
+      if (!r || this._gpuDirty === 'all') this._gpuDirty = 'all';
+      else this._gpuDirty = this._gpuDirty ? rectUnion(this._gpuDirty, r) : r;
+    }
     this.onTouch?.(r);
   }
 
@@ -44,6 +50,7 @@ export class Layer {
     this.img = img;
     this._canvas = null;
     this._dirty = null;
+    if (this._gpuTracked) this._gpuDirty = 'all';
     this.touch();
   }
 

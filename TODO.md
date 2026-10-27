@@ -26,5 +26,13 @@ Add as needed:
 - Stamp-along-stroke mode for any shape
 - More as needed: keep adding to this list when a shape comes up.
 
+## WebGPU (see docs/WEBGPU_PLAN.md)
+- [x] Phase 1: shared device, layer textures, WebGPU 2D compositor (all 16 blend modes), behind `?renderer=webgpu` / `--webgpu`, with automatic Canvas 2D fallback.
+- [ ] Phase 2: 3D view on WebGPU, sampling the composite texture directly (no per-stroke readback/upload), GPU pick pass.
+- [ ] Phase 3: GPU resample + move/scale preview.
+- [ ] Phase 4: GPU filters and adjustments.
+- [ ] Phase 5: GPU-authoritative painting, GPU undo textures.
+- [ ] Phase 6: default on.
+
 ## Context
 Substance 3D Painter comparison noted as useful reference for traditional 3D paint features (polygon fill, projection, path, symmetry, object isolation, etc.). Free/open subset first.
