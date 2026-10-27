@@ -13,6 +13,7 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 - [x] Drag, scale and rotate of lifted pixels are a float drawn with a transform each frame (no per-event CPU blend, layer write or recomposite). See docs/WEBGPU_PLAN.md "Move / drag performance" and `npm run bench:move`.
 - [x] Rotate knob above the box (Shift snaps to 15°), Angle ° field, one combined scale+rotate resample at set-down / 0.5 s idle, one undo step; the selection outline turns too. Move Selection rotates the mask.
 - [x] Shapes: Rotate option (degrees about the shape's centre). Already-drawn shapes: select and use Move Selected Pixels.
+- [x] Moving after a scale/turn: cached transformed preview (blit per frame), status/options bar coalesced to one update per frame. `test/move-scale.test.mjs`, `npm run profile:ui`.
 - [ ] Rotate on the GPU at set-down (resample is CPU, once).
 
 ## Uninstall

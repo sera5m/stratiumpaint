@@ -10,9 +10,12 @@ import { flipImage, rotateImage, resizeImage, resizeCanvas } from '../core/trans
 import { invertMask, maskBounds, rectMask } from '../core/mask.js';
 import { Layer } from './layer.js';
 import { paintImage, createCanvas } from './raster.js';
-import { floatMatrix, resampleFloat } from '../core/xform.js';
+import { floatMatrix, floatPlacement, resampleFloat } from '../core/xform.js';
 
 const HAS_DOM = typeof document !== 'undefined';
+
+// Largest cached float preview (pixels); beyond that the float draws transformed each frame.
+const FLOAT_VIEW_MAX = 4096 * 4096;
 
 export class Doc extends Emitter {
   constructor(width, height, { name = 'Untitled', background = null } = {}) {
@@ -158,15 +161,47 @@ export class Doc extends Emitter {
   }
 
   /** Draw the float into a 2D context with its transform. */
+  /**
+   * Draw the float into a document-sized context. Unscaled: a plain blit of the lifted pixels.
+   * Scaled / turned: the transformed preview is drawn once per size/angle into `f.view` and then
+   * blitted at a whole-pixel offset, so moving a scaled float costs the same as moving an
+   * unscaled one (no stretched, filtered drawImage per frame; on GPU canvases a filtered
+   * downscale of a canvas source can rebuild mipmaps on every draw).
+   */
   static drawFloat(ctx, f) {
-    const m = floatMatrix(f.src.width, f.src.height, f.box, f.angle);
-    const exact = !f.angle && f.box.w === f.src.width && f.box.h === f.src.height && Number.isInteger(f.box.x) && Number.isInteger(f.box.y);
+    const p = floatPlacement(f.src.width, f.src.height, f.box, f.angle);
     ctx.save();
-    ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
-    ctx.imageSmoothingEnabled = !exact;
-    ctx.imageSmoothingQuality = 'medium';
-    ctx.drawImage(f.canvas, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    if (p.exact) ctx.drawImage(f.canvas, f.box.x, f.box.y);
+    else if (p.bounds.w * p.bounds.h <= FLOAT_VIEW_MAX) ctx.drawImage(Doc.floatView(f, p), p.bounds.x, p.bounds.y);
+    else { // absurdly large (scaled far past the document): draw it transformed, no cache
+      const m = floatMatrix(f.src.width, f.src.height, f.box, f.angle);
+      ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'low';
+      ctx.drawImage(f.canvas, 0, 0);
+    }
     ctx.restore();
+  }
+
+  /** The float's pre-transformed preview bitmap; rebuilt only when size, angle or sub-pixel offset change. */
+  static floatView(f, p = floatPlacement(f.src.width, f.src.height, f.box, f.angle)) {
+    const v = f.view;
+    if (v && v.key === p.key) return v.canvas;
+    const c = v?.canvas || createCanvas(1, 1);
+    if (c.width !== p.bounds.w || c.height !== p.bounds.h) { c.width = p.bounds.w; c.height = p.bounds.h; }
+    const x = c.getContext('2d');
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    x.clearRect(0, 0, c.width, c.height);
+    const m = floatMatrix(f.src.width, f.src.height, f.box, f.angle);
+    x.setTransform(m[0], m[1], m[2], m[3], m[4] - p.bounds.x, m[5] - p.bounds.y);
+    x.imageSmoothingEnabled = true;
+    x.imageSmoothingQuality = 'low'; // plain bilinear like the GPU path; the real resample happens at set-down
+    x.drawImage(f.canvas, 0, 0);
+    f.view = { key: p.key, canvas: c };
+    f.viewBuilds = (f.viewBuilds || 0) + 1;
+    return c;
   }
 
   #drawStack(ctx, layers) {

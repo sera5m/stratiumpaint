@@ -1,5 +1,6 @@
 // Runs a page from test/browser/ in headless Chrome with SwiftShader WebGPU and prints its report.
-// Usage: npm run test:gpu  |  npm run bench:move   (CHROME=/path/to/chrome to pick a browser)
+// Usage: npm run test:gpu  |  npm run bench:move   (CHROME=/path/to/chrome to pick a browser,
+// CHROME_FLAGS='--enable-gpu-rasterization --ignore-gpu-blocklist' to add switches)
 // The page sets document.title to PASS / FAIL / ERROR when done and writes its report into #out.
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
@@ -26,7 +27,7 @@ server.listen(0, '127.0.0.1', async () => {
   const port = 9300 + Math.floor(Math.random() * 500);
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'stratum-gpu-'));
   const args = ['--headless=new', '--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan',
-    '--use-angle=swiftshader', '--use-webgpu-adapter=swiftshader', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, url];
+    '--use-angle=swiftshader', '--use-webgpu-adapter=swiftshader', ...(process.env.CHROME_FLAGS ? process.env.CHROME_FLAGS.split(/\s+/) : []), `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, url];
   const p = spawn(chrome, args, { stdio: 'ignore' });
   const done = (code, text) => {
     console.log(text);

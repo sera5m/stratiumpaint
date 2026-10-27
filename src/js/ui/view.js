@@ -389,8 +389,7 @@ export class View {
     this.#updateCursor();
   }
 
-  #toolEvent(e) {
-    const r = this.stage.getBoundingClientRect();
+  #toolEvent(e, r = this.stage.getBoundingClientRect()) {
     const sx = e.clientX - r.left, sy = e.clientY - r.top, p = this.toDoc(sx, sy);
     return { x: p.x, y: p.y, sx, sy, zoom: this.zoom, ox: this.ox, oy: this.oy, button: e.button === 2 || (e.buttons & 2) ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey };
   }
@@ -430,11 +429,14 @@ export class View {
       }
       const events = this.pressed !== null ? (e.getCoalescedEvents?.() ?? []) : [];
       const list = events.length ? events : [e];
+      // One layout read per DOM event, not one per coalesced sample (each read after a DOM write
+      // forces a synchronous layout).
+      const rect = this.stage.getBoundingClientRect();
       for (const ce of list) {
-        const t = this.#toolEvent(ce);
+        const t = this.#toolEvent(ce, rect);
         if (this.pressed !== null) { t.button = this.pressed; ed.pointer('move', t); }
       }
-      const t = this.#toolEvent(e);
+      const t = this.#toolEvent(e, rect);
       ed.hover = { x: t.x, y: t.y };
       ed.emit('cursor', t.x, t.y);
       if (!this.panning && !this.spaceDown) {

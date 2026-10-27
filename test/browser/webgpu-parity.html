@@ -97,6 +97,19 @@ try {
     const mean = sum / Math.max(1, n);
     out.push(`float turned 0.5 rad + scaled: mean gpu-vs-canvas2d ${mean.toFixed(2)}`);
     if (mean > 4) fails.push(`turned float differs from Canvas 2D on average by ${mean.toFixed(2)}`);
+    // Moving that scaled + turned float by whole pixels reuses its cached preview bitmap (no
+    // rebuild, no upload) and still matches the GPU float frame.
+    const builds = fd.float.viewBuilds, ups = comp.stats.uploads;
+    for (const [x, y] of [[11.3, 6.7], [13.3, 8.7], [9.3, 10.7], [12.3, 7.7]]) { fd.updateFloat({ x, y, w: 26, h: 18 }, 0.5); fd.composite(); comp.composite(fd); }
+    const g5 = await comp.readComposite(fd);
+    const c5 = fd.composite().getContext('2d').getImageData(0, 0, W, H).data;
+    let sum5 = 0, n5 = 0;
+    for (let i = 0; i < g5.data.length; i += 4) { if (g5.data[i + 3] < 64) continue; for (let k = 0; k < 3; k++) { sum5 += Math.abs(g5.data[i + k] - c5[i + k]); n5++; } }
+    const rebuilt = fd.float.viewBuilds - builds, uploaded = comp.stats.uploads - ups;
+    out.push(`scaled float moved 4x: preview rebuilds ${rebuilt}, GPU uploads ${uploaded}, mean gpu-vs-canvas2d ${(sum5 / Math.max(1, n5)).toFixed(2)}`);
+    if (rebuilt !== 0) fails.push(`moving a scaled float rebuilt its preview ${rebuilt} times`);
+    if (uploaded !== 0) fails.push(`moving a scaled float uploaded ${uploaded} textures`);
+    if (sum5 / Math.max(1, n5) > 4) fails.push('moved scaled float differs from the GPU frame');
     fd.clearFloat();
     const g3 = await comp.readComposite(fd);
     const c4 = fd.composite().getContext('2d').getImageData(0, 0, W, H).data;

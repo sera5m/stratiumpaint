@@ -14,11 +14,13 @@ import { Doc } from '../../src/js/doc/document.js';
 import { rectMask } from '../../src/js/core/mask.js';
 import { getGPU } from '../../src/js/gpu/device.js';
 import { GpuCompositor } from '../../src/js/gpu/compositor.js';
+import * as X from '../../src/js/core/xform.js';
 
 const q = new URLSearchParams(location.search);
 const FRAMES = +q.get('frames') || 30, COALESCE = 4;
 // Main case: the user's ~720x720 images (a 300x300 lift and the whole image); large doc secondary.
-const CONFIGS = [[720, 720, 300, 100, 100, 'warm-up, discard'], [720, 720, 300, 100, 100], [720, 720, 720, 0, 0], [4000, 3000, 1500, 500, 500]];
+const CONFIGS = [[720, 720, 300, 100, 100, 'warm-up, discard'], [720, 720, 300, 100, 100], [720, 720, 720, 0, 0], [4000, 3000, 1500, 500, 500]]
+  .filter((c) => !q.has('quick') || c[0] === 720); // ?quick: skip the large document
 let W, H, L, LX, LY;
 const VW = 1600, VH = 1000;
 const out = [];
@@ -98,6 +100,77 @@ async function run(label, render, counters = null) {
   log(`${label}\n  lift: ${lift.toFixed(1)} ms\n  drag (${COALESCE} events/frame): ${stats(drag)}\n  scale: ${stats(scale)}${rotate.length ? `\n  rotate: ${stats(rotate)}` : ''}\n  set-down: ${settle.toFixed(1)} ms\n  paint 64x64/frame: ${stats(stroke)}${dragWork}`);
 }
 
+// Scale-then-move cases (720x720 only): the per-frame drag after a scale must be the same work as
+// before it. Also prints what happened during each measured drag: resamples, preview-bitmap
+// rebuilds, GPU uploads, layer writes and history steps (all should be 0).
+async function scaleCases(label, render, counters = null) {
+  const fresh = async () => {
+    const ed = new Editor(), doc = makeDoc();
+    ed.addDoc(doc);
+    doc.setSelection(rectMask(W, H, LX, LY, LX + L, LY + L));
+    ed.setTool('move-pixels');
+    await render(doc);
+    return { ed, doc };
+  };
+  const snap = (doc) => ({ res: X.xformStats?.resamples ?? 0, builds: doc.float?.viewBuilds ?? 0, up: counters ? counters().uploads : 0, lv: doc.layer.version, hist: doc.history.index, fid: doc.float?.id });
+  const diff = (a, b) => `resamples ${b.res - a.res}, preview rebuilds ${b.builds - a.builds}, GPU uploads ${b.up - a.up}, layer writes ${b.lv - a.lv}, history ${b.hist - a.hist}${a.fid !== b.fid ? ', RE-LIFTED' : ''}`;
+  const drag = async (ed, doc, n, times) => {
+    const b = doc.float?.box ?? doc.benchBox ?? { x: LX, y: LY, w: L, h: L };
+    let x = b.x + b.w / 2, y = b.y + b.h / 2;
+    ed.pointer('down', ev(x, y));
+    for (let f = 0; f < n; f++) {
+      const t = performance.now();
+      for (let k = 0; k < COALESCE; k++) ed.pointer('move', ev(x += (f % 2 ? 1 : 2), y + (f % 5)));
+      await render(doc);
+      times?.push(performance.now() - t);
+    }
+    ed.pointer('up', ev(x, y + 0));
+  };
+  const scaleTo = async (ed, doc, k, frames = 6) => {
+    const m = ed.tool.metrics(ed), w0 = m.w, h0 = m.h;
+    for (let f = 1; f <= frames; f++) { ed.tool.setSize(ed, Math.round(w0 * (1 + (k - 1) * f / frames)), Math.round(h0 * (1 + (k - 1) * f / frames))); await render(doc); }
+  };
+  const lines = [`${label}, 720x720 scale cases (median per drag frame, ${COALESCE} events/frame)`];
+  const caseDrag = async (name, prep) => {
+    const { ed, doc } = await fresh();
+    await prep(ed, doc);
+    await drag(ed, doc, 3); // first frames after the change are allowed to build the preview
+    const times = [], a = snap(doc);
+    await drag(ed, doc, FRAMES, times);
+    const b = snap(doc);
+    lines.push(`  ${name.padEnd(30)} ${stats(times)}   [${diff(a, b)}]`);
+    ed.commitPending();
+  };
+  await caseDrag('plain drag (unscaled)', async (ed, doc) => { await drag(ed, doc, 2); });
+  await caseDrag('scale 1.5x, then drag', async (ed, doc) => { await drag(ed, doc, 2); await scaleTo(ed, doc, 1.5); });
+  await caseDrag('upscale 2x, then drag', async (ed, doc) => { await drag(ed, doc, 2); await scaleTo(ed, doc, 2); });
+  await caseDrag('downscale 0.5x, then drag', async (ed, doc) => { await drag(ed, doc, 2); await scaleTo(ed, doc, 0.5); });
+  await caseDrag('pause 0.7 s after scale, drag', async (ed, doc) => { await drag(ed, doc, 2); await scaleTo(ed, doc, 1.5); await new Promise((r) => setTimeout(r, 700)); });
+  await caseDrag('set down (resample), re-lift', async (ed, doc) => {
+    await drag(ed, doc, 2); await scaleTo(ed, doc, 1.5);
+    const box = { ...doc.float.box };
+    ed.commitPending(); // resample + history
+    doc.benchBox = box;
+    doc.setSelection(rectMask(W, H, Math.max(0, box.x), Math.max(0, box.y), Math.min(W, box.x + box.w), Math.min(H, box.y + box.h)));
+    await render(doc);
+  });
+  { // repeated scale + move cycles
+    const { ed, doc } = await fresh();
+    await drag(ed, doc, 2);
+    const times = [], a = snap(doc);
+    for (let c = 0; c < 6; c++) {
+      const k = c % 2 ? 0.8 : 1.25;
+      const t0 = performance.now(); await scaleTo(ed, doc, k, 3); const ts = (performance.now() - t0) / 3;
+      times.push(ts, ts, ts);
+      await drag(ed, doc, 3, times);
+    }
+    const b = snap(doc);
+    lines.push(`  ${'6x (scale 3 fr + move 3 fr)'.padEnd(30)} ${stats(times)}   [${diff(a, b)}]`);
+    ed.commitPending();
+  }
+  log(lines.join('\n'));
+}
+
 try {
   const gpu = await getGPU();
   for (const cfg of CONFIGS) {
@@ -107,21 +180,26 @@ try {
   view.width = VW; view.height = VH;
   const vctx = view.getContext('2d');
   const z = Math.min(1, VW / W, VH / H);
-  await run('Canvas 2D', async (doc) => {
+  const render2d = async (doc) => {
     vctx.clearRect(0, 0, VW, VH);
     vctx.imageSmoothingEnabled = true;
     vctx.drawImage(doc.composite(), 0, 0, W * z, H * z);
     vctx.getImageData(0, 0, 1, 1); // wait for the canvas work to finish
-  });
+  };
+  const scaleRun = W === 720 && L === 300 && !cfg[5];
+  await run('Canvas 2D', render2d);
+  if (scaleRun) await scaleCases('Canvas 2D', render2d);
   if (gpu) {
     const c = document.createElement('canvas');
     c.width = VW; c.height = VH;
     const comp = new GpuCompositor(gpu, c);
     const target = gpu.device.createTexture({ size: [VW, VH], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
-    await run('WebGPU (SwiftShader, software)', async (doc) => {
+    const renderGpu = async (doc) => {
       comp.renderView(doc, { ox: 0, oy: 0, zoom: z, width: VW, height: VH, dpr: 1 }, target);
       await gpu.device.queue.onSubmittedWorkDone();
-    }, () => comp.stats);
+    };
+    await run('WebGPU (SwiftShader, software)', renderGpu, () => comp.stats);
+    if (scaleRun) await scaleCases('WebGPU (SwiftShader, software)', renderGpu, () => comp.stats);
   } else log('WebGPU: no adapter');
   }
   document.title = 'PASS';

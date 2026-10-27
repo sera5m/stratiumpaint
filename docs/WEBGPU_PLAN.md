@@ -200,6 +200,46 @@ The WebGPU column is SwiftShader (CPU emulation of a GPU), so absolute GPU numbe
 little; the drop is the point (no uploads and no full recomposites during the drag; the bench
 prints the counters). Real hardware should be far faster.
 
+**Moving after a scale (fixed Oct 27).** Two things made a scaled float slower to move than an
+unscaled one, even though nothing was resampled before set-down:
+
+1. *A different draw per frame.* Unscaled, the float is a plain pixel blit. Scaled or turned, every
+   frame drew the lifted pixels stretched through a transform with `imageSmoothingQuality =
+   'medium'` (mipmapped filtering; on GPU-rasterized canvases a filtered downscale of a canvas
+   source can rebuild mipmaps on every draw). Now the transformed preview is drawn **once per
+   size/angle** into a cached bitmap (`Doc.floatView`, keyed by `floatPlacement()`), and every
+   move frame blits that bitmap at a whole-pixel offset, the same as an unscaled move. While
+   actively resizing the bitmap is rebuilt per frame with plain bilinear (`'low'`), matching the
+   GPU path; the real, supersampled resample still happens once at set-down.
+2. *Per pointer sample UI work.* Each coalesced pointer sample emitted `overlay` synchronously;
+   the status bar re-scanned the whole selection mask for its bounds and rewrote its text, the
+   options bar re-synced, and the next sample's `getBoundingClientRect` then forced a layout.
+   With a selection (wheel-scaling always has one, shapes are selected to move) that was ~0.3 ms
+   per sample, ~5 ms/frame with a 1000 Hz mouse. Now the status bar and options bar update once
+   per animation frame, mask bounds are cached per mask, text is only written when it changes,
+   and the stage rect is read once per DOM event.
+
+No idle timer runs while floating (the 0.5 s settle only starts after Enter / right-click), and
+nothing re-lifts: `test/move-scale.test.mjs` asserts 0 resamples, layer writes, history steps and
+timers across scale → drag → pause → drag → wheel → cycles, and exactly 1 resample at set-down.
+
+`npm run bench:move` scale cases, Canvas 2D, 720×720, 300×300 lift, median per drag frame
+(software / GPU-rasterized SwiftShader canvas):
+
+| case                           | before        | after         |
+|--------------------------------|---------------|---------------|
+| plain drag (unscaled)          | 0.9 / 0.9 ms  | 0.9 / 0.9 ms  |
+| scale 1.5×, then drag          | 2.0 / 2.0     | 0.9 / 0.9     |
+| upscale 2×, then drag          | 1.8 / 2.6     | 1.0 / 0.9     |
+| downscale 0.5×, then drag      | 1.0 / 1.1     | 0.9 / 0.9     |
+| pause 0.7 s after scale, drag  | 1.7 / 1.5     | 1.0 / 0.9     |
+| 6× (scale 3 fr + move 3 fr)    | 1.4 / 1.2     | 1.2 / 1.1     |
+
+`npm run profile:ui` (the real app, ellipse selection, 16 pointer samples per frame, Canvas 2D):
+frame 6.0–6.6 ms → 0.4–0.6 ms; synchronous event-handler time 4.6–5.2 ms → 0.0 ms per frame.
+WebGPU was already the same shader path before and after a scale (0 uploads during drags); its
+SwiftShader frame time grows with the area the float covers, not with the scale itself.
+
 **Hot-path encoding audit.** No PNG/dataURL/toBlob in history (raw crops), previews or the
 drag. Remaining encoders are deliberately debounced: the unfinished-work copy encodes each
 layer to PNG 8 s after the last edit (`ui/scratch.js`), and autosave writes ORA every 60 s while

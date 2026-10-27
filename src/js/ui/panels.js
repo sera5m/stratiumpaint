@@ -2,7 +2,7 @@
 import { GRADIENT_TYPES, GRADIENT_MODES, PATTERN_TYPES } from '../core/fill.js';
 import { maskBounds } from '../core/mask.js';
 import { rgbToHex } from '../core/color.js';
-import { debounce, clear, h } from './dom.js';
+import { debounce, clear, h, raf } from './dom.js';
 import { icon } from './icons.js';
 import { colorDialog } from './dialogs.js';
 
@@ -236,7 +236,7 @@ export function buildOptionsBar(root, ed) {
   ed.on('tool', rebuild);
   const resync = () => syncs.forEach((s) => s());
   ed.on('opts', resync);
-  ed.on('overlay', resync);
+  ed.on('overlay', raf(resync)); // overlay fires per pointer sample during a drag: sync once a frame
   ed.on('doc:selection', resync);
   rebuild();
 }
@@ -506,20 +506,25 @@ export function buildStatusbar(root, ed, view) {
     text: 'Click where the text should start, type, then Ctrl+Enter.',
   };
 
+  // Bounds per selection mask, computed once (a full mask scan) instead of on every overlay event.
+  const boundsOf = new WeakMap();
+  const selBounds = (m) => { if (!boundsOf.has(m)) boundsOf.set(m, maskBounds(m)); return boundsOf.get(m); };
+  const setText = (el, t) => { if (el.textContent !== t) el.textContent = t; };
   const update = () => {
     const doc = ed.doc;
-    hint.textContent = ed.surfaceMode === 'nodes'
+    setText(hint, ed.surfaceMode === 'nodes'
       ? 'Node editor: Shift+A adds a node, drag sockets to link, M mutes, Ctrl+G groups, Tab enters a group. Apply writes the composite onto the layer.'
-      : (HINTS[ed.tool.id] ?? '');
-    size.textContent = doc ? `${doc.width} × ${doc.height}` : '';
+      : (HINTS[ed.tool.id] ?? ''));
+    setText(size, doc ? `${doc.width} × ${doc.height}` : '');
     const off = ed.marchOffset;
-    const b = doc?.selection && maskBounds(doc.selection);
+    const b = doc?.selection && selBounds(doc.selection);
     const live = b && off?.to ? off.to : b;
-    sel.textContent = live ? `Selection ${live.w} × ${live.h}` : '';
-    zoom.textContent = doc ? `${Math.round(view.zoom * (view.zoom < 0.1 ? 1000 : 100)) / (view.zoom < 0.1 ? 10 : 1)}%` : '';
+    setText(sel, live ? `Selection ${live.w} × ${live.h}` : '');
+    setText(zoom, doc ? `${Math.round(view.zoom * (view.zoom < 0.1 ? 1000 : 100)) / (view.zoom < 0.1 ? 10 : 1)}%` : '');
     zoomIn.disabled = zoomOut.disabled = zoom.disabled = !doc;
   };
-  ed.on('cursor', (x, y) => { pos.textContent = x == null || !ed.doc ? '' : `${Math.floor(x)}, ${Math.floor(y)}`; });
-  for (const ev of ['doc', 'tool', 'view', 'doc:selection', 'doc:size', 'overlay', 'surface']) ed.on(ev, update);
+  ed.on('cursor', (x, y) => setText(pos, x == null || !ed.doc ? '' : `${Math.floor(x)}, ${Math.floor(y)}`));
+  for (const ev of ['doc', 'tool', 'view', 'doc:selection', 'doc:size', 'surface']) ed.on(ev, update);
+  ed.on('overlay', raf(update)); // per pointer sample during a drag: once a frame is plenty
   update();
 }

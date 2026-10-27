@@ -87,7 +87,24 @@ export function fromBoxFrame(x, y, box, angle = 0) {
  *  - turned: inverse-mapped bilinear on premultiplied colour, with n×n supersampling when the
  *    float is shrunk so detail averages instead of aliasing.
  */
+/** Counters for tests and the benchmark: resampling must only happen at set-down. */
+export const xformStats = { resamples: 0 };
+
+/**
+ * Where a scaled/turned float's pre-transformed preview bitmap sits. The bitmap only depends on
+ * size, angle and the sub-pixel part of the position, so `key` stays the same while the float is
+ * only moved (whole-pixel steps): moving a scaled float then blits the same cached bitmap at
+ * `bounds.x, bounds.y`, exactly like moving an unscaled one.
+ */
+export function floatPlacement(sw, sh, box, angle = 0) {
+  const bounds = rotatedBounds(box, angle);
+  const fx = Math.round((box.x - Math.floor(box.x)) * 256), fy = Math.round((box.y - Math.floor(box.y)) * 256);
+  const exact = !angle && box.w === sw && box.h === sh && Number.isInteger(box.x) && Number.isInteger(box.y);
+  return { exact, bounds, key: `${sw}x${sh}>${box.w}x${box.h}|${angle}|${fx},${fy}` };
+}
+
 export function resampleFloat(src, box, angle = 0) {
+  xformStats.resamples++;
   const sw = src.width, sh = src.height;
   if (!angle) {
     const img = box.w === sw && box.h === sh ? src : resizeImage(src, box.w, box.h, 'smooth');
