@@ -75,8 +75,10 @@ test('move selected pixels floats: nothing is written to history until it is set
   ed.setTool('move-pixels');
   drag(ed, [[3, 3], [6, 3], [10, 5]]);
 
-  assert.equal(alphaAt(doc.layer, 3, 3), 0, 'original spot is already empty on screen');
-  assert.deepEqual(px(doc.layer, 10, 5), [255, 0, 0, 255], 'moved pixels are visible at the new spot');
+  assert.equal(alphaAt(doc.layer, 3, 3), 0, 'original spot is already empty');
+  assert.equal(alphaAt(doc.layer, 10, 5), 0, 'the layer is not repainted per drag event: the pixels float');
+  const shown = doc.compositeImage();
+  assert.deepEqual([...shown.data.slice((5 * 20 + 10) * 4, (5 * 20 + 10) * 4 + 4)], [255, 0, 0, 255], 'moved pixels are visible at the new spot');
   assert.equal(doc.history.entries().length, before, 'no history step yet — it is only floating');
   assert.equal(doc.selection.data[3 * 20 + 3], 255, 'the selection mask itself has not moved yet either');
 
@@ -106,7 +108,7 @@ function scaledFloat() {
 test('scaling a float is visual only until it is set down', () => {
   const { ed, doc } = scaledFloat();
   const before = doc.history.entries().length;
-  assert.deepEqual(ed.tool.metrics(ed), { w: 8, h: 8 });
+  assert.deepEqual(ed.tool.metrics(ed), { w: 8, h: 8, angle: 0 });
   assert.equal(alphaAt(doc.layer, 7, 7), 0, 'no resample yet: the layer is not painted while scaling');
   assert.equal(doc.history.entries().length, before);
   ed.commitPending(); // tool switch / undo / a menu command lands it straight away

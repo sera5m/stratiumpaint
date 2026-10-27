@@ -13,6 +13,7 @@
     "web": "python3 -m http.server 8080 --directory src",
     "test": "node --test test/*.test.mjs",
     "test:gpu": "node --experimental-websocket scripts/gpu-check.mjs",
+    "bench:move": "node --experimental-websocket scripts/gpu-check.mjs move-bench.html",
     "nodes": "node src/js/nodes/cli.js",
     "dist": "npm run build && electron-builder",
     "dist:linux": "npm run build && electron-builder --linux",

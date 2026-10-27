@@ -101,13 +101,17 @@ function appendMoveSize(root, ed, syncs) {
   const wIn = h('input', { type: 'number', class: 'num', min: 1, max: 8192, 'aria-label': 'Width' });
   const hIn = h('input', { type: 'number', class: 'num', min: 1, max: 8192, 'aria-label': 'Height' });
   const lock = h('input', { type: 'checkbox', title: 'Keep proportions', 'aria-label': 'Keep proportions' });
+  const aIn = ed.tool.setAngle ? h('input', { type: 'number', class: 'num', min: -180, max: 180, step: 1, 'aria-label': 'Angle', title: 'Rotation in degrees (Shift-drag the knob to snap to 15°)' }) : null;
   let aspect = 1;
   const read = () => ed.tool.metrics?.(ed);
   const sync = () => {
     const m = read();
-    if (!m) { wIn.value = ''; hIn.value = ''; return; }
-    if (document.activeElement !== wIn) wIn.value = m.w;
-    if (document.activeElement !== hIn) hIn.value = m.h;
+    // Only write when the value changed: this runs on every overlay frame during a drag.
+    const put = (el, v) => { if (el && document.activeElement !== el && el.value !== String(v)) el.value = v; };
+    if (!m) { put(wIn, ''); put(hIn, ''); put(aIn, ''); return; }
+    put(wIn, m.w);
+    put(hIn, m.h);
+    put(aIn, m.angle ?? 0);
     if (!lock.checked && m.h) aspect = m.w / m.h;
   };
   const apply = (which) => {
@@ -128,6 +132,17 @@ function appendMoveSize(root, ed, syncs) {
     apply(which);
     ed.commitTool();
   };
+  if (aIn) {
+    const applyAngle = () => { const a = +aIn.value; if (Number.isFinite(a)) ed.tool.setAngle?.(ed, a); sync(); };
+    aIn.addEventListener('change', applyAngle);
+    aIn.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      applyAngle();
+      ed.commitTool();
+    });
+  }
   wIn.addEventListener('change', () => apply('w'));
   hIn.addEventListener('change', () => apply('h'));
   wIn.addEventListener('keydown', onKey('w'));
@@ -140,6 +155,7 @@ function appendMoveSize(root, ed, syncs) {
     h('label', { class: 'opt' }, h('span', { class: 'opt-label' }, 'Height'), hIn),
     h('label', { class: 'opt' }, h('span', { class: 'opt-label' }, 'Lock'), lock),
   );
+  if (aIn) root.append(h('label', { class: 'opt' }, h('span', { class: 'opt-label' }, 'Angle °'), aIn));
 }
 
 export function buildOptionsBar(root, ed) {
@@ -155,7 +171,8 @@ export function buildOptionsBar(root, ed) {
       case 'range': {
         const rng = h('input', { type: 'range', min: def.min, max: def.max, step: 1, value: get(), 'aria-label': def.label });
         const out = h('span', { class: 'opt-value' });
-        const sync = () => { rng.value = get(); out.textContent = `${get()}${def.unit ?? ''}`; };
+        // Option syncs run on every overlay frame during a drag: only touch the DOM on a change.
+        const sync = () => { const v = String(get()), t = `${v}${def.unit ?? ''}`; if (rng.value !== v) rng.value = v; if (out.textContent !== t) out.textContent = t; };
         rng.addEventListener('input', () => ed.setOpt(key, parseInt(rng.value, 10)));
         syncs.push(sync); sync();
         return wrap(rng, out);
@@ -163,7 +180,7 @@ export function buildOptionsBar(root, ed) {
       case 'number': {
         const num = h('input', { type: 'number', class: 'num', min: def.min, max: def.max, step: 1, value: get(), 'aria-label': def.label });
         num.addEventListener('input', () => { const v = parseInt(num.value, 10); if (v >= def.min && v <= def.max) ed.setOpt(key, v); });
-        syncs.push(() => { if (document.activeElement !== num) num.value = get(); });
+        syncs.push(() => { const v = String(get()); if (document.activeElement !== num && num.value !== v) num.value = v; });
         return wrap(num);
       }
       case 'toggle': {

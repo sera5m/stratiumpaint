@@ -2,6 +2,7 @@
 // Every user-visible change goes through a method here so it lands in history exactly once.
 //
 // Events: 'render' (pixels changed) · 'layers' · 'selection' · 'size' · 'history' · 'meta'
+//         'float' (a floating move/scale/rotate changed: the view redraws, nothing else re-reads pixels)
 import { Emitter, clamp } from '../core/util.js';
 import { History } from '../core/history.js';
 import { cropImage, cloneImage } from '../core/image.js';
@@ -9,6 +10,7 @@ import { flipImage, rotateImage, resizeImage, resizeCanvas } from '../core/trans
 import { invertMask, maskBounds, rectMask } from '../core/mask.js';
 import { Layer } from './layer.js';
 import { paintImage, createCanvas } from './raster.js';
+import { floatMatrix, resampleFloat } from '../core/xform.js';
 
 const HAS_DOM = typeof document !== 'undefined';
 
@@ -32,6 +34,11 @@ export class Doc extends Emitter {
     this._layerCount = 0;
     this._comp = null;
     this._compDirty = true;
+    // Content being moved / scaled / rotated by a move tool, drawn over its layer with a transform
+    // until it is set down: { layer, src, box, angle }. See setFloat.
+    this.float = null;
+    this._floatSeq = 0;
+    this._floatCache = null;
     this.history.on('change', () => { this.emit('history'); this.emit('meta'); });
 
     const bg = this._adopt(new Layer(width, height, 'Background'));
@@ -113,8 +120,122 @@ export class Doc extends Emitter {
 
   // ------------------------------------------------------------------ compositing
 
+  // ------------------------------------------------------------------ floating content
+
+  /**
+   * Start drawing `src` (straight-alpha pixels) over `layer`, placed in box {x,y,w,h} and turned by
+   * `angle` radians. The layer itself is not touched while it floats, so a drag only changes a few
+   * numbers per frame: no pixel copies, no layer uploads, no history, no 3D texture refresh.
+   * The pixels are turned into a canvas (Canvas 2D) / texture (WebGPU) once, here.
+   */
+  setFloat({ layer, src, box, angle = 0 }) {
+    let canvas = null;
+    if (HAS_DOM) {
+      canvas = createCanvas(src.width, src.height);
+      canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(src.data), src.width, src.height), 0, 0);
+    }
+    this.float = { id: ++this._floatSeq, version: 0, layer, src, canvas, box: { ...box }, angle };
+    this.emit('float');
+    return this.float;
+  }
+
+  /** The float moved / was resized / turned. Cheap: the view just redraws on the next frame. */
+  updateFloat(box, angle) {
+    const f = this.float;
+    if (!f) return;
+    if (box) f.box = { ...box };
+    if (angle !== undefined) f.angle = angle;
+    f.version++;
+    this.emit('float');
+  }
+
+  clearFloat() {
+    if (!this.float) return;
+    this.float = null;
+    this._floatCache = null;
+    this._compDirty = true;
+    this.emit('float');
+  }
+
+  /** Draw the float into a 2D context with its transform. */
+  static drawFloat(ctx, f) {
+    const m = floatMatrix(f.src.width, f.src.height, f.box, f.angle);
+    const exact = !f.angle && f.box.w === f.src.width && f.box.h === f.src.height && Number.isInteger(f.box.x) && Number.isInteger(f.box.y);
+    ctx.save();
+    ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+    ctx.imageSmoothingEnabled = !exact;
+    ctx.imageSmoothingQuality = 'medium';
+    ctx.drawImage(f.canvas, 0, 0);
+    ctx.restore();
+  }
+
+  #drawStack(ctx, layers) {
+    for (const l of layers) {
+      if (!l.visible || l.opacity <= 0) continue;
+      ctx.globalAlpha = l.opacity;
+      ctx.globalCompositeOperation = l.blend;
+      ctx.drawImage(l.canvas, 0, 0);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /**
+   * Composite while something floats. The layers below the float's layer, and the layers above it
+   * (as one group when they are all Normal), are flattened once into cached canvases; each frame
+   * is then: below, the float's layer + the float, above. Three or four GPU blits, no pixel copies.
+   */
+  #compositeFloat() {
+    const f = this.float, w = this.width, hh = this.height;
+    const i = this.layers.indexOf(f.layer);
+    const key = `${w}x${hh}|${i}|` + this.layers.map((l) => `${l.id}:${l.version}:${l.visible}:${l.opacity}:${l.blend}`).join(',');
+    let c = this._floatCache;
+    if (!c || c.key !== key) {
+      const below = c?.below || createCanvas(w, hh), above = c?.above || createCanvas(w, hh);
+      for (const cv of [below, above]) { if (cv.width !== w || cv.height !== hh) { cv.width = w; cv.height = hh; } cv.getContext('2d').clearRect(0, 0, w, hh); }
+      this.#drawStack(below.getContext('2d'), this.layers.slice(0, Math.max(0, i)));
+      const up = this.layers.slice(i + 1);
+      const groupable = up.every((l) => !l.visible || l.blend === 'source-over');
+      if (groupable) this.#drawStack(above.getContext('2d'), up);
+      c = this._floatCache = { key, below, above, groupable, up, tmp: c?.tmp || null, frame: -1, fid: -1 };
+    }
+    if (!this._comp) this._comp = createCanvas(w, hh);
+    if (this._comp.width !== w || this._comp.height !== hh) { this._comp.width = w; this._comp.height = hh; }
+    if (c.fid === f.id && c.frame === f.version && !this._compDirty) return this._comp;
+    const ctx = this._comp.getContext('2d');
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, w, hh);
+    ctx.drawImage(c.below, 0, 0);
+    const l = f.layer;
+    if (l.visible && l.opacity > 0) {
+      if (l.blend === 'source-over' && l.opacity === 1) {
+        ctx.drawImage(l.canvas, 0, 0);
+        Doc.drawFloat(ctx, f);
+      } else { // the layer and its float blend as one, like the layer will after set-down
+        if (!c.tmp) c.tmp = createCanvas(w, hh);
+        if (c.tmp.width !== w || c.tmp.height !== hh) { c.tmp.width = w; c.tmp.height = hh; }
+        const t = c.tmp.getContext('2d');
+        t.clearRect(0, 0, w, hh);
+        t.drawImage(l.canvas, 0, 0);
+        Doc.drawFloat(t, f);
+        ctx.globalAlpha = l.opacity;
+        ctx.globalCompositeOperation = l.blend;
+        ctx.drawImage(c.tmp, 0, 0);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+      }
+    }
+    if (c.groupable) ctx.drawImage(c.above, 0, 0);
+    else this.#drawStack(ctx, c.up);
+    c.fid = f.id; c.frame = f.version;
+    this._compDirty = false;
+    return this._comp;
+  }
+
   /** Canvas holding the visible layers blended together (browser only). Cached until something changes. */
   composite() {
+    if (this.float && this.layers.includes(this.float.layer)) return this.#compositeFloat();
     if (!this._comp) this._comp = createCanvas(this.width, this.height);
     if (this._comp.width !== this.width || this._comp.height !== this.height) {
       this._comp.width = this.width;
@@ -146,7 +267,14 @@ export class Doc extends Emitter {
       return { width: this.width, height: this.height, data: id.data };
     }
     const out = { width: this.width, height: this.height, data: new Uint8ClampedArray(this.width * this.height * 4) };
-    for (const l of this.layers) if (l.visible) paintImage(out, l.img, 0, 0, null, l.opacity);
+    for (const l of this.layers) {
+      if (!l.visible) continue;
+      if (this.float?.layer === l) { // tests / no DOM: resample the float the slow way
+        const tmp = cloneImage(l.img), r = resampleFloat(this.float.src, this.float.box, this.float.angle);
+        paintImage(tmp, r.img, Math.round(r.x), Math.round(r.y));
+        paintImage(out, tmp, 0, 0, null, l.opacity);
+      } else paintImage(out, l.img, 0, 0, null, l.opacity);
+    }
     return out;
   }
 

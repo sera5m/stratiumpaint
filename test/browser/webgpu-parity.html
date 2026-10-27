@@ -71,6 +71,39 @@ try {
   out.push(`dirty-rect upload pixel ${p.join(',')}`);
   if (p.join(',') !== '1,2,3,255') fails.push('dirty-rect upload did not land');
   // Present pass smoke test.
+  // Floating content (a move-tool drag): GPU float frame vs the Canvas 2D float composite, after
+  // several incremental frames (only the area the float covers is recomposited each frame).
+  {
+    const fd = new Doc(W, H);
+    fill(fd.layers[0], true);
+    const mid = fd.addLayer(); fill(mid, false);
+    const top = fd.addLayer(); fill(top, false); top.opacity = 0.7;
+    const src = { width: 20, height: 14, data: new Uint8ClampedArray(20 * 14 * 4) };
+    for (let i = 0; i < src.data.length; i += 4) { src.data[i] = rnd() * 256; src.data[i + 1] = rnd() * 256; src.data[i + 2] = rnd() * 256; src.data[i + 3] = 255; }
+    fd.setFloat({ layer: mid, src, box: { x: 3, y: 2, w: 20, h: 14 }, angle: 0 });
+    await comp.readComposite(fd);
+    for (const [x, y] of [[6, 4], [11, 9], [20, 12], [9, 7]]) { fd.updateFloat({ x, y, w: 20, h: 14 }); comp.composite(fd); }
+    const g = await comp.readComposite(fd);
+    const c2 = fd.composite().getContext('2d').getImageData(0, 0, W, H).data;
+    const dd = diff(g.data, c2);
+    out.push(`float after 5 incremental frames: gpu-vs-canvas2d ${dd}`);
+    if (dd > 6) fails.push(`float frame differs from Canvas 2D by ${dd}`);
+    // Turned and scaled: both sides filter, so compare the average difference.
+    fd.updateFloat({ x: 10.3, y: 6.7, w: 26, h: 18 }, 0.5);
+    const g2 = await comp.readComposite(fd);
+    const c3 = fd.composite().getContext('2d').getImageData(0, 0, W, H).data;
+    let sum = 0, n = 0;
+    for (let i = 0; i < g2.data.length; i += 4) { if (g2.data[i + 3] < 64) continue; for (let k = 0; k < 3; k++) { sum += Math.abs(g2.data[i + k] - c3[i + k]); n++; } }
+    const mean = sum / Math.max(1, n);
+    out.push(`float turned 0.5 rad + scaled: mean gpu-vs-canvas2d ${mean.toFixed(2)}`);
+    if (mean > 4) fails.push(`turned float differs from Canvas 2D on average by ${mean.toFixed(2)}`);
+    fd.clearFloat();
+    const g3 = await comp.readComposite(fd);
+    const c4 = fd.composite().getContext('2d').getImageData(0, 0, W, H).data;
+    const d4 = diff(g3.data, c4);
+    out.push(`after the float is cleared: gpu-vs-canvas2d ${d4}`);
+    if (d4 > 6) fails.push(`composite after clearing the float differs by ${d4}`);
+  }
   // What the present pass draws (into an offscreen texture of the canvas format; reading the
   // canvas texture itself loses the device under headless SwiftShader).
   async function shown(d, v) {

@@ -60,7 +60,7 @@ struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 
 /** One layer over the accumulator: dst is premultiplied (rgba16float), src is the straight-alpha layer. */
 export const COMPOSITE_WGSL = `${FULLSCREEN}
-struct Params { opacity: f32, mode: u32, _a: u32, _b: u32 };
+struct Params { opacity: f32, mode: u32, premul: u32, _b: u32 };
 @group(0) @binding(0) var dstTex: texture_2d<f32>;
 @group(0) @binding(1) var srcTex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> P: Params;
@@ -68,7 +68,10 @@ ${blendFunctions()}
 @fragment fn fs(in: VOut) -> @location(0) vec4f {
   let p = vec2i(in.pos.xy);
   let d = textureLoad(dstTex, p, 0);
-  let s = textureLoad(srcTex, p, 0);
+  var s = textureLoad(srcTex, p, 0);
+  if (P.premul == 1u) { // a pre-flattened group of layers (premultiplied)
+    if (s.a > 0.0) { s = vec4f(s.rgb / s.a, s.a); } else { s = vec4f(0.0); }
+  }
   let as_ = s.a * P.opacity;
   let ab = d.a;
   var cb = vec3f(0.0);
@@ -104,4 +107,52 @@ struct View { origin: vec2f, size: vec2f, docSize: vec2f, dpr: f32, taps: f32 };
   }
   c /= f32(n * n);
   return vec4f(c.rgb + checker * (1.0 - c.a), 1.0);
+}`;
+
+
+/** Clears the scissored part of a target (a loadOp clear would wipe all of it). */
+export const CLEAR_WGSL = `${FULLSCREEN}
+@fragment fn fs(in: VOut) -> @location(0) vec4f { return vec4f(0.0); }`;
+
+/**
+ * The float's layer with the float drawn into it, blended onto the layers below. The float is the
+ * lifted pixels as a texture, sampled through the inverse of its box transform with a
+ * premultiplied bilinear filter (exact at identity), so a drag only changes this matrix.
+ */
+export const FLOAT_WGSL = `${FULLSCREEN}
+struct FP { opacity: f32, mode: u32, _a: u32, _b: u32, m0: vec4f, m1: vec4f };
+@group(0) @binding(0) var dstTex: texture_2d<f32>;
+@group(0) @binding(1) var layerTex: texture_2d<f32>;
+@group(0) @binding(2) var floatTex: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> F: FP;
+${blendFunctions()}
+fn tap(i: vec2i, size: vec2i) -> vec4f {
+  if (i.x < 0 || i.y < 0 || i.x >= size.x || i.y >= size.y) { return vec4f(0.0); }
+  let c = textureLoad(floatTex, i, 0);
+  return vec4f(c.rgb * c.a, c.a);
+}
+fn floatAt(p: vec2f) -> vec4f {
+  let q = vec2f(F.m0.x * p.x + F.m0.z * p.y + F.m1.x, F.m0.y * p.x + F.m0.w * p.y + F.m1.y) - 0.5;
+  let size = vec2i(F.m1.zw);
+  let i0 = vec2i(floor(q));
+  let f = q - floor(q);
+  let a = mix(tap(i0, size), tap(i0 + vec2i(1, 0), size), f.x);
+  let b = mix(tap(i0 + vec2i(0, 1), size), tap(i0 + vec2i(1, 1), size), f.x);
+  return mix(a, b, f.y);
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+  let p = vec2i(in.pos.xy);
+  let d = textureLoad(dstTex, p, 0);
+  let base = textureLoad(layerTex, p, 0);
+  let fl = floatAt(in.pos.xy);
+  let comb = fl + vec4f(base.rgb * base.a, base.a) * (1.0 - fl.a); // float over the layer, premultiplied
+  var cs = vec3f(0.0);
+  if (comb.a > 0.0) { cs = comb.rgb / comb.a; }
+  let as_ = comb.a * F.opacity;
+  let ab = d.a;
+  var cb = vec3f(0.0);
+  if (ab > 0.0) { cb = d.rgb / ab; }
+  let bl = clamp(blend(F.mode, cb, cs), vec3f(0.0), vec3f(1.0));
+  let mixed = (1.0 - ab) * cs + ab * bl;
+  return vec4f(as_ * mixed + (1.0 - as_) * d.rgb, as_ + ab * (1.0 - as_));
 }`;

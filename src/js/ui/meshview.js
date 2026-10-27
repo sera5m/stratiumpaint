@@ -86,6 +86,12 @@ export class MeshView {
     new ResizeObserver(() => this.#resize()).observe(pane);
     ed.on('doc', () => { this.#attach(); requestAnimationFrame(() => this.#resize()); });
     ed.on('doc:render', () => { this._texDirty = true; this.#request(); });
+    // A floating move on the texture: refresh at most ~10 times a second so the model follows
+    // without paying a texture upload on every drag frame.
+    ed.on('doc:float', () => {
+      if (this._floatTimer) return;
+      this._floatTimer = setTimeout(() => { this._floatTimer = null; this._texDirty = true; this.#request(); }, 100);
+    });
     ed.on('model-texture', () => { this._texDirty = true; this.#request(); });
     ed.on('layout', () => requestAnimationFrame(() => this.#resize()));
     this.#bind();
@@ -372,11 +378,12 @@ export class MeshView {
     if (this._texDirty) {
       this._texDirty = false;
       const atlas = atlasOf(doc) || doc;
+      // Upload straight from the composite canvas: the browser copies it GPU-side, with no
+      // getImageData readback of the whole texture into JS first (that ran every stroke frame).
       const src = atlas.composite();
-      const pixels = src.getContext('2d').getImageData(0, 0, src.width, src.height);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pixels.width, pixels.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels.data);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
     }
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);

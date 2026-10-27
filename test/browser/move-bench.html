@@ -1,0 +1,132 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Per-frame cost of dragging / scaling a lifted selection on a big document, and of a paint
+     stroke, through the same calls the app makes: tool pointer events (several coalesced events
+     per frame, like a high-rate mouse), then one view render. Canvas 2D: doc.composite() drawn
+     into a view-sized canvas, then a 1-pixel read to wait for the GPU. WebGPU: the compositor's
+     present pass into an offscreen target, then onSubmittedWorkDone. Run: npm run bench:move
+     (?w=&h=&lift=&frames= to change the sizes). -->
+<pre id="out"></pre>
+<script type="module">
+import { Editor } from '../../src/js/ui/editor.js';
+import { Doc } from '../../src/js/doc/document.js';
+import { rectMask } from '../../src/js/core/mask.js';
+import { getGPU } from '../../src/js/gpu/device.js';
+import { GpuCompositor } from '../../src/js/gpu/compositor.js';
+
+const q = new URLSearchParams(location.search);
+const FRAMES = +q.get('frames') || 30, COALESCE = 4;
+// Main case: the user's ~720x720 images (a 300x300 lift and the whole image); large doc secondary.
+const CONFIGS = [[720, 720, 300, 100, 100, 'warm-up, discard'], [720, 720, 300, 100, 100], [720, 720, 720, 0, 0], [4000, 3000, 1500, 500, 500]];
+let W, H, L, LX, LY;
+const VW = 1600, VH = 1000;
+const out = [];
+const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+const stats = (a) => { const s = [...a].sort((x, y) => x - y); return `median ${s[s.length >> 1].toFixed(1)} ms, p90 ${s[Math.floor(s.length * 0.9)].toFixed(1)} ms`; };
+const ev = (x, y) => ({ x, y, sx: x, sy: y, button: 0, shift: false, ctrl: false, alt: false });
+
+function makeDoc() {
+  const doc = new Doc(W, H);
+  const fill = (layer, f) => { const d = layer.img.data; for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; f(d, i, x, y); } layer.touch(); };
+  fill(doc.layers[0], (d, i, x, y) => { d[i] = x & 255; d[i + 1] = y & 255; d[i + 2] = 128; d[i + 3] = 255; });
+  const mid = doc.addLayer();
+  fill(mid, (d, i, x, y) => { d[i] = 255; d[i + 1] = (x ^ y) & 255; d[i + 2] = 0; d[i + 3] = 200; });
+  const top = doc.addLayer();
+  fill(top, (d, i, x, y) => { d[i] = 0; d[i + 1] = 0; d[i + 2] = 255; d[i + 3] = ((x >> 6) + (y >> 6)) & 1 ? 60 : 0; });
+  doc.active = 1;
+  return doc;
+}
+
+async function run(label, render, counters = null) {
+  const ed = new Editor();
+  const doc = makeDoc();
+  ed.addDoc(doc);
+  doc.setSelection(rectMask(W, H, LX, LY, LX + L, LY + L));
+  ed.setTool('move-pixels');
+  await render(doc); // warm up: first composite / uploads
+  let t = performance.now();
+  const cx = LX + L / 2, cy = LY + L / 2;
+  ed.pointer('down', ev(cx, cy));
+  ed.pointer('move', ev(cx + 1, cy));
+  await render(doc);
+  const lift = performance.now() - t;
+  const drag = [];
+  const c0 = counters && { ...counters() };
+  let x = cx + 1;
+  for (let f = 0; f < FRAMES; f++) {
+    t = performance.now();
+    for (let k = 0; k < COALESCE; k++) ed.pointer('move', ev(++x, cy + (f % 7)));
+    await render(doc);
+    drag.push(performance.now() - t);
+  }
+  const c1 = counters && counters();
+  const dragWork = c0 ? `\n  during the drag: ${c1.uploads - c0.uploads} texture uploads, ${c1.fullRecomposites - c0.fullRecomposites} full recomposites, ${((c1.passes - c0.passes) / FRAMES).toFixed(1)} passes/frame` : '';
+  ed.pointer('up', ev(x, cy));
+  const scale = [];
+  const m = ed.tool.metrics(ed);
+  for (let f = 0; f < FRAMES; f++) {
+    t = performance.now();
+    ed.tool.setSize(ed, m.w + 8 * (f + 1), m.h + 6 * (f + 1));
+    await render(doc);
+    scale.push(performance.now() - t);
+  }
+  const rotate = [];
+  if (ed.tool.setAngle) {
+    for (let f = 0; f < FRAMES; f++) {
+      t = performance.now();
+      ed.tool.setAngle(ed, f * 3);
+      await render(doc);
+      rotate.push(performance.now() - t);
+    }
+  }
+  t = performance.now();
+  ed.commitPending(); // set down now (resample + history)
+  await render(doc);
+  const settle = performance.now() - t;
+  // A paint-like edit: a 64x64 change on the active layer per frame.
+  const stroke = [];
+  for (let f = 0; f < FRAMES; f++) {
+    t = performance.now();
+    const r = { x: (f * 20) % (W - 64), y: Math.floor(H / 2), w: 64, h: 64 };
+    const d = doc.layer.img.data;
+    for (let yy = r.y; yy < r.y + r.h; yy++) for (let xx = r.x; xx < r.x + r.w; xx++) d[(yy * W + xx) * 4 + 1] = 255;
+    doc.layer.touch(r);
+    await render(doc);
+    stroke.push(performance.now() - t);
+  }
+  log(`${label}\n  lift: ${lift.toFixed(1)} ms\n  drag (${COALESCE} events/frame): ${stats(drag)}\n  scale: ${stats(scale)}${rotate.length ? `\n  rotate: ${stats(rotate)}` : ''}\n  set-down: ${settle.toFixed(1)} ms\n  paint 64x64/frame: ${stats(stroke)}${dragWork}`);
+}
+
+try {
+  const gpu = await getGPU();
+  for (const cfg of CONFIGS) {
+  [W, H, L, LX, LY] = cfg;
+  log(`\n=== document ${W}x${H}, 3 layers, lifted ${L}x${L}, ${FRAMES} frames, view ${VW}x${VH} at fit zoom${cfg[5] ? ` (${cfg[5]})` : ''}`);
+  const view = document.createElement('canvas');
+  view.width = VW; view.height = VH;
+  const vctx = view.getContext('2d');
+  const z = Math.min(1, VW / W, VH / H);
+  await run('Canvas 2D', async (doc) => {
+    vctx.clearRect(0, 0, VW, VH);
+    vctx.imageSmoothingEnabled = true;
+    vctx.drawImage(doc.composite(), 0, 0, W * z, H * z);
+    vctx.getImageData(0, 0, 1, 1); // wait for the canvas work to finish
+  });
+  if (gpu) {
+    const c = document.createElement('canvas');
+    c.width = VW; c.height = VH;
+    const comp = new GpuCompositor(gpu, c);
+    const target = gpu.device.createTexture({ size: [VW, VH], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    await run('WebGPU (SwiftShader, software)', async (doc) => {
+      comp.renderView(doc, { ox: 0, oy: 0, zoom: z, width: VW, height: VH, dpr: 1 }, target);
+      await gpu.device.queue.onSubmittedWorkDone();
+    }, () => comp.stats);
+  } else log('WebGPU: no adapter');
+  }
+  document.title = 'PASS';
+} catch (err) {
+  log(`ERROR ${err.stack || err}`);
+  document.title = 'ERROR';
+}
+</script>

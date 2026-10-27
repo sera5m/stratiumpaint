@@ -155,13 +155,61 @@ Canvas 2D. The obvious costs are full CPU compositing through canvas mirrors (ev
 
 **Known limits of phase 1**
 
-* Recompositing is whole-document per change (one pass per visible layer); there is no tile or
-  scissor optimisation yet.
+* ~~Recompositing is whole-document per change~~: now dirty-rect, scissored (see below).
 * Zoomed-out minification uses up to 4×4 bilinear taps, not mipmaps.
 * Colour picker, export, flood fill and the 3D texture still use the Canvas 2D composite
   (`Doc#composite()` is built on demand when they ask).
 * After device loss the session stays on Canvas 2D; re-creating the device is a later task.
 * Not yet checked by eye on real GPU hardware or inside the Electron window.
+
+## Move / drag performance (landed, Oct 2026)
+
+**Why Move was slow.** Every pointer event (and Chrome sends several per frame) rebuilt the
+moved pixels on the CPU: a fresh crop, a per-pixel blend back into the layer, then
+`layer.touch()`. The touch pushed that rectangle into the layer canvas and recomposited
+every layer of the whole document; on WebGPU it also re-uploaded the rectangle and ran one
+full-document pass per layer. A mounted 3D model added a full `getImageData` + texture upload
+per frame. Lift also cloned the whole layer.
+
+**Now.** The lifted pixels are a *float* (`Doc#setFloat`): copied once at lift, the hole cut
+once, then each event only changes `{box, angle}` and asks for one rAF-coalesced redraw.
+No layer writes, history, readbacks or 3D uploads happen during the drag.
+
+* Canvas 2D: layers below and above the active one are cached as two canvases; a frame is
+  ~4 `drawImage` calls (below, layer, float with `setTransform`, above).
+* WebGPU: the stacks below/above are resident textures, rebuilt only when a layer under them
+  changes (and then only over the dirty rect, scissored). The float is one texture uploaded
+  once per lift and drawn through its transform matrix (premultiplied bilinear), scissored to
+  the union of last and current float bounds. Painting recomposites just the dirty rect.
+* Resample (scale + rotate in one pass) runs once at set-down / 0.5 s idle.
+
+`npm run bench:move` (headless Chrome, software only on the test box: no GPU, SwiftShader
+WebGPU; a warm-up config runs first and is discarded). Medians per frame:
+
+| 720×720, 3 layers           | before 2D | after 2D | before GPU | after GPU |
+|-----------------------------|----------:|---------:|-----------:|----------:|
+| 300×300 lift: drag          | 12.4 ms   | 0.9 ms   | 90.9 ms    | 15.1 ms   |
+| 300×300 lift: scale         | 7.0       | 1.3      | 89.2       | 23.7      |
+| 300×300 lift: rotate        | –         | 1.7      | –          | 40.0      |
+| 300×300 lift: set-down      | 27.8      | 24.4     | 178.5      | 89.5      |
+| full 720×720 lift: drag     | 33.1      | 1.0      | 129.9      | 45.1      |
+| paint 64×64 per frame       | 6.1       | 0.8      | 86.2       | 8.6       |
+| 4000×3000, 1500 lift: drag  | 177.3     | 25.7     | 1859.9     | 225.8     |
+
+The WebGPU column is SwiftShader (CPU emulation of a GPU), so absolute GPU numbers mean
+little; the drop is the point (no uploads and no full recomposites during the drag; the bench
+prints the counters). Real hardware should be far faster.
+
+**Hot-path encoding audit.** No PNG/dataURL/toBlob in history (raw crops), previews or the
+drag. Remaining encoders are deliberately debounced: the unfinished-work copy encodes each
+layer to PNG 8 s after the last edit (`ui/scratch.js`), and autosave writes ORA every 60 s while
+modified. The 3D texture now uploads straight from the composite canvas (no `getImageData`)
+and refreshes at most every 100 ms during a drag.
+
+**Still open:** lift on WebGPU is slower than before on SwiftShader (first float frame builds the
+below/above stacks); the present pass redraws the whole view each frame; brushes are CPU with a
+dirty-rect upload per stroke segment; shapes clone the layer at each shape start; the 3D view
+is still WebGL fed from the Canvas 2D composite.
 
 ## Reference
 

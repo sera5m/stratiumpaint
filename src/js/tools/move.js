@@ -7,23 +7,33 @@
 // goes through Editor#commitPending), or a right-click on the canvas the way the text tool works.
 // Escape (tool.cancel) reverts it to exactly how things were before you picked it up.
 //
-// Both tools also scale. The border of the box — corners and the whole of each edge, not only
-// the knobs — resizes it (Shift keeps the proportions). Width and height in the options bar do
-// the same. The scroll wheel scales from the centre while a selection is active.
+// Both tools move, scale and rotate. The border of the box (corners and the whole of each edge)
+// resizes it (Shift keeps the proportions); the round knob above the top edge turns it about its
+// centre (Shift snaps to 15°). Width, height and angle in the options bar do the same. The scroll
+// wheel scales from the centre while a selection is active.
 //
-// Scaling is visual only while you work: handles, wheel and setSize just change the box and the
-// overlay stretches the original lifted pixels into it with drawImage — no resizeImage per event.
-// The real resample happens once, when the float is set down (Enter / right-click) and it has been
-// idle for 0.5s since the last size change; meanwhile a thin border fades out. That resampled
-// result is what goes into history. A left-click outside the box, or anything that goes through
-// Editor#commitPending (tool switch, undo, menu commands), lands it immediately instead.
+// Performance model: lifting is the only pixel work before set-down. It cuts the hole in the layer
+// once and hands the lifted pixels to the document as a *float* (Doc#setFloat), which turns them
+// into a canvas (Canvas 2D) / texture (WebGPU) once. Every pointer event after that only changes
+// the float's box and angle (Doc#updateFloat): the view redraws on the next animation frame from
+// cached layer composites, with the float drawn under a transform. No pixel copies, layer
+// uploads, history entries or 3D re-uploads happen during a drag.
+//
+// The real resample happens once, from the original lifted pixels, combining scale and rotation
+// (core/xform.js resampleFloat), so repeated adjustments never stack blur. A plain move lands at
+// once; a scale or turn lands once it has been idle for 0.5s since the last change (a thin border
+// fades meanwhile). A left-click outside the box, or anything that goes through
+// Editor#commitPending (tool switch, undo, menu commands), lands it immediately. The landed result
+// is the single history step.
 import { cloneImage, cropImage, stampImage } from '../core/image.js';
 import { scaleMask, translateMask, maskBounds } from '../core/mask.js';
-import { resizeImage } from '../core/transform.js';
 import { rectUnion, rectIntersect } from '../core/util.js';
+import { DEG, normAngle, snapAngle, boxCorners, rotatedBounds, toBoxFrame, fromBoxFrame, resampleFloat, transformMask } from '../core/xform.js';
 import { targetRegion } from '../doc/ops.js';
 import { paintImage } from '../doc/raster.js';
 import { layerRect } from './common.js';
+
+const KNOB = 24; // screen px from the top edge to the rotate knob
 
 const HANDLE_CURSOR = {
   nw: 'nwse-resize', se: 'nwse-resize',
@@ -117,54 +127,99 @@ function scaledRect(id, box, px, py, shift, aspect) {
   };
 }
 
-function drawHandles(ctx, box, v, fade = 1) {
+
+/** Pointer event in the box's own (unturned) frame, so the axis-aligned hit tests keep working. */
+function frameEvent(e, box, angle) {
+  if (!angle || !box) return e;
+  const [x, y] = toBoxFrame(e.x, e.y, box, angle);
+  const z = e.zoom;
+  return z > 0 && e.ox != null ? { ...e, x, y, sx: e.ox + x * z, sy: e.oy + y * z } : { ...e, x, y };
+}
+
+/** Is the pointer on the rotate knob (screen space, above the top edge's middle)? */
+function hitKnob(e, box, angle) {
+  const z = e?.zoom;
+  if (!box || !(z > 0) || e.ox == null || e.sx == null) return false;
+  const l = frameEvent(e, box, angle);
+  const kx = e.ox + (box.x + box.w / 2) * z, ky = e.oy + box.y * z - KNOB;
+  return Math.hypot(l.sx - kx, l.sy - ky) <= 9;
+}
+
+const pointAngle = (e, box) => Math.atan2(e.y - (box.y + box.h / 2), e.x - (box.x + box.w / 2));
+
+/** What a press at `e` does to a box turned by `angle`: 'rotate', a scale handle id, 'inside' or null. */
+function hitTarget(e, box, angle) {
+  if (hitKnob(e, box, angle)) return 'rotate';
+  const l = frameEvent(e, box, angle);
+  const id = hitHandle(l, box);
+  if (id) return id;
+  return insideBox(l, box) ? 'inside' : null;
+}
+
+/** New (unturned) box while dragging handle `id` of a box turned by `angle`. The opposite side
+ *  stays put on screen, also when turned: the resize happens in the box's frame and the new
+ *  centre is mapped back out. */
+function scaledTurned(id, box, angle, e, aspect) {
+  if (!angle) return scaledRect(id, box, e.x, e.y, e.shift, aspect);
+  const [lx, ly] = toBoxFrame(e.x, e.y, box, angle);
+  const nb = scaledRect(id, box, lx, ly, e.shift, aspect);
+  const [cx, cy] = fromBoxFrame(nb.x + nb.w / 2, nb.y + nb.h / 2, box, angle);
+  return { x: cx - nb.w / 2, y: cy - nb.h / 2, w: nb.w, h: nb.h };
+}
+
+const turnCursor = 'grab';
+const cursorFor = (id) => (id === 'rotate' ? turnCursor : HANDLE_CURSOR[id] || 'move');
+
+function screenPoly(box, angle, v) {
+  const z = v.zoom || 1;
+  return boxCorners(box, angle).map(([x, y]) => [v.ox + x * z, v.oy + y * z]);
+}
+
+function drawHandles(ctx, box, v, angle = 0) {
   if (!box || !v) return;
   const z = v.zoom || 1;
-  const x = v.ox + box.x * z, y = v.oy + box.y * z, w = box.w * z, h = box.h * z;
+  const poly = screenPoly(box, angle, v);
   ctx.save();
-  ctx.globalAlpha = fade;
   ctx.strokeStyle = 'rgba(70, 130, 220, .95)';
   ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+  ctx.beginPath();
+  poly.forEach(([x, y], i) => (i ? ctx.lineTo(x + 0.5, y + 0.5) : ctx.moveTo(x + 0.5, y + 0.5)));
+  ctx.closePath();
+  ctx.stroke();
+  // Rotate knob: above the middle of the top edge, along the box's own "up".
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  const [tx, ty] = fromBoxFrame(box.x + box.w / 2, box.y, box, angle);
+  const sx = v.ox + tx * z, sy = v.oy + ty * z;
+  const kx = sx + sin * KNOB, ky = sy - cos * KNOB;
+  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(kx, ky); ctx.stroke();
   ctx.fillStyle = '#fff';
   ctx.strokeStyle = '#2a5ccc';
+  ctx.beginPath(); ctx.arc(kx, ky, 5.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
   for (const [, px, py] of handlePoints(box)) {
-    const hx = v.ox + px * z, hy = v.oy + py * z;
-    ctx.fillRect(hx - 5, hy - 5, 10, 10);
-    ctx.strokeRect(hx - 5.5, hy - 5.5, 11, 11);
+    const [hx0, hy0] = fromBoxFrame(px, py, box, angle);
+    const hx = v.ox + hx0 * z, hy = v.oy + hy0 * z;
+    ctx.save();
+    ctx.translate(hx, hy);
+    ctx.rotate(angle);
+    ctx.fillRect(-5, -5, 10, 10);
+    ctx.strokeRect(-5.5, -5.5, 11, 11);
+    ctx.restore();
   }
   ctx.restore();
 }
 
-/** Thin border shown while a set-down scale waits to be resampled; it fades out as it lands. */
-function drawSettleBorder(ctx, box, v, fade) {
+/** Thin border shown while a set-down scale/turn waits to be resampled; it fades out as it lands. */
+function drawSettleBorder(ctx, box, v, fade, angle = 0) {
   if (!box || !v || !(fade > 0)) return;
-  const z = v.zoom || 1;
-  const x = v.ox + box.x * z, y = v.oy + box.y * z, w = box.w * z, h = box.h * z;
+  const poly = screenPoly(box, angle, v);
   ctx.save();
   ctx.globalAlpha = fade;
   ctx.strokeStyle = 'rgba(70, 130, 220, .95)';
   ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
-  ctx.restore();
-}
-
-/** Fast visual preview of the lifted pixels stretched into the current box (no CPU resize). */
-function drawPreview(ctx, src, box, v) {
-  if (!src || !box || !v) return;
-  const z = v.zoom || 1;
-  const x = v.ox + box.x * z, y = v.oy + box.y * z, w = box.w * z, h = box.h * z;
-  // Build a temporary canvas from the ImageData once per src if needed
-  if (!src._preview) {
-    const c = document.createElement('canvas');
-    c.width = src.width; c.height = src.height;
-    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(src.data), src.width, src.height), 0, 0);
-    src._preview = c;
-  }
-  ctx.save();
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'medium';
-  ctx.drawImage(src._preview, x, y, w, h);
+  ctx.beginPath();
+  poly.forEach(([x, y], i) => (i ? ctx.lineTo(x + 0.5, y + 0.5) : ctx.moveTo(x + 0.5, y + 0.5)));
+  ctx.closePath();
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -177,9 +232,9 @@ function finiteSize(w, h) {
 
 function movePixels() {
   let S = null;
-  // A scaled float that has been set down waits here until the pointer has been idle for
-  // SETTLE_MS since the last size change; only then is it resampled and written to history.
-  // While it waits, S.pending is set, a thin border fades out and the stretched preview stays up.
+  // A scaled/turned float that has been set down waits here until it has been idle for SETTLE_MS
+  // since the last change; only then is it resampled and written to history. While it waits,
+  // S.pending is set and a thin border fades out.
   let fadeTimer = null;
   let fadeFrame = null;
   let fadeAlpha = 1;
@@ -195,31 +250,29 @@ function movePixels() {
     fadeAlpha = 1;
   };
 
+  const sized = (s) => s.cur.w !== s.r.w || s.cur.h !== s.r.h;
+  const changed = (s) => s.cur.x !== s.r.x || s.cur.y !== s.r.y || sized(s) || !!s.angle;
+
   const syncAnts = (ed) => {
     if (!S?.mask) { ed.marchOffset = null; return; }
-    const same = S.cur.w === S.r.w && S.cur.h === S.r.h;
-    ed.marchOffset = same
+    ed.marchOffset = !sized(S) && !S.angle
       ? { dx: S.cur.x - S.r.x, dy: S.cur.y - S.r.y }
-      : { from: S.r, to: S.cur };
+      : { from: S.r, to: S.cur, angle: S.angle };
   };
 
-  /** Move is stamped immediately. A size change only updates the box (the overlay draws a
-   *  stretched preview); resampling waits until set-down plus SETTLE_MS of idle. */
-  const renderAt = (s, nr) => {
+  /** Place the float. Only numbers change; the view redraws next frame. */
+  const renderAt = (s, nr, angle = s.angle) => {
+    const turned = !!angle;
     nr = {
-      x: Math.round(nr.x), y: Math.round(nr.y),
+      x: turned ? nr.x : Math.round(nr.x), y: turned ? nr.y : Math.round(nr.y),
       w: Math.max(1, Math.min(8192, Math.round(nr.w))),
       h: Math.max(1, Math.min(8192, Math.round(nr.h))),
     };
-    if (nr.x === s.cur.x && nr.y === s.cur.y && nr.w === s.cur.w && nr.h === s.cur.h) return;
-    if (nr.w !== s.cur.w || nr.h !== s.cur.h) s.scaledAt = now();
-    const sized = nr.w !== s.r.w || nr.h !== s.r.h;
-    const area = rectUnion(rectUnion(s.cur, nr), s.r);
-    stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
-    if (!sized) paintImage(s.layer.img, s.src, nr.x, nr.y);
-    s.layer.touch(area);
+    if (nr.x === s.cur.x && nr.y === s.cur.y && nr.w === s.cur.w && nr.h === s.cur.h && angle === s.angle) return;
+    if (nr.w !== s.cur.w || nr.h !== s.cur.h || angle !== s.angle) s.scaledAt = now();
     s.cur = nr;
-    s.total = rectUnion(s.total, area);
+    s.angle = angle;
+    s.doc.updateFloat(nr, angle);
   };
 
   const boxNow = (ed) => {
@@ -228,43 +281,35 @@ function movePixels() {
     return r && r.w > 0 && r.h > 0 ? r : null;
   };
 
-  /** Undo everything back to the pristine, pre-lift layer. Leaves S cleared. */
+  /** Put the layer back exactly as it was before the lift. Leaves S cleared. */
   const revert = (ed) => {
     stopFade();
     const s = S;
     S = null;
-    const area = rectIntersect(s.total, layerRect(s.layer)) || s.r;
-    stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
+    s.doc.clearFloat();
     stampImage(s.layer.img, s.before, s.r.x, s.r.y);
-    s.layer.touch(s.total);
+    s.layer.touch(s.r);
     if (ed) { ed.marchOffset = null; ed.requestOverlay(); }
   };
 
-  /** Resample the lifted pixels into the final box and paint them into the layer. */
-  const bake = (s) => {
-    const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
-    const img = sized ? resizeImage(s.src, s.cur.w, s.cur.h, 'smooth') : s.src;
-    const area = rectUnion({ x: s.r.x, y: s.r.y, w: s.r.w, h: s.r.h }, s.cur);
-    stampImage(s.layer.img, cropImage(s.base, area), area.x, area.y);
-    paintImage(s.layer.img, img, s.cur.x, s.cur.y);
-    s.layer.touch(area);
-    s.total = rectUnion(s.total, area);
-  };
-
-  /** Bake (if scaled) and write the float into the document as one undo step. Leaves S cleared. */
+  /** Resample once (scale + turn together, from the original pixels), paint it into the layer and
+   *  record one undo step. Leaves S cleared. */
   const finalize = (ed, s) => {
     stopFade();
     if (S === s) S = null;
-    const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
-    if (sized) bake(s);
+    const res = resampleFloat(s.src, s.cur, s.angle);
+    const dst = { x: Math.round(res.x), y: Math.round(res.y), w: res.img.width, h: res.img.height };
+    const total = rectIntersect(rectUnion(s.r, dst), layerRect(s.layer)) || rectIntersect(s.r, layerRect(s.layer));
+    const original = cropImage(s.layer.img, total); // the layer with the hole…
+    stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y); // …and the hole filled = before the lift
+    paintImage(s.layer.img, res.img, dst.x, dst.y);
+    s.doc.clearFloat();
+    s.layer.touch(total);
     ed.marchOffset = null;
     ed.requestOverlay();
-    const total = rectIntersect(s.total, layerRect(s.layer));
-    const original = cropImage(s.base, total);
-    stampImage(original, s.before, s.r.x - total.x, s.r.y - total.y);
-    const name = sized ? 'Scale Selected Pixels' : 'Move Selected Pixels';
-    ed.doc.transaction(name, () => {
-      ed.doc.commitRegion(s.layer, total, original, name);
+    const name = s.angle ? 'Rotate Selected Pixels' : sized(s) ? 'Scale Selected Pixels' : 'Move Selected Pixels';
+    s.doc.transaction(name, () => {
+      s.doc.commitRegion(s.layer, total, original, name);
       if (s.mask) ed.doc.setSelection(null, 'Deselect');
     });
   };
@@ -272,18 +317,17 @@ function movePixels() {
   /** Finish a set-down that is still waiting out its idle time, right now. */
   const flush = (ed) => { if (S?.pending) finalize(ed, S); };
 
-  /** Set the float down. A plain move lands at once. A scale lands once it has been idle for
-   *  SETTLE_MS since its last size change (with a fading border meanwhile), or at once when
+  /** Set the float down. A plain move lands at once. A scale or turn lands once it has been idle
+   *  for SETTLE_MS since its last change (with a fading border meanwhile), or at once when
    *  `immediate` (outside click, tool switch, undo, any command via Editor#commitPending). */
   const settle = (ed, { immediate = false } = {}) => {
     const s = S;
     if (!s) return;
     if (s.pending) { if (immediate) finalize(ed, s); return; }
-    const moved = s.cur.x !== s.r.x || s.cur.y !== s.r.y;
-    const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
-    if (!moved && !sized) { revert(ed); return; }
+    if (!changed(s)) { revert(ed); return; }
     s.dragging = null;
-    const wait = sized && !immediate ? Math.max(0, SETTLE_MS - (now() - (s.scaledAt ?? 0))) : 0;
+    const xformed = sized(s) || !!s.angle;
+    const wait = xformed && !immediate ? Math.max(0, SETTLE_MS - (now() - (s.scaledAt ?? 0))) : 0;
     if (wait <= 0 || !ed.doc) { finalize(ed, s); return; }
     s.pending = true;
     stopFade();
@@ -302,32 +346,49 @@ function movePixels() {
     ed.requestOverlay();
   };
 
+  /** The one pixel pass before set-down: cut the hole and hand the lifted pixels to the float. */
   const lift = (ed) => {
     const layer = ed.editableLayer();
     if (!layer) return false;
     const doc = ed.doc, r = targetRegion(doc);
     if (!r) return false;
+    const owner = ed.surface?.() || doc;
     const mask = doc.selection, w = doc.width;
     const before = cropImage(layer.img, r);
     const lifted = cloneImage(before);
-    const base = cloneImage(layer.img);
+    const hole = cloneImage(before);
     for (let y = 0; y < r.h; y++) {
       for (let x = 0; x < r.w; x++) {
         const m = mask ? mask.data[(r.y + y) * w + r.x + x] : 255;
-        if (m === 255) { base.data[((r.y + y) * w + r.x + x) * 4 + 3] = 0; continue; }
-        const li = (y * r.w + x) * 4, bi = ((r.y + y) * w + r.x + x) * 4;
+        const li = (y * r.w + x) * 4;
+        if (m === 255) { hole.data[li + 3] = 0; continue; }
         lifted.data[li + 3] = (lifted.data[li + 3] * m) / 255;
-        base.data[bi + 3] = (base.data[bi + 3] * (255 - m)) / 255;
+        hole.data[li + 3] = (hole.data[li + 3] * (255 - m)) / 255;
       }
     }
-    S = { layer, r, mask, before, src: lifted, base, cur: { x: r.x, y: r.y, w: r.w, h: r.h }, total: { x: r.x, y: r.y, w: r.w, h: r.h } };
+    stampImage(layer.img, hole, r.x, r.y);
+    const cur = { x: r.x, y: r.y, w: r.w, h: r.h };
+    owner.setFloat({ layer, src: lifted, box: cur, angle: 0 });
+    layer.touch(r); // the hole: uploaded once, not per frame
+    S = { doc: owner, layer, r, mask, before, src: lifted, cur, angle: 0 };
     return true;
+  };
+
+  const startDrag = (e, hit) => {
+    S.dragging = hit === 'rotate'
+      ? { kind: 'rotate', a0: S.angle, p0: pointAngle(e, S.cur), box: { ...S.cur } }
+      : hit && hit !== 'inside'
+        ? { kind: 'scale', id: hit, box: { ...S.cur }, angle: S.angle }
+        : { kind: 'move', x0: e.x, y0: e.y, box: { ...S.cur } };
   };
 
   const applyDrag = (e, ed) => {
     const d = S.dragging;
-    if (d.kind === 'scale') renderAt(S, scaledRect(d.id, d.box, e.x, e.y, e.shift, S.r.w / S.r.h));
-    else renderAt(S, { x: d.box.x + Math.round(e.x - d.x0), y: d.box.y + Math.round(e.y - d.y0), w: d.box.w, h: d.box.h });
+    if (d.kind === 'scale') renderAt(S, scaledTurned(d.id, d.box, d.angle, e, S.r.w / S.r.h));
+    else if (d.kind === 'rotate') {
+      const a = d.a0 + pointAngle(e, d.box) - d.p0;
+      renderAt(S, S.cur, e.shift ? snapAngle(a) : normAngle(a));
+    } else renderAt(S, { x: d.box.x + Math.round(e.x - d.x0), y: d.box.y + Math.round(e.y - d.y0), w: d.box.w, h: d.box.h });
     syncAnts(ed);
     ed.requestOverlay();
   };
@@ -335,21 +396,19 @@ function movePixels() {
   return {
     id: 'move-pixels', name: 'Move Selected Pixels', key: 'M', group: 'move', cursor: 'move', options: [],
     cursorAt(e, ed) {
-      if (S?.dragging?.kind === 'scale') return HANDLE_CURSOR[S.dragging.id] || 'move';
-      const id = hitHandle(e, boxNow(ed));
-      return id ? HANDLE_CURSOR[id] : 'move';
+      if (S?.dragging) return S.dragging.kind === 'move' ? 'move' : S.dragging.kind === 'rotate' ? 'grabbing' : HANDLE_CURSOR[S.dragging.id] || 'move';
+      const hit = hitTarget(e, boxNow(ed), S?.angle || 0);
+      return hit && hit !== 'inside' ? cursorFor(hit) : 'move';
     },
     overlay(ctx, ed, v) {
       const box = boxNow(ed);
-      const sized = S && (S.cur.w !== S.r.w || S.cur.h !== S.r.h);
-      if (sized && S.src && box) drawPreview(ctx, S.src, box, v);
-      if (S?.pending) drawSettleBorder(ctx, box, v, fadeAlpha);
-      else drawHandles(ctx, box, v);
+      if (S?.pending) drawSettleBorder(ctx, box, v, fadeAlpha, S.angle);
+      else drawHandles(ctx, box, v, S?.angle || 0);
     },
-    /** Live width and height for the options bar. */
+    /** Live width, height and angle (degrees) for the options bar. */
     metrics(ed) {
       const b = boxNow(ed);
-      return b ? { w: b.w, h: b.h } : null;
+      return b ? { w: b.w, h: b.h, angle: Math.round(((S?.angle || 0) / DEG) * 10) / 10 } : null;
     },
     /** Scale from the top-left of the current box. Floats until Enter / right-click / outside click. */
     setSize(ed, w, h) {
@@ -360,6 +419,18 @@ function movePixels() {
       if (!S && size.w === box.w && size.h === box.h) return false;
       if (!S && !lift(ed)) return false;
       renderAt(S, { x: S.cur.x, y: S.cur.y, w: size.w, h: size.h });
+      syncAnts(ed);
+      ed.requestOverlay();
+      return true;
+    },
+    /** Turn about the box centre, in degrees. */
+    setAngle(ed, deg) {
+      if (!Number.isFinite(+deg)) return false;
+      if (S?.pending) return false;
+      const a = normAngle(+deg * DEG);
+      if (!S && !a) return false;
+      if (!S && (!boxNow(ed) || !lift(ed))) return false;
+      renderAt(S, S.cur, a);
       syncAnts(ed);
       ed.requestOverlay();
       return true;
@@ -376,7 +447,7 @@ function movePixels() {
       const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
       const w = Math.max(1, Math.min(8192, Math.round(box.w * factor)));
       const h = Math.max(1, Math.min(8192, Math.round(box.h * factor)));
-      renderAt(S, { x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h });
+      renderAt(S, { x: S.angle ? cx - w / 2 : Math.round(cx - w / 2), y: S.angle ? cy - h / 2 : Math.round(cy - h / 2), w, h });
       syncAnts(ed);
       ed.requestOverlay();
       return true;
@@ -386,23 +457,17 @@ function movePixels() {
       if (S?.pending) { flush(ed); return; }
       if (S) {
         if (e.button === 2) { settle(ed); return; }
+        const hit = hitTarget(e, S.cur, S.angle);
         // Left-click outside the box sets it down straight away (no idle wait).
-        if (e.button === 0 && !insideBox(e, S.cur) && !hitHandle(e, S.cur)) {
-          settle(ed, { immediate: true });
-          return;
-        }
-        const handle = hitHandle(e, S.cur);
-        S.dragging = handle
-          ? { kind: 'scale', id: handle, box: { ...S.cur } }
-          : { kind: 'move', x0: e.x, y0: e.y, box: { ...S.cur } };
+        if (e.button === 0 && !hit) { settle(ed, { immediate: true }); return; }
+        startDrag(e, hit);
         return;
       }
       if (e.button === 2) return;
+      const pre = boxNow(ed);
+      const hit = pre ? hitTarget(e, pre, 0) : null;
       if (!lift(ed)) return;
-      const handle = hitHandle(e, S.cur);
-      S.dragging = handle
-        ? { kind: 'scale', id: handle, box: { ...S.cur } }
-        : { kind: 'move', x0: e.x, y0: e.y, box: { ...S.cur } };
+      startDrag(e, hit);
     },
     move(e, ed) {
       if (!S?.dragging) return;
@@ -414,7 +479,7 @@ function movePixels() {
       S.dragging = null;
       // Stay floating — parked here until Enter/right-click/outside-click sets it down or Escape cancels it.
     },
-    /** Enter sets down (a scale waits out its idle time); `immediate` from Editor#commitPending lands it now. */
+    /** Enter sets down (a scale/turn waits out its idle time); `immediate` from Editor#commitPending lands it now. */
     deactivate(ed, opts) { if (S) settle(ed, opts); },
     /** Escape reverts a float. Once it has been set down it is no longer floating, so it lands instead. */
     cancel(ed) { if (S?.pending) flush(ed); else if (S) revert(ed); },
@@ -433,10 +498,10 @@ function moveSelection() {
 
   const sync = (ed) => {
     if (!S) { ed.marchOffset = null; return; }
-    const same = S.cur.w === S.r.w && S.cur.h === S.r.h;
+    const same = S.cur.w === S.r.w && S.cur.h === S.r.h && !S.angle;
     ed.marchOffset = same
       ? { dx: S.cur.x - S.r.x, dy: S.cur.y - S.r.y }
-      : { from: S.r, to: S.cur };
+      : { from: S.r, to: S.cur, angle: S.angle };
   };
 
   const begin = (ed) => {
@@ -444,13 +509,14 @@ function moveSelection() {
     const mask = ed.doc?.selection;
     const r = mask && maskBounds(mask);
     if (!r) return false;
-    S = { mask, r, cur: { x: r.x, y: r.y, w: r.w, h: r.h } };
+    S = { mask, r, cur: { x: r.x, y: r.y, w: r.w, h: r.h }, angle: 0 };
     return true;
   };
 
-  const place = (ed, nr) => {
+  const place = (ed, nr, angle = S.angle) => {
     const size = finiteSize(nr.w, nr.h);
-    S.cur = { x: Math.round(nr.x), y: Math.round(nr.y), w: size.w, h: size.h };
+    S.cur = angle ? { x: nr.x, y: nr.y, w: size.w, h: size.h } : { x: Math.round(nr.x), y: Math.round(nr.y), w: size.w, h: size.h };
+    S.angle = angle;
     sync(ed);
     ed.requestOverlay();
   };
@@ -462,34 +528,51 @@ function moveSelection() {
     ed.requestOverlay();
     const moved = s.cur.x !== s.r.x || s.cur.y !== s.r.y;
     const sized = s.cur.w !== s.r.w || s.cur.h !== s.r.h;
-    if (!moved && !sized) return;
-    const next = sized ? scaleMask(s.mask, s.r, s.cur) : translateMask(s.mask, s.cur.x - s.r.x, s.cur.y - s.r.y);
-    ed.doc.setSelection(next, sized ? 'Scale Selection' : 'Move Selection');
+    if (!moved && !sized && !s.angle) return;
+    const next = s.angle ? transformMask(s.mask, s.r, s.cur, s.angle)
+      : sized ? scaleMask(s.mask, s.r, s.cur) : translateMask(s.mask, s.cur.x - s.r.x, s.cur.y - s.r.y);
+    ed.doc.setSelection(next, s.angle ? 'Rotate Selection' : sized ? 'Scale Selection' : 'Move Selection');
   };
   const revert = (ed) => { S = null; ed.marchOffset = null; ed.requestOverlay(); };
 
+  const startDrag = (e, hit) => {
+    S.dragging = hit === 'rotate'
+      ? { kind: 'rotate', a0: S.angle, p0: pointAngle(e, S.cur), box: { ...S.cur } }
+      : hit && hit !== 'inside'
+        ? { kind: 'scale', id: hit, box: { ...S.cur }, angle: S.angle }
+        : { kind: 'move', x0: e.x, y0: e.y, box: { ...S.cur } };
+  };
+
   const applyDrag = (e, ed) => {
     const d = S.dragging;
-    if (d.kind === 'scale') place(ed, scaledRect(d.id, d.box, e.x, e.y, e.shift, S.r.w / S.r.h));
-    else place(ed, { x: d.box.x + Math.round(e.x - d.x0), y: d.box.y + Math.round(e.y - d.y0), w: d.box.w, h: d.box.h });
+    if (d.kind === 'scale') place(ed, scaledTurned(d.id, d.box, d.angle, e, S.r.w / S.r.h));
+    else if (d.kind === 'rotate') {
+      const a = d.a0 + pointAngle(e, d.box) - d.p0;
+      place(ed, S.cur, e.shift ? snapAngle(a) : normAngle(a));
+    } else place(ed, { x: d.box.x + Math.round(e.x - d.x0), y: d.box.y + Math.round(e.y - d.y0), w: d.box.w, h: d.box.h });
   };
 
   return {
     id: 'move-selection', name: 'Move Selection', key: 'M', group: 'move', cursor: 'move', options: [],
     cursorAt(e, ed) {
-      if (S?.dragging?.kind === 'scale') return HANDLE_CURSOR[S.dragging.id] || 'move';
-      const id = hitHandle(e, boxNow(ed));
-      return id ? HANDLE_CURSOR[id] : 'move';
+      if (S?.dragging) return S.dragging.kind === 'move' ? 'move' : S.dragging.kind === 'rotate' ? 'grabbing' : HANDLE_CURSOR[S.dragging.id] || 'move';
+      const hit = hitTarget(e, boxNow(ed), S?.angle || 0);
+      return hit && hit !== 'inside' ? cursorFor(hit) : 'move';
     },
-    overlay(ctx, ed, v) { drawHandles(ctx, boxNow(ed), v); },
+    overlay(ctx, ed, v) { drawHandles(ctx, boxNow(ed), v, S?.angle || 0); },
     metrics(ed) {
       const b = boxNow(ed);
-      return b ? { w: b.w, h: b.h } : null;
+      return b ? { w: b.w, h: b.h, angle: Math.round(((S?.angle || 0) / DEG) * 10) / 10 } : null;
     },
     setSize(ed, w, h) {
       if (!begin(ed)) return false;
       const size = finiteSize(w, h);
       place(ed, { x: S.cur.x, y: S.cur.y, w: size.w, h: size.h });
+      return true;
+    },
+    setAngle(ed, deg) {
+      if (!Number.isFinite(+deg) || !begin(ed)) return false;
+      place(ed, S.cur, normAngle(+deg * DEG));
       return true;
     },
     wheel(e, ed) {
@@ -501,27 +584,22 @@ function moveSelection() {
       const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
       const w = Math.max(1, Math.min(8192, Math.round(box.w * factor)));
       const h = Math.max(1, Math.min(8192, Math.round(box.h * factor)));
-      place(ed, { x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h });
+      place(ed, { x: cx - w / 2, y: cy - h / 2, w, h });
       return true;
     },
     down(e, ed) {
       if (S) {
         if (e.button === 2) { settle(ed); return; }
-        if (e.button === 0 && !insideBox(e, S.cur) && !hitHandle(e, S.cur)) {
-          settle(ed);
-          return;
-        }
-        const handle = hitHandle(e, S.cur);
-        S.dragging = handle
-          ? { kind: 'scale', id: handle, box: { ...S.cur } }
-          : { kind: 'move', x0: e.x, y0: e.y, box: { ...S.cur } };
+        const hit = hitTarget(e, S.cur, S.angle);
+        if (e.button === 0 && !hit) { settle(ed); return; }
+        startDrag(e, hit);
         return;
       }
-      if (e.button === 2 || !begin(ed)) return;
-      const handle = hitHandle(e, S.cur);
-      S.dragging = handle
-        ? { kind: 'scale', id: handle, box: { ...S.cur } }
-        : { kind: 'move', x0: e.x, y0: e.y, box: { ...S.cur } };
+      if (e.button === 2) return;
+      const pre = boxNow(ed);
+      const hit = pre ? hitTarget(e, pre, 0) : null;
+      if (!begin(ed)) return;
+      startDrag(e, hit);
     },
     move(e, ed) {
       if (!S?.dragging) return;

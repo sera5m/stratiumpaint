@@ -21,7 +21,7 @@ export const DEFAULT_OPTS = {
   wholeImage: false, // fill/erase/adjustments/effects ignore the selection and apply everywhere
 };
 
-const DOC_EVENTS = ['render', 'layers', 'selection', 'size', 'history', 'meta'];
+const DOC_EVENTS = ['render', 'layers', 'selection', 'size', 'history', 'meta', 'float'];
 
 export class Editor extends Emitter {
   constructor({ tools = createTools() } = {}) {

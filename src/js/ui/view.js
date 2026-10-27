@@ -55,6 +55,7 @@ export class View {
 
     ed.on('doc', (doc) => this.attach(doc));
     ed.on('doc:render', () => this.requestRender());
+    ed.on('doc:float', () => this.requestRender()); // a drag: redraw only, coalesced to one frame
     ed.on('doc:size', () => { const s = ed.doc?.viewState; if (s) s.fitted = true; this.fit(); });
     ed.on('doc:selection', () => this.requestOverlay());
     ed.on('overlay', () => this.requestOverlay());
@@ -350,11 +351,14 @@ export class View {
   #paintAnts(c, mask) {
     const segs = outlineFor(mask), z = this.zoom, off = this.ed.marchOffset ?? { dx: 0, dy: 0 };
     if (!segs.length) return;
+    const cos = Math.cos(off.angle || 0), sin = Math.sin(off.angle || 0);
+    const tcx = off.to ? off.to.x + off.to.w / 2 : 0, tcy = off.to ? off.to.y + off.to.h / 2 : 0;
     const map = off.from && off.to && off.from.w && off.from.h
-      ? (x, y) => [
-        off.to.x + ((x - off.from.x) * off.to.w) / off.from.w,
-        off.to.y + ((y - off.from.y) * off.to.h) / off.from.h,
-      ]
+      ? (x, y) => { // scale into the new box, then turn about its centre (same as the float)
+        const dx = off.to.x + ((x - off.from.x) * off.to.w) / off.from.w - tcx;
+        const dy = off.to.y + ((y - off.from.y) * off.to.h) / off.from.h - tcy;
+        return [tcx + dx * cos - dy * sin, tcy + dx * sin + dy * cos];
+      }
       : (x, y) => [x + (off.dx || 0), y + (off.dy || 0)];
     c.beginPath();
     for (let i = 0; i < segs.length; i += 4) {

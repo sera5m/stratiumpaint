@@ -1,5 +1,6 @@
-// Runs test/browser/webgpu-parity.html in headless Chrome with SwiftShader WebGPU.
-// Usage: npm run test:gpu   (CHROME=/path/to/chrome to pick a browser)
+// Runs a page from test/browser/ in headless Chrome with SwiftShader WebGPU and prints its report.
+// Usage: npm run test:gpu  |  npm run bench:move   (CHROME=/path/to/chrome to pick a browser)
+// The page sets document.title to PASS / FAIL / ERROR when done and writes its report into #out.
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -12,6 +13,7 @@ const chrome = process.env.CHROME || ['google-chrome', 'chromium', 'chromium-bro
   .find((c) => spawnSync('which', [c]).status === 0);
 if (!chrome) { console.log('SKIP: no Chrome/Chromium found (set CHROME=...)'); process.exit(0); }
 
+const PAGE = process.argv[2] || 'webgpu-parity.html';
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css' };
 const server = http.createServer((req, res) => {
   const file = path.join(root, decodeURIComponent(new URL(req.url, 'http://x').pathname));
@@ -20,7 +22,7 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 server.listen(0, '127.0.0.1', async () => {
-  const url = `http://127.0.0.1:${server.address().port}/test/browser/webgpu-parity.html`;
+  const url = `http://127.0.0.1:${server.address().port}/test/browser/${PAGE}`;
   const port = 9300 + Math.floor(Math.random() * 500);
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'stratum-gpu-'));
   const args = ['--headless=new', '--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan',
@@ -52,7 +54,7 @@ server.listen(0, '127.0.0.1', async () => {
     ws.addEventListener('message', on);
     ws.send(JSON.stringify({ id: my, method: 'Runtime.evaluate', params: { expression, returnByValue: true } }));
   });
-  for (let i = 0; i < 240; i++) {
+  for (let i = 0; i < 1200; i++) {
     const title = await evaluate('document.title');
     if (title && title !== 'running') {
       const text = await evaluate("document.getElementById('out').textContent");
