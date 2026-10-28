@@ -1,0 +1,127 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Run with `npm run test:gpu` (needs Chrome). Projection painting (3D shape mode "Projection"):
+     the WebGPU path (gpu/projection.js) against the CPU reference (core/projection.js) on several
+     scenes, both projector kinds, antialiased and hard shapes, hidden and moved objects. Texels may
+     differ only on triangle edges (GPU top-left fill rule vs the CPU's inclusive edges) and where an
+     occluded face meets its occluder exactly (f32 vs f64 depth); dilation can carry such an edge
+     texel into its gutter neighbours. Tolerance: <1% texels off in alpha, mean |Δalpha| < 1,
+     <0.2% texels off in colour. -->
+<pre id="out"></pre>
+<script type="module">
+import { projectPaint, viewProjector, axisProjector } from '../../src/js/core/projection.js';
+import { gpuProjectPaint } from '../../src/js/gpu/projection.js';
+import { getGPU } from '../../src/js/gpu/device.js';
+
+const out = [];
+const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+
+function meshOf(quads) {
+  const pos = [], idx = [], uvs = [], groups = [];
+  for (const q of quads) {
+    const start = idx.length / 3, base = pos.length / 3;
+    for (const p of q.corners) pos.push(...p);
+    const [u0, v0, u1, v1] = q.uv;
+    const cuv = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+    for (const [a, b, c] of [[0, 1, 2], [0, 2, 3]]) { idx.push(base + a, base + b, base + c); uvs.push(...cuv[a], ...cuv[b], ...cuv[c]); }
+    if (q.group === undefined || !groups[q.group]) groups[q.group ?? groups.length] = { name: `g${groups.length}`, start, count: 0 };
+    groups[q.group ?? groups.length - 1].count += 2;
+  }
+  return { positions: new Float32Array(pos), indices: new Uint32Array(idx), uvs: new Float32Array(uvs), groups };
+}
+const hquad = (y, x0, x1, z0, z1, uv, group) => ({ corners: [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], uv, group });
+/** Axis box with each side its own UV cell of a 4×2 grid starting at cell `c0`. */
+function box(cx, cy, cz, s, c0, group) {
+  const [x0, x1, y0, y1, z0, z1] = [cx - s, cx + s, cy - s, cy + s, cz - s, cz + s];
+  const cell = (i) => { const k = c0 + i, u = (k % 4) / 4, v = Math.floor(k / 4) / 4; return [u + 0.005, v + 0.005, u + 0.245, v + 0.245]; };
+  return [
+    { corners: [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], uv: cell(0), group }, // top
+    { corners: [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], uv: cell(1), group }, // +z
+    { corners: [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], uv: cell(2), group }, // -z
+    { corners: [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], uv: cell(3), group }, // +x
+    { corners: [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], uv: cell(4), group }, // -x
+    { corners: [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], uv: cell(5), group }, // bottom
+  ];
+}
+function shapeImage(x, y, w, h, aa) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = 'rgb(220,40,90)';
+  g.beginPath(); g.ellipse(w / 2, h / 2, w / 2 - 2, h / 2 - 2, 0.3, 0, Math.PI * 2); g.fill();
+  g.fillStyle = 'rgba(30,200,120,0.6)'; g.fillRect(w * 0.2, h * 0.4, w * 0.6, h * 0.15);
+  const d = g.getImageData(0, 0, w, h).data;
+  if (!aa) for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 128 ? 255 : 0;
+  return { x, y, w, h, data: new Uint8ClampedArray(d) };
+}
+function perspective(fovy, aspect, near, far) { const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far); return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0]; }
+function lookAt(eye, t, up) {
+  const sub = (a, b) => a.map((v, i) => v - b[i]), nrm = (a) => { const l = Math.hypot(...a); return a.map((v) => v / l); };
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]], dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const z = nrm(sub(eye, t)), x = nrm(cross(up, z)), y = cross(z, x);
+  return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
+}
+function mul(a, b) { const o = new Array(16).fill(0); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k]; return o; }
+const viewP = (eye, W, H) => viewProjector(mul(perspective(0.7, W / H, 0.01, 40), lookAt(eye, [0, 0, 0], [0, 1, 0])), W, H, eye);
+
+/** Paint images to full-atlas alpha/rgb arrays and compare. */
+function compare(a, b, AW, AH) {
+  const full = (p) => { const o = new Uint8ClampedArray(AW * AH * 4); if (p) for (let y = 0; y < p.h; y++) o.set(p.data.subarray(y * p.w * 4, (y + 1) * p.w * 4), ((p.y + y) * AW + p.x) * 4); return o; };
+  const A = full(a), B = full(b);
+  let painted = 0, off = 0, sum = 0, maxCol = 0, colOff = 0;
+  for (let i = 0; i < AW * AH; i++) {
+    const da = Math.abs(A[i * 4 + 3] - B[i * 4 + 3]);
+    if (A[i * 4 + 3] || B[i * 4 + 3]) painted++;
+    sum += da;
+    if (da > 24) off++;
+    if (A[i * 4 + 3] > 128 && B[i * 4 + 3] > 128) for (let k = 0; k < 3; k++) {
+      const dc = Math.abs(A[i * 4 + k] - B[i * 4 + k]);
+      if (dc > 6 && k === 0) colOff++;
+      maxCol = Math.max(maxCol, dc);
+    }
+  }
+  return { painted, off, colOff, mean: sum / Math.max(1, painted), maxCol };
+}
+
+let fails = [];
+try {
+  const gpu = await getGPU();
+  if (!gpu) throw new Error('no WebGPU device');
+  const AW = 512, AH = 512;
+  const stacked = meshOf([hquad(1, -1, 1, -1, 1, [0, 0, 0.5, 0.5], 0), hquad(0, -1.5, 1.5, -1.5, 1.5, [0.5, 0.5, 1, 1], 1)]);
+  const scene = meshOf([...box(-0.6, 0.3, 0, 0.45, 0, 0), ...box(0.7, 0, 0.3, 0.4, 6, 1), hquad(-0.5, -2, 2, -2, 2, [0.5, 0.75, 1, 1], 2)]);
+  const cases = [
+    { name: 'stacked planes, Down, aa', mount: stacked, P: axisProjector('down', [-2, 5, -2], 0.01, 400, 400), shape: shapeImage(60, 60, 280, 280, true) },
+    { name: 'stacked planes, View, hard', mount: stacked, P: viewP([0.4, 4, 2], 640, 480), shape: shapeImage(150, 100, 340, 280, false) },
+    { name: 'two boxes + floor, View, aa', mount: scene, P: viewP([2.2, 2.4, 3], 800, 600), shape: shapeImage(180, 120, 460, 360, true) },
+    { name: 'two boxes + floor, Front, aa', mount: scene, P: axisProjector('front', [-2, 2, 5], 0.008, 500, 500), shape: shapeImage(40, 80, 420, 330, true) },
+    { name: 'box hidden, Down', mount: scene, P: axisProjector('down', [-2, 5, -2], 0.01, 400, 400), shape: shapeImage(20, 60, 360, 280, true), hidden: [true] },
+    { name: 'box moved, View, opacity 0.6, maxAngle 60', mount: scene, P: viewP([-1.5, 2.8, 2.6], 700, 500), shape: shapeImage(100, 60, 500, 380, true), offsets: [[0.2, 0.5, -0.3]], opacity: 0.6, maxAngle: 60 },
+  ];
+  for (const c of cases) {
+    const opts = { mount: c.mount, projector: c.P, shape: c.shape, atlasW: AW, atlasH: AH, hidden: c.hidden || [], offsets: c.offsets || [], opacity: c.opacity ?? 1, aa: true, maxAngle: c.maxAngle ?? 80 };
+    const t0 = performance.now(); const cpu = projectPaint(opts); const t1 = performance.now();
+    const gp = await gpuProjectPaint(gpu.device, opts); const t2 = performance.now();
+    const r = compare(cpu, gp, AW, AH);
+    const frac = r.off / Math.max(1, r.painted);
+    log(`${c.name.padEnd(44)} painted ${String(r.painted).padStart(6)}  off>24: ${r.off} (${(frac * 100).toFixed(2)}%)  mean|Δa| ${r.mean.toFixed(2)}  max|Δrgb| ${r.maxCol} (texels >6: ${r.colOff})  cpu ${(t1 - t0).toFixed(1)} ms  gpu ${(t2 - t1).toFixed(1)} ms`);
+    if (!r.painted) fails.push(`${c.name}: nothing painted`);
+    if (frac > 0.01 || r.mean > 1 || r.colOff / Math.max(1, r.painted) > 0.002) fails.push(`${c.name}: GPU and CPU differ beyond tolerance`);
+    if (c.mount === stacked && gp) { // occlusion on the GPU: nothing under the top plane
+      let bad = 0;
+      for (let y = 0; y < gp.h; y++) for (let x = 0; x < gp.w; x++) {
+        const u = (gp.x + x) / AW, v = (gp.y + y) / AH;
+        // bottom plane texels whose world x/z lies inside the top plane ([-1,1]² → u,v in [0.5+1/6, 1-1/6])
+        if (u > 0.5 + 1 / 6 + 0.01 && u < 1 - 1 / 6 - 0.01 && v > 0.5 + 1 / 6 + 0.01 && v < 1 - 1 / 6 - 0.01 && gp.data[(y * gp.w + x) * 4 + 3]) bad++;
+      }
+      log(`  occluded texels painted on the GPU: ${bad}`);
+      if (bad && c.P.kind === 'axis') fails.push(`${c.name}: GPU painted through the top plane (${bad})`);
+    }
+  }
+  document.title = fails.length ? 'FAIL' : 'PASS';
+  log(fails.length ? fails.join('\n') : 'projection GPU vs CPU: PASS');
+} catch (err) {
+  log('ERROR ' + (err?.stack || err));
+  document.title = 'ERROR';
+}
+</script>

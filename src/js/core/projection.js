@@ -45,6 +45,18 @@ export function axisProjector(name, origin, scale, RW, RH) {
   };
 }
 
+/**
+ * Column-major 4×4 (GL / WGSL) taking a world point to decal coordinates of image rect `box`:
+ * (u, v) = xy / w in 0..1 over the box, w > 0 in front of the projector. For the drag preview.
+ */
+export function decalMatrix(P, box) {
+  const A = P.rx.map((v, i) => (v - box.x * P.rw[i]) / box.w);
+  const B = P.ry.map((v, i) => (v - box.y * P.rw[i]) / box.h);
+  const m = new Float32Array(16);
+  for (let c = 0; c < 4; c++) { m[c * 4] = A[c]; m[c * 4 + 1] = B[c]; m[c * 4 + 2] = 0; m[c * 4 + 3] = P.rw[c]; }
+  return m;
+}
+
 /** World point → [px, py, depth, w] (w <= 0: behind the projector). */
 export function project(P, x, y, z, out = [0, 0, 0, 0]) {
   const { rx, ry, rd, rw } = P;
@@ -143,16 +155,14 @@ function sampleShape(S, px, py, aa, out) {
 }
 
 /**
- * The paint a projected shape leaves on the texture.
- * shape: { x, y, w, h, data } straight-alpha RGBA on the projector's image plane (pixels).
- * Returns null, or { x, y, w, h, data } straight-alpha RGBA in atlas pixels (alpha includes
- * opacity, facing fade and antialiasing), ready to blend onto the layer.
+ * Pass 1 of a projection (shared by the CPU and WebGPU paths): the faces that can receive paint
+ * (visible, in front of the projector, over the shape) with their UV corners, normal and depth
+ * bias, the atlas box they cover (grown by `dilate`) and the depth-map rect R. Null if none.
  */
-export function projectPaint({ mount, projector: P, shape: S, atlasW: W, atlasH: H, opacity = 1, aa = true,
-  hidden = [], offsets = [], maxAngle = 80, fade = 8, dilate = 2, depth = null }) {
+export function projectionPlan({ mount, projector: P, shape: S, atlasW: W, atlasH: H,
+  hidden = [], offsets = [], maxAngle = 80, fade = 8, dilate = 2 }) {
   if (!mount?.uvs || !S?.w || !S?.h) return null;
   const R = { x: S.x - 2, y: S.y - 2, w: S.w + 4, h: S.h + 4 };
-  const D = depth || depthMap(mount, P, R, { hidden, offsets });
   const fg = faceGroups(mount), n = mount.indices.length / 3, uv = mount.uvs;
   const cosMax = maxAngle >= 90 ? -1 : Math.cos((maxAngle * Math.PI) / 180);
   const cosFull = maxAngle >= 90 ? -1 : Math.cos((Math.max(0, maxAngle - fade) * Math.PI) / 180);
@@ -187,8 +197,25 @@ export function projectPaint({ mount, projector: P, shape: S, atlasW: W, atlasH:
   }
   if (!cand.length) return null;
   bx0 = Math.max(0, bx0 - dilate); by0 = Math.max(0, by0 - dilate); bx1 = Math.min(W - 1, bx1 + dilate); by1 = Math.min(H - 1, by1 + dilate);
-  const BW = bx1 - bx0 + 1, BH = by1 - by0 + 1;
-  const A = new Float32Array(BW * BH), C = new Uint8ClampedArray(BW * BH * 3);
+  const box = { x: bx0, y: by0, w: bx1 - bx0 + 1, h: by1 - by0 + 1 };
+  return { R, cand, box, cosMax, cosFull };
+}
+
+/**
+ * The paint a projected shape leaves on the texture.
+ * shape: { x, y, w, h, data } straight-alpha RGBA on the projector's image plane (pixels).
+ * Returns null, or { x, y, w, h, data } straight-alpha RGBA in atlas pixels (alpha includes
+ * opacity, facing fade and antialiasing), ready to blend onto the layer.
+ */
+export function projectPaint(opts) {
+  const { mount, projector: P, shape: S, atlasW: W, atlasH: H, opacity = 1, aa = true, hidden = [], offsets = [], dilate = 2, depth = null } = opts;
+  if (!mount?.uvs || !S?.w || !S?.h) return null;
+  const plan = projectionPlan(opts);
+  if (!plan) return null;
+  const { R, cand, box, cosMax, cosFull } = plan;
+  const D = depth || depthMap(mount, P, R, { hidden, offsets });
+  const bx0 = box.x, by0 = box.y, bx1 = box.x + box.w - 1, by1 = box.y + box.h - 1, BW = box.w;
+  const A = new Float32Array(box.w * box.h), C = new Uint8ClampedArray(box.w * box.h * 3);
   const pr = [0, 0, 0, 0], sm = [0, 0, 0, 0];
   // Pass 2: every texel of those faces: project, inside the shape, first hit, facing.
   for (const f of cand) {
@@ -228,6 +255,16 @@ export function projectPaint({ mount, projector: P, shape: S, atlasW: W, atlasH:
       }
     }
   }
+  return finishProjection(A, C, box, mount, W, H, dilate);
+}
+
+/**
+ * Pass 3 (shared): A (alpha 0..1) and C (rgb) over atlas `box`; grow paint `dilate` texels into
+ * the gutter, then crop to a tight straight-alpha RGBA rect. Null when nothing was painted.
+ */
+export function finishProjection(A, C, box, mount, W, H, dilate = 2) {
+  const bx0 = box.x, by0 = box.y, bx1 = box.x + box.w - 1, by1 = box.y + box.h - 1, BW = box.w, BH = box.h;
+  const n = mount.indices.length / 3, uv = mount.uvs;
   let painted = 0;
   for (let i = 0; i < A.length; i++) if (A[i] > 0) painted++;
   if (!painted) return null;
@@ -251,21 +288,27 @@ export function projectPaint({ mount, projector: P, shape: S, atlasW: W, atlasH:
         if (l1 >= -1e-9 && l2 >= -1e-9 && 1 - l1 - l2 >= -1e-9) cov[(y - by0) * BW + (x - bx0)] = 1;
       }
     }
+    // Each gutter texel takes the largest neighbouring alpha and the alpha-weighted mean colour
+    // (stable under tiny alpha differences, unlike copying one neighbour).
     for (let it = 0; it < dilate; it++) {
       const grow = [];
       for (let y = 0; y < BH; y++) for (let x = 0; x < BW; x++) {
         const k = y * BW + x;
         if (cov[k] || A[k] > 0) continue;
-        let best = -1, ba = 0;
+        let ba = 0, sw = 0, r = 0, g = 0, b = 0;
         for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
           const xx = x + i, yy = y + j;
-          if ((i || j) && xx >= 0 && yy >= 0 && xx < BW && yy < BH && A[yy * BW + xx] > ba) { ba = A[yy * BW + xx]; best = yy * BW + xx; }
+          if (!(i || j) || xx < 0 || yy < 0 || xx >= BW || yy >= BH) continue;
+          const s2 = yy * BW + xx, a = A[s2];
+          if (!(a > 0)) continue;
+          if (a > ba) ba = a;
+          sw += a; r += C[s2 * 3] * a; g += C[s2 * 3 + 1] * a; b += C[s2 * 3 + 2] * a;
         }
-        if (best >= 0) grow.push(k, best);
+        if (ba > 0) grow.push(k, ba, r / sw, g / sw, b / sw);
       }
-      for (let g = 0; g < grow.length; g += 2) {
-        const k = grow[g], s = grow[g + 1];
-        A[k] = A[s]; C[k * 3] = C[s * 3]; C[k * 3 + 1] = C[s * 3 + 1]; C[k * 3 + 2] = C[s * 3 + 2];
+      for (let q = 0; q < grow.length; q += 5) {
+        const k = grow[q];
+        A[k] = grow[q + 1]; C[k * 3] = grow[q + 2]; C[k * 3 + 1] = grow[q + 3]; C[k * 3 + 2] = grow[q + 4];
         cov[k] = 1; projectionStats.dilated++;
       }
     }
@@ -284,13 +327,14 @@ export function projectPaint({ mount, projector: P, shape: S, atlasW: W, atlasH:
 
 /**
  * Blend `paint` (from projectPaint) onto `layer` of `doc` (the atlas) and record one history step
- * over the painted rectangle only. Returns the rect, or null.
+ * over the painted rectangle only. mask: optional selection (layer-sized alpha) the paint is clipped
+ * to. Returns the rect, or null.
  */
-export function commitProjection(doc, layer, paint, name = 'Projected shape') {
+export function commitProjection(doc, layer, paint, name = 'Projected shape', mask = null) {
   if (!paint) return null;
   const r = { x: paint.x, y: paint.y, w: paint.w, h: paint.h };
   const before = cropImage(layer.img, r);
-  paintImage(layer.img, { width: paint.w, height: paint.h, data: paint.data }, paint.x, paint.y, null, 1);
+  paintImage(layer.img, { width: paint.w, height: paint.h, data: paint.data }, paint.x, paint.y, mask && mask.width === layer.img.width && mask.height === layer.img.height ? mask : null, 1);
   layer.touch(r);
   doc.commitRegion(layer, r, before, name);
   return r;
