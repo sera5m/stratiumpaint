@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Run by npm run test:gpu. The projector's fields in the options bar (Projection mode): typed values
+     round-trip, rotation wraps to ±180, presets fill the rotation, the X/Y/Z letters scrub (Shift
+     snaps), Tab walks the fields in order, and mode-only fields show / hide without a rebuild. -->
+<link rel="stylesheet" href="../../src/css/app.css">
+<div id="bar" class="options"></div>
+<pre id="out"></pre>
+<script type="module">
+import { Editor } from '../../src/js/ui/editor.js';
+import { buildOptionsBar } from '../../src/js/ui/panels.js';
+const out = [], fails = [];
+const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+try {
+  const ed = new Editor(), bar = document.getElementById('bar');
+  buildOptionsBar(bar, ed);
+  ed.setTool('rect');
+  const field = (name) => bar.querySelector(`input[aria-label="${name}"]`);
+  const shown = (el) => { for (let e = el; e && e !== bar; e = e.parentElement) if (e.style.display === 'none') return false; return true; };
+  if (shown(field('Location X'))) fails.push('projector fields shown outside Projection mode');
+  ed.setOpt('shape3d', 'projection');
+  if (!shown(field('Location X'))) fails.push('projector fields hidden in Projection mode');
+  const typed = (name, text) => { const f = field(name); f.focus(); f.value = text; f.dispatchEvent(new Event('change')); f.blur(); };
+  typed('Location X', '1.5');
+  typed('Location Z', '-0.25');
+  if (JSON.stringify(ed.opts.projLoc) !== '[1.5,0,-0.25]') fails.push(`typed location ${JSON.stringify(ed.opts.projLoc)}`);
+  if (field('Location X').value !== '1.5' || field('Location Y').value !== '0') fails.push('location fields do not show the value');
+  typed('Rotation XYZ° Y', '200');
+  if (ed.opts.projRot[1] !== -160) fails.push(`rotation did not wrap: ${ed.opts.projRot}`);
+  typed('Rotation XYZ° X', 'abc');
+  if (field('Rotation XYZ° X').value !== '-90') fails.push('bad text was not reverted');
+  const preset = bar.querySelector('select[aria-label="Preset"]');
+  if (preset.value !== 'custom') fails.push(`preset shows ${preset.value}`);
+  preset.value = 'right'; preset.dispatchEvent(new Event('change'));
+  if (['X', 'Y', 'Z'].map((a) => field(`Rotation XYZ° ${a}`).value).join(',') !== '0,90,0') fails.push('preset did not fill the rotation fields');
+  // scrub the rotation X letter 37 px with Shift: 1°/px, snapped to 15°
+  const tag = bar.querySelectorAll('.vec3-axis.axis-x')[1];
+  const r = tag.getBoundingClientRect();
+  tag.dispatchEvent(new PointerEvent('pointerdown', { clientX: r.left, clientY: r.top, pointerId: 3, bubbles: true }));
+  tag.dispatchEvent(new PointerEvent('pointermove', { clientX: r.left + 37, clientY: r.top, pointerId: 3, shiftKey: true, bubbles: true }));
+  tag.dispatchEvent(new PointerEvent('pointerup', { clientX: r.left + 37, clientY: r.top, pointerId: 3, bubbles: true }));
+  if (ed.opts.projRot[0] !== 30) fails.push(`scrub +37 px with Shift gave ${ed.opts.projRot[0]}, expected 30`);
+  if (preset.value !== 'custom') fails.push('scrubbed rotation still shows a preset');
+  // Tab order: Location X Y Z, then Rotation X Y Z
+  const focusables = [...bar.querySelectorAll('input, select, button')].filter((e) => shown(e) && e.tabIndex >= 0).map((e) => e.getAttribute('aria-label') || e.textContent);
+  const i = focusables.indexOf('Location X');
+  if (focusables.slice(i, i + 6).join('|') !== 'Location X|Location Y|Location Z|Rotation XYZ° X|Rotation XYZ° Y|Rotation XYZ° Z') fails.push(`tab order: ${focusables.slice(i, i + 6)}`);
+  // mode-only fields
+  const dist = bar.querySelector('input[aria-label="Distance"]'), spread = bar.querySelector('input[aria-label="Spread"]');
+  if (shown(dist) || shown(spread)) fails.push('Distance / Spread shown before Point / Points > 1');
+  ed.setOpt('projSource', 'point'); ed.setOpt('projPoints', 3);
+  if (!shown(dist) || !shown(spread)) fails.push('Distance / Spread not shown for Point / Points 3');
+  log(`fields: ${focusables.slice(i, i + 6).join(', ')}\nopts ${JSON.stringify({ loc: ed.opts.projLoc, rot: ed.opts.projRot, from: ed.opts.projectFrom })}`);
+  document.title = fails.length ? 'FAIL' : 'PASS';
+  log(fails.length ? fails.join('\n') : 'projector fields: PASS');
+} catch (err) { log('ERROR ' + err.stack); document.title = 'ERROR'; }
+</script>

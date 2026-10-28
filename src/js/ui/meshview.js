@@ -7,7 +7,8 @@ import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
 import { rectUnion } from '../core/util.js';
 import { GpuMeshRenderer } from '../gpu/mesh.js';
-import { viewProjector, axisProjector, AXES, projectPaint, commitProjection, decalMatrix } from '../core/projection.js';
+import { projectPaint, commitProjection, decalMatrix, aimProjection, planeCoords, projectorAxes, eulerFromView } from '../core/projection.js';
+import { gizmoHandles, hitGizmo, dragMove, dragRotate, AXIS_COLORS } from '../core/gizmo.js';
 import { gpuProjectPaint } from '../gpu/projection.js';
 
 const VS = `
@@ -106,7 +107,12 @@ export class MeshView {
       h('div', { class: 'vc-mid' }, view('left', 'Left'), this.cubeScene, view('right', 'Right')),
       view('bottom', 'Bottom'),
       h('div', { class: 'vc-fb' }, view('front', 'Front'), view('back', 'Back')));
-    pane.append(this.canvas, this.hud, this.cubeWidget);
+    // The projector gizmo (Projection mode) is 2D-drawn over the model: no GPU work, no geometry.
+    this.gizmoCanvas = h('canvas', { class: 'mesh-canvas mesh-gizmo' });
+    this.gizmoCanvas.style.pointerEvents = 'none';
+    this.gizmoStats = { drawn: 0, hidden: 0 };
+    this.gizmoDrag = null;
+    pane.append(this.canvas, this.gizmoCanvas, this.hud, this.cubeWidget);
     // WebGL2 when available: it can upload a sub-rectangle straight from the composite canvas.
     const glOpts = { antialias: true, alpha: false, preserveDrawingBuffer: true };
     this.gl = this.canvas.getContext('webgl2', glOpts) || this.canvas.getContext('webgl', glOpts);
@@ -129,6 +135,11 @@ export class MeshView {
     // compositor's resident texture (no uploads at all); otherwise WebGL as before.
     ed.on('renderer', () => this.#backend());
     ed.on('layout', () => requestAnimationFrame(() => this.#resize()));
+    // Projector: redraw its gizmo when it or the mode changes; align it to the camera; arm placing.
+    ed.on('opts', () => this.#request());
+    ed.on('tool', () => this.#request());
+    ed.on('projector:fromView', () => ed.setOpt('projRot', eulerFromView(this.yaw, this.pitch)));
+    ed.on('projector:place', () => { this._placeArmed = true; ed.toast('Click the model to place the projector.'); });
     this.#bind();
     this.#attach();
     this.#backend();
@@ -544,6 +555,7 @@ export class MeshView {
       const mvp = this.#mvp(eye0);
       this.gpuMesh.setDecal(this.decal);
       try { this.gpuMesh.render(atlasOf(doc) || doc, mvp, this._gpuTarget || null); } catch (err) { console.warn(err); this.ed.gpuCompositor = null; this.#backend(); }
+      this.#drawGizmo();
       return;
     }
     if (this._texDirty) {
@@ -578,6 +590,7 @@ export class MeshView {
     bind(this.loc.nrm, this.buf.nrm, 3);
     bind(this.loc.uv, this.buf.uv, 2);
     gl.drawArrays(gl.TRIANGLES, 0, this.count);
+    this.#drawGizmo();
   }
 
   #look(name) {
@@ -739,74 +752,107 @@ export class MeshView {
   }
 
   // ------------------------------------------------------------------ Projection shape mode
-  // The shape is dragged on the projector's image plane (the screen for View, a plane facing the
-  // axis for the world directions), previewed as a decal, and on release shot onto the model:
-  // every texel whose surface point is the first one the projector sees inside the shape gets
-  // paint (core/projection.js; WebGPU when the 2D view runs on it). One history step.
+  // The projector is an object (ed.opts.projLoc / projRot, see core/projection.js): click the
+  // model to place it (Ctrl+click or Place to move it again), drag its arrows / rings to move /
+  // turn it (Shift snaps 0.1 / 15°). A drag elsewhere draws the shape on the projector's plane
+  // (through its location, facing its local −Z), previewed as a decal; on release it is fired
+  // along the projector from one or several origins and every surface hit first gets paint
+  // (core/projection.js; WebGPU when the 2D view runs on it). One history step.
+
+  #projectionActive() {
+    const ed = this.ed;
+    return ed.tool?.group === 'shape' && ed.opts.shape3d === 'projection' && this.shape !== 'flat' && !!ed.doc?.mount?.uvs;
+  }
 
   #projectionWanted() {
-    const ed = this.ed;
-    if (ed.tool?.group !== 'shape' || ed.opts.shape3d !== 'projection' || this.shape === 'flat') return false;
-    if (!ed.tool.projectionImage) {
-      if (!this._projToastShown) { this._projToastShown = true; ed.toast('Line / Curve paints on the surface; Projection works with the box shapes.'); }
+    if (!this.#projectionActive()) return false;
+    if (!this.ed.tool.projectionImage) {
+      if (!this._projToastShown) { this._projToastShown = true; this.ed.toast('Line / Curve paints on the surface; Projection works with the box shapes.'); }
       return false;
     }
-    return !!this.ed.doc?.mount?.uvs;
+    return true;
   }
 
-  /** Device-pixel point of a pointer event on the canvas. */
-  #devPoint(e) {
+  /** CSS-pixel point of a pointer event on the canvas. */
+  #cssPoint(e) {
     const r = this.canvas.getBoundingClientRect();
-    return [((e.clientX - r.left) / r.width) * this.canvas.width, ((e.clientY - r.top) / r.height) * this.canvas.height];
+    return [e.clientX - r.left, e.clientY - r.top];
   }
 
-  /** Projector for this drag and the map from pointer events to its image plane. */
-  #projector(e) {
-    const from = this.ed.opts.projectFrom || 'view';
-    const c = this.canvas;
-    const eye = this.#eye();
-    if (from === 'view' || !AXES[from]) {
-      return { P: viewProjector(this.#mvp(eye), c.width, c.height, eye), toImg: (ev) => this.#devPoint(ev) };
-    }
-    const { dir, U, V } = AXES[from];
-    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    // The plane: facing the axis, through the point under the cursor (or the view's centre).
-    const anchor = this.#hit(e)?.p3 || this.target;
-    const pos = this._geom?.pos;
-    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity, d0 = Infinity;
-    for (let i = 0; pos && i < this._geom.count * 3; i += 3) {
-      const p = [pos[i], pos[i + 1], pos[i + 2]];
-      const u = dot(U, p), v = dot(V, p), d = dot(dir, p);
-      if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; if (d < d0) d0 = d;
-    }
-    if (!(u1 >= u0)) { u0 = v0 = -1; u1 = v1 = 1; d0 = -1; }
-    const pad = 0.05 * Math.max(u1 - u0, v1 - v0, 1e-3);
-    // One image pixel ≈ one device pixel at the anchor's distance, so sizes match the View mode.
-    let scl = (Math.hypot(...sub(anchor, eye)) * 2 * Math.tan(0.35)) / c.height;
-    const span = Math.max(u1 - u0, v1 - v0) + pad * 2;
-    if (span / scl > 4096) scl = span / 4096;
-    const ou = u0 - pad, ov = v0 - pad, od = d0 - pad;
-    const origin = add(add(scale(U, ou), scale(V, ov)), scale(dir, od));
-    const RW = Math.ceil((u1 - u0 + pad * 2) / scl), RH = Math.ceil((v1 - v0 + pad * 2) / scl);
-    const P = axisProjector(from, origin, scl, RW, RH);
-    const toImg = (ev) => {
-      const { origin: o, dir: d } = this.#ray(ev);
-      const den = dot(d, dir);
-      if (Math.abs(den) < 0.05) return null; // looking along the plane: no stable point
-      const t = dot(sub(anchor, o), dir) / den;
-      if (t <= 0) return null;
-      const q = add(o, scale(d, t));
-      return [(dot(U, q) - ou) / scl, (dot(V, q) - ov) / scl];
+  /** World → CSS pixels on the canvas (null behind the camera). */
+  #toScreen() {
+    const m = this.#mvp(), r = this.canvas.getBoundingClientRect(), W = r.width || 1, H = r.height || 1;
+    return (p) => {
+      const w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+      if (w <= 1e-6) return null;
+      return [((m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12]) / w * 0.5 + 0.5) * W, (0.5 - (m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13]) / w * 0.5) * H];
     };
-    return { P, toImg };
+  }
+
+  /** World units per CSS pixel at world point p. */
+  #pxWorld(p) {
+    const eye = this.#eye(), f = norm(sub(this.target, eye));
+    const d = Math.max(1e-4, Math.abs(f[0] * (p[0] - eye[0]) + f[1] * (p[1] - eye[1]) + f[2] * (p[2] - eye[2])));
+    return (d * 2 * Math.tan(0.35)) / (this.canvas.getBoundingClientRect().height || 1);
+  }
+
+  #modelDiag() {
+    const pos = this._geom?.pos;
+    if (!pos || !this._geom.count) return 2;
+    const b = bounds(pos.subarray(0, this._geom.count * 3));
+    return Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) || 1;
+  }
+
+  /** Put the projector on the surface under the cursor, lifted by projOffset along the normal. */
+  #placeProjector(hit, rayDir) {
+    const m = this.ed.doc.mount, ix = m.indices, P = m.positions, t = hit.face;
+    const v = (k) => [P[ix[t * 3 + k] * 3], P[ix[t * 3 + k] * 3 + 1], P[ix[t * 3 + k] * 3 + 2]];
+    let n = norm(cross(sub(v(1), v(0)), sub(v(2), v(0))));
+    if (n[0] * rayDir[0] + n[1] * rayDir[1] + n[2] * rayDir[2] > 0) n = scale(n, -1); // towards the viewer
+    const off = +this.ed.opts.projOffset || 0;
+    this.ed.setOpt('projLoc', add(hit.p3, scale(n, off)).map((x) => Math.round(x * 1e4) / 1e4));
+    this.ed.toast('Projector placed. Drag to draw the shape; drag its arrows and rings to move and turn it.');
+  }
+
+  /** The projector gizmo's screen geometry (CSS px), or null: for tests and tools. */
+  get gizmo() { return this.#projectionActive() ? this.#gizmo() : null; }
+
+  #gizmo() {
+    const o = this.ed.opts;
+    if (!o.projLoc) return null;
+    return gizmoHandles(o.projLoc, o.projRot, this.#toScreen(), this.#pxWorld(o.projLoc));
+  }
+
+  /** Projection for this drag (the projector as set now) and the map from pointer to its plane. */
+  #projector() {
+    const o = this.ed.opts, c = this.canvas;
+    const loc = o.projLoc, ax = projectorAxes(o.projRot);
+    const diag = this.#modelDiag();
+    // One image pixel ≈ one device pixel at the projector, so Size means what it does on screen.
+    const scl = this.#pxWorld(loc) * (c.getBoundingClientRect().width || 1) / (c.width || 1);
+    const aim = aimProjection({
+      n: ax.forward, U: ax.right, V: scale(ax.up, -1), anchor: loc, scale: scl,
+      source: o.projSource === 'point' ? 'point' : 'parallel', base: scale(ax.forward, -diag * (+o.projDist || 150) / 100),
+      points: +o.projPoints || 1, spread: +o.projSpread || 0,
+      positions: this._geom?.pos?.subarray(0, this._geom.count * 3),
+    });
+    const toImg = (ev) => {
+      const { origin: ro, dir: d } = this.#ray(ev);
+      const den = d[0] * ax.forward[0] + d[1] * ax.forward[1] + d[2] * ax.forward[2];
+      if (Math.abs(den) < 0.02) return null; // looking along the projector's plane
+      const t = ((loc[0] - ro[0]) * ax.forward[0] + (loc[1] - ro[1]) * ax.forward[1] + (loc[2] - ro[2]) * ax.forward[2]) / den;
+      if (t <= 0) return null;
+      return planeCoords(aim.plane, add(ro, scale(d, t)));
+    };
+    return { aim, toImg };
   }
 
   #projStart(e) {
     const ed = this.ed;
-    const { P, toImg } = this.#projector(e);
+    const { aim, toImg } = this.#projector();
     const a = toImg(e);
-    if (!a) { ed.toast('Turn the view toward that side to project from it.'); return; }
-    this.proj = { P, toImg, a, b: a, shift: e.shiftKey, swap: e.button === 2, tool: ed.tool, img: null, gen: 0 };
+    if (!a || !aim.main) { ed.toast('Turn the view so you see the projector\u2019s plane (or turn the projector).'); return; }
+    this.proj = { aim, P: aim.main, toImg, a, b: a, shift: e.shiftKey, swap: e.button === 2, tool: ed.tool, img: null };
   }
 
   #projMove(e) {
@@ -817,6 +863,67 @@ export class MeshView {
     s.img = s.tool.projectionImage(this.ed, s.a, s.b, { shift: s.shift, swap: s.swap, RW: s.P.RW, RH: s.P.RH });
     this.decal = s.img ? { m: decalMatrix(s.P, s.img), alpha: s.img.opacity, canvas: s.img.canvas, gen: ++this._decalGen, w: s.img.w, h: s.img.h } : null;
     this.#request();
+  }
+
+  /** The projector, its gizmo and (while drawing) the shape's frame, on the 2D overlay. */
+  #drawGizmo() {
+    const g = this.gizmoCanvas;
+    if (!g) return;
+    const r = this.canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    const W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
+    if (g.width !== W || g.height !== H) { g.width = W; g.height = H; }
+    const ctx = g.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const o = this.ed.opts;
+    if (!this.#projectionActive() || !o.projLoc) { this.gizmoStats.hidden++; return; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const ts = this.#toScreen(), loc = o.projLoc, pw = this.#pxWorld(loc), ax = projectorAxes(o.projRot);
+    const h = gizmoHandles(loc, o.projRot, ts, pw);
+    if (!h) return;
+    const hot = this.gizmoDrag || this._gizmoHover;
+    const line = (pts, col, w = 2, dash = null) => {
+      if (pts.length < 2) return;
+      ctx.beginPath(); ctx.moveTo(...pts[0]); for (const p of pts.slice(1)) ctx.lineTo(...p);
+      ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash || []); ctx.stroke(); ctx.setLineDash([]);
+    };
+    // the projector's frame: its image square (or the shape being drawn) on its plane, and where it fires
+    const half = 40 * pw, U = ax.right, V = ax.up;
+    const sq = [[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]].map(([a, b]) => ts(add(loc, add(scale(U, a * half), scale(V, b * half))))).filter(Boolean);
+    line(sq, 'rgba(255,214,90,.9)', 1.5);
+    const tip = ts(add(loc, scale(ax.forward, 110 * pw)));
+    if (tip) { line([h.centre, tip], '#ffd65a', 2.5); ctx.beginPath(); ctx.arc(...tip, 4, 0, Math.PI * 2); ctx.fillStyle = '#ffd65a'; ctx.fill(); }
+    const aimN = this.#gizmoOrigins(loc, ax);
+    for (const q of aimN) {
+      if (q.kind === 'point') {
+        const e = ts(q.E);
+        if (e) { for (const c of sq.slice(0, 4)) line([e, c], 'rgba(255,214,90,.45)', 1, [3, 3]); ctx.beginPath(); ctx.arc(...e, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#ffd65a'; ctx.fill(); }
+      } else if (aimN.length > 1) {
+        const a = ts(add(loc, scale(q.d, -70 * pw))), b = ts(add(loc, scale(q.d, 40 * pw)));
+        if (a && b) line([a, b], 'rgba(255,214,90,.55)', 1, [4, 3]);
+      }
+    }
+    for (const ring of h.rings) line(ring.pts, AXIS_COLORS[ring.k], hot?.type === 'rotate' && hot.k === ring.k ? 3.5 : 1.6);
+    for (const ar of h.arrows) {
+      const wide = hot?.type === 'move' && hot.k === ar.k;
+      line([ar.a, ar.b], AXIS_COLORS[ar.k], wide ? 4 : 2.5);
+      const dx = ar.b[0] - ar.a[0], dy = ar.b[1] - ar.a[1], l = Math.hypot(dx, dy) || 1, ux = dx / l, uy = dy / l;
+      ctx.beginPath(); ctx.moveTo(...ar.b); ctx.lineTo(ar.b[0] - ux * 10 - uy * 5, ar.b[1] - uy * 10 + ux * 5); ctx.lineTo(ar.b[0] - ux * 10 + uy * 5, ar.b[1] - uy * 10 - ux * 5);
+      ctx.closePath(); ctx.fillStyle = AXIS_COLORS[ar.k]; ctx.fill();
+    }
+    ctx.beginPath(); ctx.arc(...h.centre, 4, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+    this.gizmoStats.drawn++;
+  }
+
+  /** Origins as the gizmo shows them (cheap: no footprint sizing). */
+  #gizmoOrigins(loc, ax) {
+    const o = this.ed.opts, diag = this.#modelDiag();
+    const aim = aimProjection({
+      n: ax.forward, U: ax.right, V: scale(ax.up, -1), anchor: loc, scale: 1, view: { O: loc, RW: 1, RH: 1 },
+      source: o.projSource === 'point' ? 'point' : 'parallel', base: scale(ax.forward, -diag * (+o.projDist || 150) / 100),
+      points: +o.projPoints || 1, spread: +o.projSpread || 0,
+    });
+    return aim.origins;
   }
 
   async #projEnd(cancel) {
@@ -833,7 +940,7 @@ export class MeshView {
     if (!layer?.img) { done(); return; }
     const data = img.canvas.getContext('2d').getImageData(0, 0, img.w, img.h).data;
     const opts = {
-      mount, projector: s.P, shape: { x: img.x, y: img.y, w: img.w, h: img.h, data }, atlasW: layer.img.width, atlasH: layer.img.height,
+      mount, projector: s.aim.projectors, shape: { x: img.x, y: img.y, w: img.w, h: img.h, data }, atlasW: layer.img.width, atlasH: layer.img.height,
       opacity: img.opacity, aa: img.aa, hidden: this.hidden.slice(), offsets: this.offsets.map((o) => o && o.slice()),
       maxAngle: +ed.opts.projAngle || 80,
     };
@@ -881,7 +988,24 @@ export class MeshView {
         return;
       }
       if (e.button !== 0 && e.button !== 2) return;
-      if (this.#projectionWanted()) { this.#projStart(e); return; }
+      if (this.#projectionWanted()) {
+        const o = ed.opts, sp = this.#cssPoint(e);
+        if (!o.projLoc || this._placeArmed || e.ctrlKey || e.metaKey) {
+          const hit = this.#hit(e);
+          if (!hit) { ed.toast('Click the model to place the projector.'); return; }
+          this._placeArmed = false;
+          this.#placeProjector(hit, this.#ray(e).dir);
+          return;
+        }
+        const g = hitGizmo(this.#gizmo(), sp);
+        if (g) {
+          const ts = this.#toScreen();
+          this.gizmoDrag = { ...g, s0: sp, loc0: o.projLoc.slice(), rot0: o.projRot.slice(), centre: ts(o.projLoc) };
+          return;
+        }
+        this.#projStart(e);
+        return;
+      }
       const hit = this.#hit(e);
       if (!hit) return;
       this.stroke = null;
@@ -937,7 +1061,18 @@ export class MeshView {
         reproject(s.source, ed);
         return;
       }
+      if (this.gizmoDrag) {
+        const gd = this.gizmoDrag, sp = this.#cssPoint(e);
+        if (gd.type === 'move') ed.setOpt('projLoc', dragMove(gd.loc0, gd.k, gd.s0, sp, this.#toScreen(), e.shiftKey));
+        else ed.setOpt('projRot', dragRotate(gd.rot0, gd.k, gd.centre, gd.s0, sp, norm(sub(this.target, this.#eye())), e.shiftKey));
+        return;
+      }
       if (this.proj) { this.#projMove(e); return; }
+      if (!this.painting && !this.dragging && this.#projectionActive()) {
+        const g = hitGizmo(this.#gizmo(), this.#cssPoint(e));
+        const key = g ? g.type + g.k : '';
+        if (key !== (this._gizmoHoverKey || '')) { this._gizmoHoverKey = key; this._gizmoHover = g; c.style.cursor = g ? (g.type === 'move' ? 'move' : 'grab') : ''; this.#request(); }
+      }
       if (!this.painting) return;
       const hit = this.#hit(e);
       if (!hit) return;
@@ -949,6 +1084,7 @@ export class MeshView {
       ed.requestOverlay();
     });
     const end = (e) => {
+      if (this.gizmoDrag) { this.gizmoDrag = null; this.#request(); return; }
       if (this.proj) { this.#projEnd(e?.type === 'pointercancel'); return; }
       this.dragging = null;
       this.objectDrag = null;

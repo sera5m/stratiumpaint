@@ -290,3 +290,9 @@ input[type=color] { width: 56px; height: 28px; padding: 0; background: none; bor
 .falloff-item { display: block; width: 100%; text-align: left; padding: 6px 10px; background: none; border: 0; border-radius: 5px; color: var(--text); font-size: 13px; }
 .falloff-item:hover { background: var(--bg-3); }
 .falloff-item.active { background: var(--accent-dim); color: var(--text); }
+
+/* Projection: the projector's Location / Rotation fields (drag the letter to scrub) */
+.vec3-field { display: inline-flex; align-items: center; gap: 2px; }
+.vec3-axis { font-size: 11px; font-weight: 700; padding: 0 2px; user-select: none; touch-action: none; }
+.vec3-axis.axis-x { color: #e8414f; } .vec3-axis.axis-y { color: #7fcf3a; } .vec3-axis.axis-z { color: #3d8af2; }
+.num.vec3 { width: 54px; }

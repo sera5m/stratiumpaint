@@ -233,7 +233,7 @@ function makeShape({ id, name, kind, key }) {
   };
 
   // 3D options: how a drag on the model maps the shape onto it (see ui/meshview.js).
-  const SHAPE3D = ['shape3d', 'projectFrom', 'projAngle'];
+  const SHAPE3D = ['shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
   /** Reused canvas for projectionImage (the 3D view's decal preview reads it every frame). */
   let projCanvas = null;
 

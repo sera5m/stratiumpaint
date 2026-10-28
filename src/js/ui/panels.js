@@ -93,10 +93,20 @@ const OPTIONS = {
     type: 'select', label: '3D', title: 'How a shape dragged on the 3D model lands on it',
     items: [['chart', 'Surface (per chart)'], ['wrap', 'Surface (wrap seams)'], ['projection', 'Projection']],
   },
+  // The projector object (Projection mode). Location in world units, rotation XYZ Euler degrees.
+  projPlace: { type: 'action', label: 'Place', title: 'Click the model to put the projector there (Ctrl+click on the model does the same)', event: 'projector:place', when: (o) => o.shape3d === 'projection' },
+  projOffset: { type: 'float', label: 'Offset', step: 0.01, title: 'Placing lifts the projector this far off the surface, along its normal', when: (o) => o.shape3d === 'projection' },
+  projLoc: { type: 'vec3', label: 'Location', step: 0.01, snap: 0.1, digits: 3, title: 'Projector location (world units). Drag a letter to scrub, Shift snaps to 0.1', when: (o) => o.shape3d === 'projection' },
+  projRot: { type: 'vec3', label: 'Rotation XYZ°', step: 1, snap: 15, digits: 1, wrap: 180, title: 'Projector rotation, XYZ Euler degrees (Blender order); it fires along its local −Z. Shift snaps to 15°', when: (o) => o.shape3d === 'projection' },
   projectFrom: {
-    type: 'select', label: 'Project from', when: (o) => o.shape3d === 'projection',
-    items: [['view', 'View'], ['down', 'Down (−Y)'], ['up', 'Up (+Y)'], ['front', 'Front (−Z)'], ['back', 'Back (+Z)'], ['right', 'Right (−X)'], ['left', 'Left (+X)']],
+    type: 'select', label: 'Preset', title: 'Turn the projector to a preset direction', when: (o) => o.shape3d === 'projection',
+    items: [['custom', 'Custom'], ['view', 'View (align to camera)'], ['down', 'Down (−Y)'], ['up', 'Up (+Y)'], ['front', 'Front (−Z)'], ['back', 'Back (+Z)'], ['right', 'Right (−X)'], ['left', 'Left (+X)']],
   },
+  projAlign: { type: 'action', label: 'Set from view', title: 'Turn the projector to look the way the 3D view does', event: 'projector:fromView', when: (o) => o.shape3d === 'projection' },
+  projSource: { type: 'select', label: 'Origin', title: 'Parallel rays, or rays from a point behind the projector', items: [['parallel', 'Parallel'], ['point', 'Point']], when: (o) => o.shape3d === 'projection' },
+  projDist: { type: 'range', label: 'Distance', min: 10, max: 500, unit: '%', title: 'Point source distance behind the projector, % of the model size', when: (o) => o.shape3d === 'projection' && o.projSource === 'point' },
+  projPoints: { type: 'range', label: 'Points', min: 1, max: 8, title: 'Fire from this many origins in a ring around the direction', when: (o) => o.shape3d === 'projection' },
+  projSpread: { type: 'range', label: 'Spread', min: 0, max: 60, unit: '°', title: 'Ring angle of the origins', when: (o) => o.shape3d === 'projection' && o.projPoints > 1 },
   projAngle: { type: 'range', label: 'Max angle', min: 10, max: 90, unit: '°', when: (o) => o.shape3d === 'projection' },
   sides: { type: 'range', label: 'Sides', min: 3, max: 16, unit: '' },
   shapeAngle: { type: 'range', label: 'Rotate', min: -180, max: 180, unit: '°' },
@@ -216,6 +226,45 @@ export function buildOptionsBar(root, ed) {
         syncs.push(sync); sync();
         return h('div', { class: 'opt' }, h('span', { class: 'opt-label' }, def.label), group);
       }
+      case 'float': {
+        const num = h('input', { type: 'number', class: 'num', step: def.step ?? 0.01, value: get(), 'aria-label': def.label });
+        num.addEventListener('change', () => { const v = parseFloat(num.value); if (Number.isFinite(v)) ed.setOpt(key, v); });
+        syncs.push(() => { const v = String(get()); if (document.activeElement !== num && num.value !== v) num.value = v; });
+        return wrap(num);
+      }
+      case 'action': {
+        const b = h('button', { type: 'button', class: 'opt-toggle', title: def.title ?? def.label, onClick: () => ed.emit(def.event) }, def.label);
+        return h('div', { class: 'opt', title: def.title ?? null }, b);
+      }
+      case 'vec3': {
+        // Three fields: type a value (Enter / Tab / leaving the field sets it), or drag the X / Y / Z
+        // letter to scrub (Shift snaps). An unset value (null) shows empty fields.
+        const fmt = (v) => (Number.isFinite(v) ? String(+v.toFixed(def.digits ?? 3)) : '');
+        const norm = (v) => { if (def.wrap) { v = ((v % 360) + 540) % 360 - 180; if (v === -180) v = 180; } return +v.toFixed(6); };
+        const setK = (k, v) => { const cur = get() ? get().slice() : [0, 0, 0]; cur[k] = norm(v); ed.setOpt(key, cur); };
+        const fields = [0, 1, 2].map((k) => {
+          const inp = h('input', { type: 'text', inputmode: 'decimal', class: 'num vec3', 'aria-label': `${def.label} ${'XYZ'[k]}`, placeholder: '—' });
+          inp.addEventListener('change', () => { const v = parseFloat(inp.value); if (Number.isFinite(v)) setK(k, v); else inp.value = fmt(get()?.[k]); });
+          inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
+          const tag = h('span', { class: `vec3-axis axis-${'xyz'[k]}`, title: 'Drag to scrub' }, 'XYZ'[k]);
+          tag.style.cursor = 'ew-resize';
+          tag.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            const x0 = e.clientX, v0 = get()?.[k] ?? 0;
+            const move = (ev) => {
+              let v = v0 + (ev.clientX - x0) * (def.step ?? 0.01);
+              if (ev.shiftKey && def.snap) v = Math.round(v / def.snap) * def.snap;
+              setK(k, v);
+            };
+            const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); };
+            addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
+          });
+          syncs.push(() => { const t = fmt(get()?.[k]); if (document.activeElement !== inp && inp.value !== t) inp.value = t; });
+          return h('span', { class: 'vec3-field' }, tag, inp);
+        });
+        syncs.slice(-3).forEach((f) => f());
+        return h('div', { class: 'opt', title: def.title ?? null }, h('span', { class: 'opt-label' }, def.label), ...fields);
+      }
       case 'font': {
         const inp = h('input', { type: 'text', class: 'font-input', list: 'font-list', value: get(), spellcheck: false, 'aria-label': 'Font family' });
         inp.addEventListener('input', () => { if (inp.value.trim()) ed.setOpt(key, inp.value.trim()); });
@@ -232,9 +281,13 @@ export function buildOptionsBar(root, ed) {
     clear(root);
     root.append(h('span', { class: 'opt-tool' }, ed.tool.name));
     for (const key of ed.tool.options ?? []) {
-      if (OPTIONS[key]?.when && !OPTIONS[key].when(ed.opts)) continue;
       const c = control(key);
-      if (c) root.append(c);
+      if (!c) continue;
+      root.append(c);
+      // Shown only in some modes: hidden / shown on every sync, never rebuilt (a slider being
+      // dragged keeps working).
+      const when = OPTIONS[key]?.when;
+      if (when) { const vis = () => { const show = !!when(ed.opts); if ((c.style.display === 'none') === show) c.style.display = show ? '' : 'none'; }; syncs.push(vis); vis(); }
     }
     if (ed.tool.metrics && ed.tool.setSize) appendMoveSize(root, ed, syncs);
     root.append(h('span', { class: 'opt-spacer' }));
@@ -246,7 +299,7 @@ export function buildOptionsBar(root, ed) {
   ed.on('tool', rebuild);
   const resync = () => syncs.forEach((s) => s());
   // Options shown only in some modes (`when`) appear or go when the mode changes.
-  ed.on('opts', (key) => { if (key === 'shape3d') rebuild(); else resync(); });
+  ed.on('opts', resync);
   ed.on('overlay', raf(resync)); // overlay fires per pointer sample during a drag: sync once a frame
   ed.on('doc:selection', resync);
   rebuild();

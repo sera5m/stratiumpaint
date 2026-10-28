@@ -33,6 +33,7 @@ function comboOf(e) {
 export function start() {
   platform.watchAccent();
   const ed = new Editor();
+  try { ed.persistOptions(window.localStorage); } catch { /* no storage */ }
   const stage = $('#pane-2d');
   const view = new View(ed, stage);
   ed.view = view;

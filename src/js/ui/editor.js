@@ -3,6 +3,7 @@
 //   'doc' 'docs' 'tool' 'colors' 'opts' 'toast' 'overlay' and 'doc:<event>' re-emitted from the active document.
 import { Emitter, clamp } from '../core/util.js';
 import { createTools } from '../tools/index.js';
+import { ROT_PRESETS, presetOf } from '../core/projection.js';
 
 export const DEFAULT_OPTS = {
   size: 12, hardness: 80, opacity: 100, aa: true, radius: 12,
@@ -11,7 +12,16 @@ export const DEFAULT_OPTS = {
   shape: 'outline',
   wrapShapes: true, // 3D: continue a shape across UV seams instead of stopping at the chart
   shape3d: 'wrap', // 3D shape mode: 'chart' (surface, one UV chart) | 'wrap' (surface, across seams) | 'projection'
-  projectFrom: 'view', // Projection: 'view' (camera) or a world axis: down up front back left right
+  // Projection: the projector object (core/projection.js). Location in world units (null until it
+  // is placed on the model), rotation XYZ Euler degrees (fires along its local −Z).
+  projLoc: null,
+  projRot: [-90, 0, 0],
+  projOffset: 0, // placing: lift the projector this far off the surface, along its normal
+  projectFrom: 'down', // the rotation preset it matches: view (an action), down up front back left right, or custom
+  projSource: 'parallel', // 'parallel' (orthographic rays) or 'point' (rays from a point source)
+  projDist: 150, // point source distance behind the projector, % of the model's size
+  projPoints: 1, // fire from this many origins, in a ring around the direction
+  projSpread: 20, // ring angle (degrees) for projPoints > 1
   projAngle: 80, // Projection: surfaces turned further than this from the projector get no paint
   sides: 5,
   shapeAngle: 0, // shapes: drawn turned by this many degrees about their centre
@@ -24,6 +34,9 @@ export const DEFAULT_OPTS = {
   grid: false,
   wholeImage: false, // fill/erase/adjustments/effects ignore the selection and apply everywhere
 };
+
+/** Options kept between sessions (persistOptions). */
+export const PERSISTED_OPTS = ['shape3d', 'wrapShapes', 'projectFrom', 'projLoc', 'projRot', 'projOffset', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
 
 const DOC_EVENTS = ['render', 'layers', 'selection', 'size', 'history', 'meta', 'float'];
 
@@ -80,13 +93,49 @@ export class Editor extends Emitter {
   }
 
   setOpt(key, value) {
-    if (this.opts[key] === value) return;
+    const old = this.opts[key];
+    if (old === value || (Array.isArray(old) && Array.isArray(value) && old.length === value.length && old.every((v, i) => v === value[i]))) return;
     this.opts[key] = value;
     // The 3D shape mode and the older Wrap seams toggle describe the same thing: keep them agreeing.
     if (key === 'shape3d' && value !== 'projection') this.setOpt('wrapShapes', value === 'wrap');
     if (key === 'wrapShapes' && this.opts.shape3d !== 'projection') this.setOpt('shape3d', value ? 'wrap' : 'chart');
+    // Projector rotation presets: picking one sets the rotation ('view' asks the 3D view to align it
+    // to the camera); any rotation shows the preset it matches, or Custom.
+    if (key === 'projectFrom' && !this._aiming) {
+      if (ROT_PRESETS[value]) this.setOpt('projRot', ROT_PRESETS[value].slice());
+      else if (value === 'view') this.emit('projector:fromView');
+    }
+    if (key === 'projRot' && !this._aiming) {
+      this._aiming = true;
+      this.setOpt('projectFrom', presetOf(value));
+      this._aiming = false;
+    }
     this.emit('opts', key);
     this.requestOverlay();
+  }
+
+  /**
+   * Keep `keys` of the options in `storage` (localStorage-like): load them now (values of the
+   * wrong type are ignored), save on every change. The 3D shape / projection settings by default.
+   */
+  persistOptions(storage, keys = PERSISTED_OPTS, name = 'stratum.toolOptions') {
+    if (!storage) return;
+    let saved = {};
+    try { saved = JSON.parse(storage.getItem(name) || '{}') || {}; } catch { saved = {}; }
+    this._aiming = true; // restore as saved, without the preset ↔ yaw/pitch sync
+    const vec3 = (v) => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+    for (const k of keys) {
+      if (!(k in saved)) continue;
+      const v = saved[k], d = DEFAULT_OPTS[k];
+      if (k === 'projLoc' ? v === null || vec3(v) : Array.isArray(d) ? vec3(v) : typeof v === typeof d) this.opts[k] = Array.isArray(v) ? v.slice() : v;
+    }
+    this._aiming = false;
+    this.on('opts', (key) => {
+      if (!keys.includes(key)) return;
+      const out = {};
+      for (const k of keys) out[k] = this.opts[k];
+      try { storage.setItem(name, JSON.stringify(out)); } catch { /* full or private */ }
+    });
   }
 
   nudgeSize(delta) { this.setOpt('size', clamp(Math.round(this.opts.size + delta), 1, 500)); }
