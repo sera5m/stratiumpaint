@@ -121,6 +121,18 @@ same triangles out as the unwrap. A rectangle, ellipse or line dragged
 across a seam on the model continues over that weld, from one lip of the
 unwrap to the other, instead of stretching the long way across the chart.
 The flat sheet stays flat and does not wrap.
+The shape tools' **3D** option picks how a drag lands on the model:
+**Surface (wrap seams)** (the default, as above), **Surface (per chart)**
+(clipped to the chart the drag started on), or **Projection**. Projection
+drags the shape on the screen and then shoots it onto the model like a slide
+projector. Every surface the projector sees first inside the outline is
+painted, across objects, charts and seams, but nothing behind it: a lid
+keeps the floor under it clean. **Project from** is the View (the camera,
+the default) or a world axis (Down −Y, Up, Front, Back, Right, Left; the
+shape is drawn on a plane facing that axis). **Max angle** leaves surfaces
+turned further than that from the projector alone, with a soft fade. Hidden
+objects neither take paint nor block it. Line / Curve stays on the surface.
+See docs/PROJECTION.md.
 Right-drag is still the secondary
 colour. Alt+drag still turns the view. Split / texture only / model
 only is in the Model menu. The mount lasts for the session; the texture

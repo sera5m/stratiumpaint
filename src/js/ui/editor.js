@@ -10,6 +10,9 @@ export const DEFAULT_OPTS = {
   selMode: 'replace',
   shape: 'outline',
   wrapShapes: true, // 3D: continue a shape across UV seams instead of stopping at the chart
+  shape3d: 'wrap', // 3D shape mode: 'chart' (surface, one UV chart) | 'wrap' (surface, across seams) | 'projection'
+  projectFrom: 'view', // Projection: 'view' (camera) or a world axis: down up front back left right
+  projAngle: 80, // Projection: surfaces turned further than this from the projector get no paint
   sides: 5,
   shapeAngle: 0, // shapes: drawn turned by this many degrees about their centre
   gradient: 'linear',
@@ -79,6 +82,9 @@ export class Editor extends Emitter {
   setOpt(key, value) {
     if (this.opts[key] === value) return;
     this.opts[key] = value;
+    // The 3D shape mode and the older Wrap seams toggle describe the same thing: keep them agreeing.
+    if (key === 'shape3d' && value !== 'projection') this.setOpt('wrapShapes', value === 'wrap');
+    if (key === 'wrapShapes' && this.opts.shape3d !== 'projection') this.setOpt('shape3d', value ? 'wrap' : 'chart');
     this.emit('opts', key);
     this.requestOverlay();
   }

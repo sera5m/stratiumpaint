@@ -232,12 +232,38 @@ function makeShape({ id, name, kind, key }) {
     preview(ed, s, p.region, p.opacity, p.aa, p.drawShape);
   };
 
+  // 3D options: how a drag on the model maps the shape onto it (see ui/meshview.js).
+  const SHAPE3D = ['shape3d', 'projectFrom', 'projAngle'];
+  /** Reused canvas for projectionImage (the 3D view's decal preview reads it every frame). */
+  let projCanvas = null;
+
   return {
     id, name, key, group: 'shape', cursor: 'crosshair',
-    options: kind === 'line' ? ['size', 'opacity', 'aa', 'wrapShapes']
-      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'shapeAngle', 'opacity', 'aa', 'wrapShapes']
-      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'shapeAngle', 'opacity', 'aa', 'wrapShapes']
-      : ['size', 'shape', 'shapeAngle', 'opacity', 'aa', 'wrapShapes'],
+    options: kind === 'line' ? ['size', 'opacity', 'aa', ...SHAPE3D]
+      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'shapeAngle', 'opacity', 'aa', ...SHAPE3D]
+      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'shapeAngle', 'opacity', 'aa', ...SHAPE3D]
+      : ['size', 'shape', 'shapeAngle', 'opacity', 'aa', ...SHAPE3D],
+
+    /**
+     * The shape between image-plane points a and b ([x, y]) as this tool would draw it (style,
+     * colours, rotation, antialiasing), on a plane of RW×RH pixels: { x, y, w, h, canvas, opacity,
+     * aa }, or null when empty. Used by the 3D view's Projection mode; nothing is drawn on a layer.
+     */
+    projectionImage(ed, a, b, { shift = false, swap = false, RW, RH } = {}) {
+      const s = { layer: { width: RW, height: RH }, x0: a[0], y0: a[1], x1: b[0], y1: b[1], shift, swap, wrap: null };
+      const p = plan(ed, s);
+      if (!p.region) return null;
+      const { region } = p;
+      if (!projCanvas) { projCanvas = createCanvas(region.w, region.h); projCanvas.getContext('2d', { willReadFrequently: true }); }
+      const c = projCanvas;
+      if (c.width !== region.w || c.height !== region.h) { c.width = region.w; c.height = region.h; }
+      const ctx = c.getContext('2d');
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.save(); ctx.translate(-region.x, -region.y); p.drawShape(ctx); ctx.restore();
+      if (!p.aa) { const id = ctx.getImageData(0, 0, c.width, c.height); hardenAlpha(id); ctx.putImageData(id, 0, 0); }
+      return { ...region, canvas: c, opacity: p.opacity, aa: p.aa };
+    },
 
     down(e, ed) {
       const layer = ed.editableLayer();

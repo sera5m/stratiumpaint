@@ -23,6 +23,9 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 ## 3D features
 - [x] Connected-component split: a group that does not share vertices becomes separate objects (`body 1`, `body 2`). Named groups that are connected stay as named.
 - [x] Temporary object move: object list on the model pane when there are 2+ objects. Move mode, Shift-drag slides the selected object. Hide/Show drops it from the view and the raycast. Isolate hides every other object (press again to show all). Reset puts them back. Offsets are view-only and never saved.
+- [x] Shape option **3D**: Surface (per chart) / Surface (wrap seams) / **Projection** (docs/PROJECTION.md). Projection shoots the shape from the View or a world axis onto the first surface hit (depth map, no paint through surfaces), across objects/charts/seams; hidden objects skipped; max-angle fade; 2-texel gutter dilation; one history step; WebGPU or CPU.
+- [ ] Projection: occlusion in the drag preview (today the decal shows on hidden-behind surfaces too; the paint on release is right).
+- [ ] Projection: Line / Curve and brush strokes as projected decals; image (stencil) projection; projection from a saved camera.
 - [x] Shape option **Wrap seams** (on by default). Off clips a shape to the UV chart the drag started on instead of continuing across the weld. (Clip is the chart's UV bounding box, so a neighbouring chart packed inside that box can still catch paint.)
 
 ## Shape brushes
@@ -39,7 +42,8 @@ Add as needed:
 
 ## WebGPU (see docs/WEBGPU_PLAN.md)
 - [x] Phase 1: shared device, layer textures, WebGPU 2D compositor (all 16 blend modes), behind `?renderer=webgpu` / `--webgpu`, with automatic Canvas 2D fallback.
-- [ ] Phase 2: 3D view on WebGPU, sampling the composite texture directly (no per-stroke readback/upload), GPU pick pass.
+- [x] Phase 2 (part): 3D view on WebGPU, sampling the composite texture directly (no per-stroke readback/upload). Projection painting's depth and UV passes run on the same device.
+- [ ] Phase 2 (rest): GPU pick pass.
 - [x] Phase 3 (part): move/scale/rotate preview as a GPU float texture, dirty-rect scissored recomposite, cached below/above stacks.
 - [ ] Phase 3 (rest): GPU resample at set-down.
 - [ ] Phase 4: GPU filters and adjustments.

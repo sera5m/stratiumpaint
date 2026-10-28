@@ -7,6 +7,8 @@ import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
 import { rectUnion } from '../core/util.js';
 import { GpuMeshRenderer } from '../gpu/mesh.js';
+import { viewProjector, axisProjector, AXES, projectPaint, commitProjection, decalMatrix } from '../core/projection.js';
+import { gpuProjectPaint } from '../gpu/projection.js';
 
 const VS = `
 attribute vec3 aPos;
@@ -16,22 +18,45 @@ uniform mat4 uMvp;
 uniform mat3 uN;
 varying vec3 vN;
 varying vec2 vUv;
+varying vec3 vW;
 void main() {
   vN = uN * aNrm;
   vUv = aUv;
+  vW = aPos;
   gl_Position = uMvp * vec4(aPos, 1.0);
 }`;
 
+// uDecal*: the Projection-mode preview, the shape projected onto every surface it faces (no
+// occlusion test; the paint on release has one). uDecalM maps world → decal texture coords (xy/w).
 const FS = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 varying vec3 vN;
 varying vec2 vUv;
+varying vec3 vW;
 uniform sampler2D uTex;
+uniform sampler2D uDecal;
+uniform mat4 uDecalM;
+uniform vec4 uDecalP; // on, opacity, max u, max v
 void main() {
   vec4 tex = texture2D(uTex, vUv); // texture row 0 = top of the image (uploaded unflipped)
+  vec3 rgb = tex.rgb;
+  if (uDecalP.x > 0.5) {
+    vec4 q = uDecalM * vec4(vW, 1.0);
+    if (q.w > 1e-6) {
+      vec2 d = q.xy / q.w;
+      if (d.x >= 0.0 && d.y >= 0.0 && d.x <= uDecalP.z && d.y <= uDecalP.w) {
+        vec4 s = texture2D(uDecal, d);
+        rgb = mix(rgb, s.rgb, s.a * uDecalP.y);
+      }
+    }
+  }
   vec3 n = normalize(vN);
   float light = 0.62 + 0.38 * max(dot(n, normalize(vec3(0.35, 0.8, 0.4))), 0.0);
-  gl_FragColor = vec4(tex.rgb * light, 1.0);
+  gl_FragColor = vec4(rgb * light, 1.0);
 }`;
 
 export class MeshView {
@@ -53,6 +78,9 @@ export class MeshView {
     this.painting = false;
     this._texDirty = true;
     this._geomKey = null;
+    this.proj = null; // Projection-mode drag
+    this.decal = null; // its preview: { m, alpha, canvas, gen, w, h }
+    this._decalGen = 0;
 
     const tool = (mode, label) => h('button', { type: 'button', class: `seg-btn${mode === 'paint' ? ' on' : ''}`, 'data-mode': mode, onClick: () => this.#tool(mode) }, label);
     const shape = (id, label) => h('button', { type: 'button', class: `seg-btn${id === 'solid' ? ' on' : ''}`, 'data-shape': id, onClick: () => this.#shape(id) }, label);
@@ -172,6 +200,10 @@ export class MeshView {
       uv: gl.getAttribLocation(prog, 'aUv'),
       mvp: gl.getUniformLocation(prog, 'uMvp'),
       n: gl.getUniformLocation(prog, 'uN'),
+      tex: gl.getUniformLocation(prog, 'uTex'),
+      decal: gl.getUniformLocation(prog, 'uDecal'),
+      decalM: gl.getUniformLocation(prog, 'uDecalM'),
+      decalP: gl.getUniformLocation(prog, 'uDecalP'),
     };
     this.buf = { pos: gl.createBuffer(), nrm: gl.createBuffer(), uv: gl.createBuffer() };
     this.tex = gl.createTexture();
@@ -180,6 +212,18 @@ export class MeshView {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.decalTex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.decalTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    gl.activeTexture(gl.TEXTURE0);
+    gl.useProgram(prog);
+    gl.uniform1i(this.loc.tex, 0);
+    gl.uniform1i(this.loc.decal, 1);
     gl.enable(gl.DEPTH_TEST);
     gl.clearColor(0.07, 0.08, 0.1, 1);
   }
@@ -497,7 +541,8 @@ export class MeshView {
       // The compositor keeps the texture current from layer dirty rects; just draw.
       this._texDirty = false; this._texDamage = null;
       this.#watchTexture();
-      const mvp = mul(perspective(0.7, this.canvas.width / this.canvas.height, 0.01, this.dist * 20 + 10), lookAt(eye0, this.target, [0, 1, 0]));
+      const mvp = this.#mvp(eye0);
+      this.gpuMesh.setDecal(this.decal);
       try { this.gpuMesh.render(atlasOf(doc) || doc, mvp, this._gpuTarget || null); } catch (err) { console.warn(err); this.ed.gpuCompositor = null; this.#backend(); }
       return;
     }
@@ -509,9 +554,20 @@ export class MeshView {
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.prog);
-    const eye = this.#eye();
-    const mvp = mul(perspective(0.7, this.canvas.width / this.canvas.height, 0.01, this.dist * 20 + 10), lookAt(eye, this.target, [0, 1, 0]));
+    const mvp = this.#mvp();
     gl.uniformMatrix4fv(this.loc.mvp, false, mvp);
+    const dc = this.decal;
+    if (dc && this._decalCanvasGen !== dc.gen) {
+      this._decalCanvasGen = dc.gen;
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.decalTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, dc.canvas);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    }
+    gl.uniformMatrix4fv(this.loc.decalM, false, dc ? dc.m : new Float32Array(16));
+    gl.uniform4f(this.loc.decalP, dc ? 1 : 0, dc ? dc.alpha : 0, 1, 1);
     gl.uniformMatrix3fv(this.loc.n, false, new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]));
     const bind = (loc, buf, size) => {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -553,6 +609,11 @@ export class MeshView {
       if (d < bestD) { best = name; bestD = d; }
     }
     for (const b of this.cubeWidget.querySelectorAll('.vc-label')) b.classList.toggle('on', b.dataset.view === best);
+  }
+
+  /** The camera's view-projection (GL convention), as drawn. */
+  #mvp(eye = this.#eye()) {
+    return mul(perspective(0.7, this.canvas.width / this.canvas.height, 0.01, this.dist * 20 + 10), lookAt(eye, this.target, [0, 1, 0]));
   }
 
   #eye() {
@@ -677,6 +738,120 @@ export class MeshView {
     return p;
   }
 
+  // ------------------------------------------------------------------ Projection shape mode
+  // The shape is dragged on the projector's image plane (the screen for View, a plane facing the
+  // axis for the world directions), previewed as a decal, and on release shot onto the model:
+  // every texel whose surface point is the first one the projector sees inside the shape gets
+  // paint (core/projection.js; WebGPU when the 2D view runs on it). One history step.
+
+  #projectionWanted() {
+    const ed = this.ed;
+    if (ed.tool?.group !== 'shape' || ed.opts.shape3d !== 'projection' || this.shape === 'flat') return false;
+    if (!ed.tool.projectionImage) {
+      if (!this._projToastShown) { this._projToastShown = true; ed.toast('Line / Curve paints on the surface; Projection works with the box shapes.'); }
+      return false;
+    }
+    return !!this.ed.doc?.mount?.uvs;
+  }
+
+  /** Device-pixel point of a pointer event on the canvas. */
+  #devPoint(e) {
+    const r = this.canvas.getBoundingClientRect();
+    return [((e.clientX - r.left) / r.width) * this.canvas.width, ((e.clientY - r.top) / r.height) * this.canvas.height];
+  }
+
+  /** Projector for this drag and the map from pointer events to its image plane. */
+  #projector(e) {
+    const from = this.ed.opts.projectFrom || 'view';
+    const c = this.canvas;
+    const eye = this.#eye();
+    if (from === 'view' || !AXES[from]) {
+      return { P: viewProjector(this.#mvp(eye), c.width, c.height, eye), toImg: (ev) => this.#devPoint(ev) };
+    }
+    const { dir, U, V } = AXES[from];
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    // The plane: facing the axis, through the point under the cursor (or the view's centre).
+    const anchor = this.#hit(e)?.p3 || this.target;
+    const pos = this._geom?.pos;
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity, d0 = Infinity;
+    for (let i = 0; pos && i < this._geom.count * 3; i += 3) {
+      const p = [pos[i], pos[i + 1], pos[i + 2]];
+      const u = dot(U, p), v = dot(V, p), d = dot(dir, p);
+      if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; if (d < d0) d0 = d;
+    }
+    if (!(u1 >= u0)) { u0 = v0 = -1; u1 = v1 = 1; d0 = -1; }
+    const pad = 0.05 * Math.max(u1 - u0, v1 - v0, 1e-3);
+    // One image pixel ≈ one device pixel at the anchor's distance, so sizes match the View mode.
+    let scl = (Math.hypot(...sub(anchor, eye)) * 2 * Math.tan(0.35)) / c.height;
+    const span = Math.max(u1 - u0, v1 - v0) + pad * 2;
+    if (span / scl > 4096) scl = span / 4096;
+    const ou = u0 - pad, ov = v0 - pad, od = d0 - pad;
+    const origin = add(add(scale(U, ou), scale(V, ov)), scale(dir, od));
+    const RW = Math.ceil((u1 - u0 + pad * 2) / scl), RH = Math.ceil((v1 - v0 + pad * 2) / scl);
+    const P = axisProjector(from, origin, scl, RW, RH);
+    const toImg = (ev) => {
+      const { origin: o, dir: d } = this.#ray(ev);
+      const den = dot(d, dir);
+      if (Math.abs(den) < 0.05) return null; // looking along the plane: no stable point
+      const t = dot(sub(anchor, o), dir) / den;
+      if (t <= 0) return null;
+      const q = add(o, scale(d, t));
+      return [(dot(U, q) - ou) / scl, (dot(V, q) - ov) / scl];
+    };
+    return { P, toImg };
+  }
+
+  #projStart(e) {
+    const ed = this.ed;
+    const { P, toImg } = this.#projector(e);
+    const a = toImg(e);
+    if (!a) { ed.toast('Turn the view toward that side to project from it.'); return; }
+    this.proj = { P, toImg, a, b: a, shift: e.shiftKey, swap: e.button === 2, tool: ed.tool, img: null, gen: 0 };
+  }
+
+  #projMove(e) {
+    const s = this.proj;
+    const b = s.toImg(e);
+    if (b) s.b = b;
+    s.shift = e.shiftKey;
+    s.img = s.tool.projectionImage(this.ed, s.a, s.b, { shift: s.shift, swap: s.swap, RW: s.P.RW, RH: s.P.RH });
+    this.decal = s.img ? { m: decalMatrix(s.P, s.img), alpha: s.img.opacity, canvas: s.img.canvas, gen: ++this._decalGen, w: s.img.w, h: s.img.h } : null;
+    this.#request();
+  }
+
+  async #projEnd(cancel) {
+    const s = this.proj;
+    this.proj = null;
+    const ed = this.ed;
+    const done = () => { this.decal = null; this.#request(); };
+    if (cancel || !s.img) { done(); return; }
+    const img = s.img;
+    const doc = ed.doc, mount = doc.mount;
+    const atlas = atlasOf(doc);
+    const target = atlas || doc;
+    const layer = atlas ? modelPaintLayer(atlas) : ed.editableLayer();
+    if (!layer?.img) { done(); return; }
+    const data = img.canvas.getContext('2d').getImageData(0, 0, img.w, img.h).data;
+    const opts = {
+      mount, projector: s.P, shape: { x: img.x, y: img.y, w: img.w, h: img.h, data }, atlasW: layer.img.width, atlasH: layer.img.height,
+      opacity: img.opacity, aa: img.aa, hidden: this.hidden.slice(), offsets: this.offsets.map((o) => o && o.slice()),
+      maxAngle: +ed.opts.projAngle || 80,
+    };
+    let paint = null;
+    const t0 = performance.now();
+    const device = ed.gpuCompositor?.device;
+    if (device) {
+      try { paint = await gpuProjectPaint(device, opts); this.lastProjection = { backend: 'webgpu' }; } catch (err) { console.warn('Stratum: projection on the CPU', err); paint = undefined; }
+    }
+    if (!device || paint === undefined) { paint = projectPaint(opts); this.lastProjection = { backend: 'cpu' }; }
+    this.lastProjection.ms = performance.now() - t0;
+    if (ed.doc !== doc) { done(); return; } // switched documents meanwhile
+    const r = commitProjection(target, layer, paint, `${s.tool.name} (projected)`, target.selection || null);
+    this.lastProjection.rect = r;
+    if (!r) ed.toast('The shape missed every visible surface.');
+    done();
+  }
+
   #source() {
     const doc = this.ed.doc;
     return doc?.session && !doc.atlas ? doc : null;
@@ -706,6 +881,7 @@ export class MeshView {
         return;
       }
       if (e.button !== 0 && e.button !== 2) return;
+      if (this.#projectionWanted()) { this.#projStart(e); return; }
       const hit = this.#hit(e);
       if (!hit) return;
       this.stroke = null;
@@ -761,6 +937,7 @@ export class MeshView {
         reproject(s.source, ed);
         return;
       }
+      if (this.proj) { this.#projMove(e); return; }
       if (!this.painting) return;
       const hit = this.#hit(e);
       if (!hit) return;
@@ -771,7 +948,8 @@ export class MeshView {
       ed.pointer('move', { ...p, sx: 0, sy: 0, button: this.paintButton === 2 ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: false });
       ed.requestOverlay();
     });
-    const end = () => {
+    const end = (e) => {
+      if (this.proj) { this.#projEnd(e?.type === 'pointercancel'); return; }
       this.dragging = null;
       this.objectDrag = null;
       this.moving = null;

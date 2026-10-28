@@ -89,6 +89,15 @@ const OPTIONS = {
   sampling: { type: 'select', label: 'Sample', items: [['image', 'Image'], ['layer', 'Layer']] },
   shape: { type: 'select', label: 'Style', items: [['outline', 'Outline'], ['fill', 'Filled'], ['both', 'Outline + fill']] },
   wrapShapes: { type: 'toggle', label: 'Wrap seams', title: 'Continue shapes across UV seams so they stay one surface' },
+  shape3d: {
+    type: 'select', label: '3D', title: 'How a shape dragged on the 3D model lands on it',
+    items: [['chart', 'Surface (per chart)'], ['wrap', 'Surface (wrap seams)'], ['projection', 'Projection']],
+  },
+  projectFrom: {
+    type: 'select', label: 'Project from', when: (o) => o.shape3d === 'projection',
+    items: [['view', 'View'], ['down', 'Down (−Y)'], ['up', 'Up (+Y)'], ['front', 'Front (−Z)'], ['back', 'Back (+Z)'], ['right', 'Right (−X)'], ['left', 'Left (+X)']],
+  },
+  projAngle: { type: 'range', label: 'Max angle', min: 10, max: 90, unit: '°', when: (o) => o.shape3d === 'projection' },
   sides: { type: 'range', label: 'Sides', min: 3, max: 16, unit: '' },
   shapeAngle: { type: 'range', label: 'Rotate', min: -180, max: 180, unit: '°' },
   gradient: { type: 'select', label: 'Type', items: GRADIENT_TYPES },
@@ -166,7 +175,7 @@ export function buildOptionsBar(root, ed) {
     const def = OPTIONS[key];
     if (!def) return null;
     const get = () => ed.opts[key];
-    const wrap = (...kids) => h('label', { class: 'opt' }, def.label ? h('span', { class: 'opt-label' }, def.label) : null, ...kids);
+    const wrap = (...kids) => h('label', { class: 'opt', title: def.title ?? null }, def.label ? h('span', { class: 'opt-label' }, def.label) : null, ...kids);
 
     switch (def.type) {
       case 'range': {
@@ -223,6 +232,7 @@ export function buildOptionsBar(root, ed) {
     clear(root);
     root.append(h('span', { class: 'opt-tool' }, ed.tool.name));
     for (const key of ed.tool.options ?? []) {
+      if (OPTIONS[key]?.when && !OPTIONS[key].when(ed.opts)) continue;
       const c = control(key);
       if (c) root.append(c);
     }
@@ -235,7 +245,8 @@ export function buildOptionsBar(root, ed) {
   document.getElementById('font-list')?.append(...FONTS.map((f) => h('option', { value: f })));
   ed.on('tool', rebuild);
   const resync = () => syncs.forEach((s) => s());
-  ed.on('opts', resync);
+  // Options shown only in some modes (`when`) appear or go when the mode changes.
+  ed.on('opts', (key) => { if (key === 'shape3d') rebuild(); else resync(); });
   ed.on('overlay', raf(resync)); // overlay fires per pointer sample during a drag: sync once a frame
   ed.on('doc:selection', resync);
   rebuild();

@@ -4,11 +4,12 @@
 // Same shading as the WebGL path in ui/meshview.js.
 
 const MESH_WGSL = `
-struct U { mvp: mat4x4f, nrm: mat4x4f };
+struct U { mvp: mat4x4f, nrm: mat4x4f, decal: mat4x4f, dp: vec4f }; // dp: on, opacity, max u, max v
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
-struct VOut { @builtin(position) pos: vec4f, @location(0) n: vec3f, @location(1) uv: vec2f };
+@group(0) @binding(3) var dtex: texture_2d<f32>; // Projection-mode preview (straight alpha)
+struct VOut { @builtin(position) pos: vec4f, @location(0) n: vec3f, @location(1) uv: vec2f, @location(2) w: vec3f };
 @vertex fn vs(@location(0) p: vec3f, @location(1) n: vec3f, @location(2) uv: vec2f) -> VOut {
   var o: VOut;
   var c = u.mvp * vec4f(p, 1.0);
@@ -16,11 +17,18 @@ struct VOut { @builtin(position) pos: vec4f, @location(0) n: vec3f, @location(1)
   o.pos = c;
   o.n = (u.nrm * vec4f(n, 0.0)).xyz;
   o.uv = uv;
+  o.w = p;
   return o;
 }
 @fragment fn fs(i: VOut) -> @location(0) vec4f {
   let t = textureSample(tex, samp, i.uv);          // premultiplied composite
-  let rgb = select(vec3f(0.0), t.rgb / t.a, t.a > 0.0); // the WebGL path samples straight colour
+  var rgb = select(vec3f(0.0), t.rgb / t.a, t.a > 0.0); // the WebGL path samples straight colour
+  let q = u.decal * vec4f(i.w, 1.0);
+  let dw = max(q.w, 1e-6);
+  let d = q.xy / dw;
+  let s = textureSampleLevel(dtex, samp, d, 0.0);
+  let inside = u.dp.x > 0.5 && q.w > 1e-6 && d.x >= 0.0 && d.y >= 0.0 && d.x <= u.dp.z && d.y <= u.dp.w;
+  rgb = select(rgb, mix(rgb, s.rgb, s.a * u.dp.y), inside);
   let light = 0.62 + 0.38 * max(dot(normalize(i.n), normalize(vec3f(0.35, 0.8, 0.4))), 0.0);
   return vec4f(rgb * light, 1.0);
 }`;
@@ -51,11 +59,32 @@ export class GpuMeshRenderer {
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
       multisample: { count: 4 },
     });
-    this.ubuf = d.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.ubuf = d.createBuffer({ size: 208, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.sampler = d.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
     this.bufs = null;
     this.count = 0;
+    this.decal = null;
+    this.#decalTexture(1, 1);
     this.stats = { frames: 0, bindGroups: 0 };
+  }
+
+  #decalTexture(w, h) {
+    this.dtex?.destroy();
+    this.dtex = this.device.createTexture({ size: [w, h], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+    this.dcap = [w, h];
+    this._tex = null; // rebuild the bind group
+  }
+
+  /** Projection preview: { m (world → decal uv, column-major), alpha, canvas, gen, w, h } or null. */
+  setDecal(decal) {
+    this.decal = decal || null;
+    if (!decal || decal.gen === this._decalGen) return;
+    this._decalGen = decal.gen;
+    if (decal.w > this.dcap[0] || decal.h > this.dcap[1]) {
+      const grow = (n, c) => Math.min(this.device.limits.maxTextureDimension2D, Math.max(n, Math.ceil(c * 1.5)));
+      this.#decalTexture(grow(decal.w, this.dcap[0]), grow(decal.h, this.dcap[1]));
+    }
+    this.device.queue.copyExternalImageToTexture({ source: decal.canvas }, { texture: this.dtex, premultipliedAlpha: false }, [decal.w, decal.h]);
   }
 
   /** Non-indexed triangles: Float32Arrays pos (xyz), nrm (xyz), uv (uv); count vertices. */
@@ -86,13 +115,20 @@ export class GpuMeshRenderer {
       this._tex = tex;
       this.group = d.createBindGroup({
         layout: this.pipe.getBindGroupLayout(0),
-        entries: [{ binding: 0, resource: { buffer: this.ubuf } }, { binding: 1, resource: tex.createView() }, { binding: 2, resource: this.sampler }],
+        entries: [{ binding: 0, resource: { buffer: this.ubuf } }, { binding: 1, resource: tex.createView() }, { binding: 2, resource: this.sampler }, { binding: 3, resource: this.dtex.createView() }],
       });
       this.stats.bindGroups++;
     }
-    const u = new Float32Array(32);
+    const u = new Float32Array(52);
     u.set(mvp, 0);
     u.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 16);
+    const dc = this.decal;
+    if (dc) {
+      // decal uv over the used part of the (larger) texture
+      const sx = dc.w / this.dcap[0], sy = dc.h / this.dcap[1], m = dc.m;
+      for (let c = 0; c < 4; c++) { u[32 + c * 4] = m[c * 4] * sx; u[32 + c * 4 + 1] = m[c * 4 + 1] * sy; u[32 + c * 4 + 2] = 0; u[32 + c * 4 + 3] = m[c * 4 + 3]; }
+      u.set([1, dc.alpha, sx, sy], 48);
+    }
     d.queue.writeBuffer(this.ubuf, 0, u);
     const enc = d.createCommandEncoder({ label: 'mesh' });
     const pass = enc.beginRenderPass({
@@ -112,7 +148,7 @@ export class GpuMeshRenderer {
 
   destroy() {
     for (const b of Object.values(this.bufs || {})) b.destroy();
-    this.msaa?.destroy(); this.depth?.destroy(); this.ubuf.destroy();
+    this.msaa?.destroy(); this.depth?.destroy(); this.ubuf.destroy(); this.dtex?.destroy();
     try { this.ctx?.unconfigure(); } catch { /* gone */ }
   }
 }

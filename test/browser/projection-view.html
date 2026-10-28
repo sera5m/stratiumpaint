@@ -1,0 +1,161 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<!-- Run by npm run test:gpu. The 3D view's Projection shape mode end to end: a rectangle dragged
+     over two stacked planes from the camera and from above (Down), on WebGL (CPU projection) and on
+     WebGPU (GPU projection): decal preview while dragging, paint only on the first surface hit,
+     hidden objects skipped, one history step, exact undo. -->
+<style>#pane { position: relative; width: 400px; height: 400px; } #pane canvas { position: absolute; inset: 0; width: 100%; height: 100%; }</style>
+<div id="pane"></div>
+<pre id="out"></pre>
+<script>
+const bail = (m) => { document.getElementById('out').textContent += '\nERROR ' + m; document.title = 'FAIL'; };
+addEventListener('error', (e) => bail(e.message + ' ' + (e.error?.stack || '')));
+addEventListener('unhandledrejection', (e) => bail(String(e.reason?.stack || e.reason)));
+</script>
+<script type="module">
+import { Editor } from '../../src/js/ui/editor.js';
+import { Doc } from '../../src/js/doc/document.js';
+import { MeshView } from '../../src/js/ui/meshview.js';
+import { getGPU } from '../../src/js/gpu/device.js';
+import { GpuCompositor } from '../../src/js/gpu/compositor.js';
+
+const out = [], fails = [];
+const log = (s) => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+const quad = (y, s, u0, v0, u1, v1) => ({ p: [[-s, y, -s], [s, y, -s], [s, y, s], [-s, y, s]], uv: [[u0, v0], [u1, v0], [u1, v1], [u0, v1]] });
+function mesh(quads) {
+  const pos = [], idx = [], uvs = [], groups = [];
+  quads.forEach((q, gi) => {
+    const base = pos.length / 3, start = idx.length / 3;
+    for (const p of q.p) pos.push(...p);
+    for (const [a, b, c] of [[0, 1, 2], [0, 2, 3]]) { idx.push(base + a, base + b, base + c); uvs.push(...q.uv[a], ...q.uv[b], ...q.uv[c]); }
+    groups.push({ name: gi ? 'floor' : 'lid', start, count: 2 });
+  });
+  return { positions: new Float32Array(pos), indices: new Uint32Array(idx), uvs: new Float32Array(uvs), groups };
+}
+const W = 256, H = 256;
+const ed = new Editor(), doc = new Doc(W, H);
+doc.layers[0].img.data.fill(255); doc.layers[0].touch();
+// lid: y = 0.5, [-0.5,0.5]², top-left quarter of the texture; floor: y = 0, [-1,1]², bottom-right quarter
+doc.mount = mesh([quad(0.5, 0.5, 0, 0, 0.5, 0.5), quad(0, 1, 0.5, 0.5, 1, 1)]);
+ed.addDoc(doc);
+const mv = new MeshView(ed, document.getElementById('pane'));
+mv.canvas.setPointerCapture = () => {}; // synthetic pointers have no capture
+await frame();
+mv.yaw = 0; mv.pitch = 1.3; await frame();
+ed.setTool('rect');
+ed.setOpt('shape', 'fill');
+ed.setOpt('shape3d', 'projection');
+if (ed.opts.wrapShapes !== true) fails.push('switching to Projection changed Wrap seams');
+ed.setOpt('shape3d', 'chart');
+if (ed.opts.wrapShapes !== false) fails.push('Surface (per chart) did not turn Wrap seams off');
+ed.setOpt('wrapShapes', true);
+if (ed.opts.shape3d !== 'wrap') fails.push('Wrap seams on did not select Surface (wrap seams)');
+ed.setOpt('shape3d', 'projection');
+
+const px = (x, y) => { const d = doc.layers[0].img.data, i = (y * W + x) * 4; return [d[i], d[i + 1], d[i + 2], d[i + 3]]; };
+const red = (p) => p[0] > 200 && p[1] < 60;
+const white = (p) => p[0] === 255 && p[1] === 255 && p[2] === 255;
+function centreColour() {
+  const gl = mv.gl, p = new Uint8Array(4);
+  gl.readPixels(gl.drawingBufferWidth >> 1, gl.drawingBufferHeight >> 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, p);
+  return [...p];
+}
+async function gpuCentre() {
+  const t = mv._gpuTarget, dev = ed.gpuCompositor.device;
+  const buf = dev.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = dev.createCommandEncoder();
+  enc.copyTextureToBuffer({ texture: t, origin: [t.width >> 1, t.height >> 1] }, { buffer: buf, bytesPerRow: 256 }, [1, 1]);
+  dev.queue.submit([enc.finish()]);
+  await buf.mapAsync(GPUMapMode.READ);
+  const p = [...new Uint8Array(buf.getMappedRange()).slice(0, 4)];
+  buf.unmap(); buf.destroy();
+  return t.format.startsWith('bgra') ? [p[2], p[1], p[0], p[3]] : p;
+}
+// texel of a world point on the lid / floor
+const lid = (x, z) => [Math.floor((x + 0.5) * 0.5 * W), Math.floor((z + 0.5) * 0.5 * H)];
+const floor = (x, z) => [Math.floor((0.5 + (x + 1) * 0.25) * W), Math.floor((0.5 + (z + 1) * 0.25) * H)];
+
+async function round(label, from) {
+  ed.setOpt('projectFrom', from);
+  const before = new Uint8ClampedArray(doc.layers[0].img.data), h0 = doc.history.index;
+  ed.primary = { r: 230, g: 20, b: 20, a: 1 };
+  const t0 = performance.now();
+  let decalSeen = false;
+  {
+    const r = mv.canvas.getBoundingClientRect();
+    const fire = (type, x, y) => mv.canvas.dispatchEvent(new PointerEvent(type, { clientX: r.left + x, clientY: r.top + y, button: 0, pointerId: 1, bubbles: true }));
+    mv.lastProjection = null;
+    fire('pointerdown', 20, 20);
+    for (let k = 1; k <= 4; k++) fire('pointermove', 20 + 90 * k, 20 + 90 * k);
+    await frame();
+    decalSeen = !!mv.decal;
+    if (mv.backend === 'webgpu') {
+      const c = await gpuCentre();
+      if (!(c[0] > 110 && c[1] < 40)) fails.push(`${label}: WebGPU decal preview not visible at the centre (${c})`);
+    }
+    if (mv.backend === 'webgl') { const c = centreColour(); if (!(c[0] > 110 && c[1] < 40)) // shaded red (light ≥ 0.62)
+       fails.push(`${label}: decal preview not visible at the centre (${c})`); }
+    fire('pointerup', 380, 380);
+    for (let i = 0; i < 200 && !mv.lastProjection; i++) await new Promise((res) => setTimeout(res, 10));
+    await frame();
+  }
+  const lp = mv.lastProjection || {};
+  log(`${label}: backend ${lp.backend} ${lp.ms?.toFixed(1)} ms, rect ${JSON.stringify(lp.rect)}, history +${doc.history.index - h0}`);
+  if (!decalSeen) fails.push(`${label}: no decal while dragging`);
+  if (mv.decal) fails.push(`${label}: decal left after release`);
+  if (doc.history.index - h0 !== 1) fails.push(`${label}: ${doc.history.index - h0} history steps`);
+  return { before, lp };
+}
+
+async function checks(label, from, expectBackend) {
+  const { before, lp } = await round(label, from);
+  if (lp.backend !== expectBackend) fails.push(`${label}: projected on ${lp.backend}, expected ${expectBackend}`);
+  if (!red(px(...lid(0, 0)))) fails.push(`${label}: lid centre not painted ${px(...lid(0, 0))}`);
+  if (!white(px(...floor(0, 0)))) fails.push(`${label}: floor under the lid painted ${px(...floor(0, 0))}`);
+  if (!red(px(...floor(0.8, 0.8)))) fails.push(`${label}: open floor not painted ${px(...floor(0.8, 0.8))}`);
+  doc.undo();
+  const now = doc.layers[0].img.data;
+  let diff = 0; for (let i = 0; i < now.length; i++) if (now[i] !== before[i]) diff++;
+  if (diff) fails.push(`${label}: undo left ${diff} bytes changed`);
+}
+
+await checks('WebGL, View', 'view', 'cpu');
+await checks('WebGL, Down', 'down', 'cpu');
+// hidden lid: neither painted nor in the way
+mv.selectedGroup = 0; document.querySelector('.obj-hide').click(); await frame();
+{
+  await round('WebGL, View, lid hidden', 'view');
+  if (!white(px(...lid(0, 0)))) fails.push('hidden lid got paint');
+  if (!red(px(...floor(0, 0)))) fails.push('floor under the hidden lid not painted');
+  doc.undo();
+}
+document.querySelector('.obj-hide').click(); await frame();
+
+const gpu = await getGPU().catch(() => null);
+if (!gpu) log('WebGPU: skipped');
+else {
+  const comp = new GpuCompositor(gpu, document.createElement('canvas'));
+  mv._gpuTarget = gpu.device.createTexture({ size: [mv.canvas.width, mv.canvas.height], format: gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  ed.gpuCompositor = comp; ed.emit('renderer', 'webgpu'); await frame();
+  if (mv.backend !== 'webgpu') fails.push(`3D backend ${mv.backend}`);
+  await checks('WebGPU, View', 'view', 'webgpu');
+  await checks('WebGPU, Down', 'down', 'webgpu');
+  ed.gpuCompositor = null; ed.emit('renderer', 'canvas'); await frame();
+}
+// existing modes untouched: a surface-mode drag still goes through the tool (one step, chart paint)
+ed.setOpt('shape3d', 'wrap');
+{
+  const h0 = doc.history.index;
+  const r = mv.canvas.getBoundingClientRect();
+  const fire = (type, x, y) => mv.canvas.dispatchEvent(new PointerEvent(type, { clientX: r.left + x, clientY: r.top + y, button: 0, pointerId: 1, bubbles: true }));
+  fire('pointerdown', 190, 190); fire('pointermove', 205, 205); fire('pointermove', 215, 215); fire('pointerup', 215, 215);
+  await frame();
+  log(`surface mode: history +${doc.history.index - h0}`);
+  if (doc.history.index - h0 !== 1) fails.push('surface mode drag did not commit one step');
+  if (mv.lastProjection && mv.lastProjection.rect === undefined) fails.push('surface mode ran a projection');
+}
+document.title = fails.length ? 'FAIL' : 'PASS';
+log(fails.length ? fails.join('\n') : 'projection mode in the 3D view: PASS');
+</script>
