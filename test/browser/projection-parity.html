@@ -10,7 +10,7 @@
      <0.2% texels off in colour. -->
 <pre id="out"></pre>
 <script type="module">
-import { projectPaint, viewProjector, axisProjector } from '../../src/js/core/projection.js';
+import { projectPaint, viewProjector, axisProjector, aimProjection, projectorAxes, ROT_PRESETS } from '../../src/js/core/projection.js';
 import { gpuProjectPaint } from '../../src/js/gpu/projection.js';
 import { getGPU } from '../../src/js/gpu/device.js';
 
@@ -98,6 +98,18 @@ try {
     { name: 'box hidden, Down', mount: scene, P: axisProjector('down', [-2, 5, -2], 0.01, 400, 400), shape: shapeImage(20, 60, 360, 280, true), hidden: [true] },
     { name: 'box moved, View, opacity 0.6, maxAngle 60', mount: scene, P: viewP([-1.5, 2.8, 2.6], 700, 500), shape: shapeImage(100, 60, 500, 380, true), offsets: [[0.2, 0.5, -0.3]], opacity: 0.6, maxAngle: 60 },
   ];
+  // The projector object: rotation (XYZ Euler), location, parallel / point, several origins.
+  const aimed = (mount, rot, loc, source, points, spread, dist = 2) => {
+    const ax = projectorAxes(rot);
+    const a = aimProjection({ n: ax.forward, U: ax.right, V: ax.up.map((v) => -v), anchor: loc, scale: 0.008, source, base: ax.forward.map((v) => -v * dist), points, spread, positions: mount.positions });
+    return { P: a.projectors, shape: shapeImage(Math.round(a.RW * 0.15), Math.round(a.RH * 0.15), Math.round(a.RW * 0.7), Math.round(a.RH * 0.7), true) };
+  };
+  cases.push(
+    { name: 'stacked, projector Down, point', mount: stacked, ...aimed(stacked, ROT_PRESETS.down, [0, 1.5, 0], 'point', 1, 0) },
+    { name: 'stacked, Down, 6 point origins 30°', mount: stacked, ...aimed(stacked, ROT_PRESETS.down, [0, 1.5, 0], 'point', 6, 30, 3) },
+    { name: 'boxes, rot (-60,30,0), 4 parallel 35°', mount: scene, ...aimed(scene, [-60, 30, 0], [0, 1, 0.5], 'parallel', 4, 35) },
+    { name: 'boxes, rot (-35,-50,10), 3 point 20°, max 60', mount: scene, ...aimed(scene, [-35, -50, 10], [-0.5, 1.2, 1.5], 'point', 3, 20), maxAngle: 60 },
+  );
   for (const c of cases) {
     const opts = { mount: c.mount, projector: c.P, shape: c.shape, atlasW: AW, atlasH: AH, hidden: c.hidden || [], offsets: c.offsets || [], opacity: c.opacity ?? 1, aa: true, maxAngle: c.maxAngle ?? 80 };
     const t0 = performance.now(); const cpu = projectPaint(opts); const t1 = performance.now();
@@ -107,7 +119,16 @@ try {
     log(`${c.name.padEnd(44)} painted ${String(r.painted).padStart(6)}  off>24: ${r.off} (${(frac * 100).toFixed(2)}%)  mean|Δa| ${r.mean.toFixed(2)}  max|Δrgb| ${r.maxCol} (texels >6: ${r.colOff})  cpu ${(t1 - t0).toFixed(1)} ms  gpu ${(t2 - t1).toFixed(1)} ms`);
     if (!r.painted) fails.push(`${c.name}: nothing painted`);
     if (frac > 0.01 || r.mean > 1 || r.colOff / Math.max(1, r.painted) > 0.002) fails.push(`${c.name}: GPU and CPU differ beyond tolerance`);
-    if (c.mount === stacked && gp) { // occlusion on the GPU: nothing under the top plane
+    if (c.mount === stacked && gp && Array.isArray(c.P)) { // several origins: none sees the floor's middle under the lid
+      let bad = 0;
+      for (let y = 0; y < gp.h; y++) for (let x = 0; x < gp.w; x++) {
+        const u = (gp.x + x) / AW, v = (gp.y + y) / AH; // floor ±1.5 over u,v 0.5..1: |x|,|z| < 0.5 ↔ 0.667..0.833
+        if (u > 0.68 && u < 0.82 && v > 0.68 && v < 0.82 && gp.data[(y * gp.w + x) * 4 + 3]) bad++;
+      }
+      log(`  floor middle under the lid painted on the GPU (all origins): ${bad}`);
+      if (bad) fails.push(`${c.name}: GPU painted through the lid (${bad})`);
+    }
+    if (c.mount === stacked && gp && !Array.isArray(c.P)) { // occlusion on the GPU: nothing under the top plane
       let bad = 0;
       for (let y = 0; y < gp.h; y++) for (let x = 0; x < gp.w; x++) {
         const u = (gp.x + x) / AW, v = (gp.y + y) / AH;

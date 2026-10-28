@@ -57,6 +57,169 @@ export function decalMatrix(P, box) {
   return m;
 }
 
+// ------------------------------------------------------------------ the projector object
+// A projector is an object like a Blender camera or spot light: a location and an XYZ Euler
+// rotation in degrees (Blender's default order: R = Rz · Ry · Rx, i.e. turn about X, then Y, then
+// Z, all about the world axes). It fires along its local −Z; local +X is the image's right and
+// local +Y its up. World is Y-up (glTF). Rotation (0, 0, 0) fires along −Z (the Front preset).
+const D2R = Math.PI / 180;
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const add3 = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const mul3 = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm3 = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+/** Rotation presets (XYZ Euler, degrees). View is the camera's, see eulerFromView. */
+export const ROT_PRESETS = { down: [-90, 0, 0], up: [90, 0, 0], front: [0, 0, 0], back: [0, 180, 0], right: [0, 90, 0], left: [0, -90, 0] };
+
+/** Rotate v by XYZ Euler angles (degrees): Rz · Ry · Rx · v. */
+export function rotateEuler(v, [rx, ry, rz]) {
+  let [x, y, z] = v;
+  let c = Math.cos(rx * D2R), s = Math.sin(rx * D2R);
+  [y, z] = [y * c - z * s, y * s + z * c];
+  c = Math.cos(ry * D2R); s = Math.sin(ry * D2R);
+  [x, z] = [x * c + z * s, -x * s + z * c];
+  c = Math.cos(rz * D2R); s = Math.sin(rz * D2R);
+  [x, y] = [x * c - y * s, x * s + y * c];
+  return [x, y, z];
+}
+
+/** The projector's axes for a rotation: right (+X), up (+Y), forward (the firing direction, −Z). */
+export function projectorAxes(rot) {
+  return { right: rotateEuler([1, 0, 0], rot), up: rotateEuler([0, 1, 0], rot), forward: rotateEuler([0, 0, -1], rot) };
+}
+
+/** Rotation that looks like the 3D view's camera (yaw / pitch in radians, as in MeshView). */
+export function eulerFromView(yaw, pitch) {
+  const w = (a) => { let d = ((a % 360) + 540) % 360 - 180; if (Math.abs(d) < 1e-9) d = 0; return d; };
+  return [w(-pitch / D2R), w(yaw / D2R), 0];
+}
+
+/** Preset name of a rotation ('custom' if none); compared by direction and image up. */
+export function presetOf(rot) {
+  const a = projectorAxes(rot);
+  for (const [name, r] of Object.entries(ROT_PRESETS)) {
+    const b = projectorAxes(r);
+    if (dot3(a.forward, b.forward) > 1 - 1e-9 && dot3(a.up, b.up) > 1 - 1e-9) return name;
+  }
+  return 'custom';
+}
+
+/** The axis that turning Euler component k (0 X, 1 Y, 2 Z) rotates about (gimbal, XYZ order). */
+export function eulerAxis(rot, k) {
+  if (k === 2) return [0, 0, 1];
+  if (k === 1) return rotateEuler([0, 1, 0], [0, 0, rot[2]]);
+  return rotateEuler([1, 0, 0], [0, rot[1], rot[2]]);
+}
+
+/** Image-plane axes for looking along n: U to the right, V down (as on screen; the axis presets'). */
+export function basisFor(n) {
+  const up = Math.abs(n[1]) > 0.999 ? (n[1] < 0 ? [0, 0, -1] : [0, 0, 1]) : [0, 1, 0];
+  const U = norm3(cross3(n, up));
+  return { U, V: cross3(n, U) };
+}
+
+/** v turned by `deg` degrees about the axis n × a (which takes n towards a). */
+function tilt(v, n, a, deg) {
+  const k = norm3(cross3(n, a)), t = deg * D2R, c = Math.cos(t), s = Math.sin(t);
+  const kv = cross3(k, v), kd = dot3(k, v) * (1 - c);
+  return [v[0] * c + kv[0] * s + k[0] * kd, v[1] * c + kv[1] * s + k[1] * kd, v[2] * c + kv[2] * s + k[2] * kd];
+}
+
+/**
+ * The origins a projection fires from: one, or `points` spread evenly in a ring `spread` degrees
+ * around the main direction n. Parallel: { kind: 'parallel', d } (direction). Point: { kind:
+ * 'point', E } (position), the main source at anchor + base, the ring turned about the anchor.
+ */
+export function ringOrigins({ n, U, V, anchor, source = 'parallel', base = null, points = 1, spread = 0 }) {
+  const N = Math.max(1, Math.round(points) || 1), one = N === 1 || !(spread > 0);
+  const out = [];
+  for (let k = 0; k < (one ? 1 : N); k++) {
+    const phi = (2 * Math.PI * k) / N, a = add3(mul3(U, Math.cos(phi)), mul3(V, Math.sin(phi)));
+    const deg = one ? 0 : spread;
+    if (source === 'point') out.push({ kind: 'point', E: add3(anchor, deg ? tilt(base, n, a, deg) : base) });
+    else out.push({ kind: 'parallel', d: norm3(deg ? tilt(n, n, a, deg) : n) });
+  }
+  return out;
+}
+
+/**
+ * Projector of one origin onto the shape plane (through plane.anchor, facing plane.n, image pixel
+ * (x, y) at plane.O + U·x·scale + V·y·scale): a surface point maps to where its ray from the
+ * origin crosses that plane. Parallel origins are orthographic (oblique when tilted), point
+ * origins perspective. Null when the origin cannot reach the plane.
+ */
+export function originProjector(o, plane, RW, RH) {
+  const { n, U, V, O, scale: s, anchor } = plane;
+  if (o.kind === 'point') {
+    const E = o.E, Dk = dot3(n, sub3(anchor, E));
+    if (!(Dk > 1e-9)) return null;
+    const rw = [n[0], n[1], n[2], -dot3(n, E)];
+    const row = (X) => { const xe = dot3(X, sub3(E, O)); return [0, 1, 2, 3].map((i) => (xe * rw[i] + Dk * (i < 3 ? X[i] : -dot3(X, E))) / s); };
+    return { kind: 'point', rx: row(U), ry: row(V), rd: rw.slice(), rw, RW, RH, eye: [...E], dir: null };
+  }
+  const d = o.d, nd = dot3(n, d);
+  if (!(nd > 0.05)) return null; // (nearly) parallel to the plane, or firing away from it
+  const nA = dot3(n, anchor);
+  const row = (X) => { const k = dot3(X, d) / nd; return [X[0] - k * n[0], X[1] - k * n[1], X[2] - k * n[2], k * nA - dot3(X, O)].map((v) => v / s); };
+  const reach = plane.reach || 1;
+  return { kind: 'axis', rx: row(U), ry: row(V), rd: [d[0], d[1], d[2], -(dot3(d, anchor) - reach)], rw: [0, 0, 0, 1], RW, RH, eye: null, dir: [...d] };
+}
+
+/** Shape-plane pixel of world point Q on the plane. */
+export function planeCoords(plane, Q) {
+  const r = sub3(Q, plane.O);
+  return [dot3(plane.U, r) / plane.scale, dot3(plane.V, r) / plane.scale];
+}
+
+/**
+ * Everything one aimed projection needs: n (shooting direction), anchor (plane point, usually the
+ * surface under the cursor), scale (world units per image pixel), source / base / points /
+ * spread (see ringOrigins), positions (visible model, xyz) to size the image so the whole model's
+ * footprint fits (capped at maxPx; the scale grows instead), or `view` = { O, RW, RH } to use a
+ * fixed image (the screen). Returns { plane, origins, projectors, main, RW, RH }; `main` is the
+ * centre (spread 0) projector, for the drag preview.
+ */
+export function aimProjection({ n, U = null, V = null, anchor, scale, source = 'parallel', base = null, points = 1, spread = 0,
+  positions = null, view = null, maxPx = 4096 }) {
+  n = norm3(n);
+  if (!U || !V) ({ U, V } = basisFor(n));
+  if (source === 'point' && !base) base = mul3(n, -1);
+  const origins = ringOrigins({ n, U, V, anchor, source, base, points, spread });
+  const mainO = ringOrigins({ n, U, V, anchor, source, base, points: 1 })[0];
+  let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const step = positions ? Math.max(1, Math.floor(positions.length / 3 / 60000)) * 3 : 3;
+  for (let i = 0; positions && i < positions.length; i += step) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], positions[i + k]); hi[k] = Math.max(hi[k], positions[i + k]); }
+  const diag = positions && hi[0] >= lo[0] ? Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1 : 2;
+  let O, RW, RH, s = scale;
+  if (view) ({ O, RW, RH } = view);
+  else {
+    // Footprint of the model on the plane from every origin (world units from the anchor).
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    const lim = diag * 10, nA = dot3(n, anchor);
+    for (const o of [...origins, mainO]) {
+      for (let i = 0; positions && i < positions.length; i += step) {
+        const p = [positions[i], positions[i + 1], positions[i + 2]];
+        let q;
+        if (o.kind === 'point') { const w = dot3(n, sub3(p, o.E)); if (!(w > 1e-9)) continue; q = add3(o.E, mul3(sub3(p, o.E), dot3(n, sub3(anchor, o.E)) / w)); }
+        else { const nd = dot3(n, o.d); if (!(nd > 0.05)) continue; q = add3(p, mul3(o.d, (nA - dot3(n, p)) / nd)); }
+        const r = sub3(q, anchor), u = Math.max(-lim, Math.min(lim, dot3(U, r))), v = Math.max(-lim, Math.min(lim, dot3(V, r)));
+        if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v;
+      }
+    }
+    if (!(u1 >= u0)) { u0 = v0 = -diag; u1 = v1 = diag; }
+    const pad = 0.05 * Math.max(u1 - u0, v1 - v0, 1e-3);
+    u0 -= pad; v0 -= pad; u1 += pad; v1 += pad;
+    if (Math.max(u1 - u0, v1 - v0) / s > maxPx) s = Math.max(u1 - u0, v1 - v0) / maxPx;
+    O = add3(anchor, add3(mul3(U, u0), mul3(V, v0)));
+    RW = Math.max(1, Math.ceil((u1 - u0) / s)); RH = Math.max(1, Math.ceil((v1 - v0) / s));
+  }
+  const plane = { n, U, V, O, scale: s, anchor: [...anchor], reach: diag * 2 };
+  const projectors = origins.map((o) => originProjector(o, plane, RW, RH)).filter(Boolean);
+  return { plane, origins, projectors, main: originProjector(mainO, plane, RW, RH), RW, RH };
+}
+
 /** World point → [px, py, depth, w] (w <= 0: behind the projector). */
 export function project(P, x, y, z, out = [0, 0, 0, 0]) {
   const { rx, ry, rd, rw } = P;
@@ -154,6 +317,13 @@ function sampleShape(S, px, py, aa, out) {
   return out;
 }
 
+/** Smallest rect holding all of `boxes` ({x,y,w,h}). */
+export function unionBox(boxes) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const b of boxes) { x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h); }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
 /**
  * Pass 1 of a projection (shared by the CPU and WebGPU paths): the faces that can receive paint
  * (visible, in front of the projector, over the shape) with their UV corners, normal and depth
@@ -208,50 +378,56 @@ export function projectionPlan({ mount, projector: P, shape: S, atlasW: W, atlas
  * opacity, facing fade and antialiasing), ready to blend onto the layer.
  */
 export function projectPaint(opts) {
-  const { mount, projector: P, shape: S, atlasW: W, atlasH: H, opacity = 1, aa = true, hidden = [], offsets = [], dilate = 2, depth = null } = opts;
+  const { mount, shape: S, atlasW: W, atlasH: H, opacity = 1, aa = true, hidden = [], offsets = [], dilate = 2, depth = null } = opts;
   if (!mount?.uvs || !S?.w || !S?.h) return null;
-  const plan = projectionPlan(opts);
-  if (!plan) return null;
-  const { R, cand, box, cosMax, cosFull } = plan;
-  const D = depth || depthMap(mount, P, R, { hidden, offsets });
+  // Several origins (opts.projector an array): each has its own footprint, depth map and facing;
+  // a texel keeps the strongest paint any origin gives it (union, best facing).
+  const list = Array.isArray(opts.projector) ? opts.projector : [opts.projector];
+  const plans = [];
+  for (const P of list) { const pl = P && projectionPlan({ ...opts, projector: P }); if (pl) plans.push({ P, ...pl }); }
+  if (!plans.length) return null;
+  const box = unionBox(plans.map((p) => p.box));
   const bx0 = box.x, by0 = box.y, bx1 = box.x + box.w - 1, by1 = box.y + box.h - 1, BW = box.w;
   const A = new Float32Array(box.w * box.h), C = new Uint8ClampedArray(box.w * box.h * 3);
   const pr = [0, 0, 0, 0], sm = [0, 0, 0, 0];
-  // Pass 2: every texel of those faces: project, inside the shape, first hit, facing.
-  for (const f of cand) {
-    projectionStats.uvTris++;
-    const { c, us, vs } = f;
-    const area = (us[1] - us[0]) * (vs[2] - vs[0]) - (vs[1] - vs[0]) * (us[2] - us[0]);
-    if (Math.abs(area) < 1e-12) continue;
-    const x0 = Math.max(bx0, Math.floor(Math.min(...us))), x1 = Math.min(bx1, Math.ceil(Math.max(...us)));
-    const y0 = Math.max(by0, Math.floor(Math.min(...vs))), y1 = Math.min(by1, Math.ceil(Math.max(...vs)));
-    for (let y = y0; y <= y1; y++) {
-      const ty = y + 0.5;
-      for (let x = x0; x <= x1; x++) {
-        const tx = x + 0.5;
-        const l1 = ((us[2] - tx) * (vs[0] - ty) - (vs[2] - ty) * (us[0] - tx)) / area;
-        const l2 = ((us[0] - tx) * (vs[1] - ty) - (vs[0] - ty) * (us[1] - tx)) / area;
-        const l0 = 1 - l1 - l2;
-        if (l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9) continue;
-        projectionStats.texels++;
-        const wx = l0 * c[0] + l1 * c[3] + l2 * c[6], wy = l0 * c[1] + l1 * c[4] + l2 * c[7], wz = l0 * c[2] + l1 * c[5] + l2 * c[8];
-        project(P, wx, wy, wz, pr);
-        if (!(pr[3] > 1e-9)) continue;
-        const px = pr[0], py = pr[1];
-        if (px < S.x || py < S.y || px >= S.x + S.w || py >= S.y + S.h) continue;
-        sampleShape(S, px, py, aa, sm);
-        if (sm[3] <= 0) continue;
-        const dk = (Math.floor(py) - R.y) * R.w + (Math.floor(px) - R.x);
-        if (!(pr[2] <= D[dk] + f.bias)) continue; // something nearer the projector covers it
-        // Facing: |cos| between the face normal and the projection ray (double-sided, like the view).
-        let dx, dy, dz;
-        if (P.eye) { dx = wx - P.eye[0]; dy = wy - P.eye[1]; dz = wz - P.eye[2]; const l = Math.hypot(dx, dy, dz) || 1; dx /= l; dy /= l; dz /= l; } else [dx, dy, dz] = P.dir;
-        const cs = Math.abs(f.n[0] * dx + f.n[1] * dy + f.n[2] * dz);
-        if (cs <= cosMax) continue;
-        const face = cs >= cosFull ? 1 : (cs - cosMax) / Math.max(1e-6, cosFull - cosMax);
-        const a = sm[3] * face * opacity;
-        const k = (y - by0) * BW + (x - bx0);
-        if (a > A[k]) { A[k] = a; C[k * 3] = sm[0]; C[k * 3 + 1] = sm[1]; C[k * 3 + 2] = sm[2]; }
+  for (const { P, R, cand, cosMax, cosFull } of plans) {
+    const D = (list.length === 1 && depth) || depthMap(mount, P, R, { hidden, offsets });
+    // Pass 2: every texel of those faces: project, inside the shape, first hit, facing.
+    for (const f of cand) {
+      projectionStats.uvTris++;
+      const { c, us, vs } = f;
+      const area = (us[1] - us[0]) * (vs[2] - vs[0]) - (vs[1] - vs[0]) * (us[2] - us[0]);
+      if (Math.abs(area) < 1e-12) continue;
+      const x0 = Math.max(bx0, Math.floor(Math.min(...us))), x1 = Math.min(bx1, Math.ceil(Math.max(...us)));
+      const y0 = Math.max(by0, Math.floor(Math.min(...vs))), y1 = Math.min(by1, Math.ceil(Math.max(...vs)));
+      for (let y = y0; y <= y1; y++) {
+        const ty = y + 0.5;
+        for (let x = x0; x <= x1; x++) {
+          const tx = x + 0.5;
+          const l1 = ((us[2] - tx) * (vs[0] - ty) - (vs[2] - ty) * (us[0] - tx)) / area;
+          const l2 = ((us[0] - tx) * (vs[1] - ty) - (vs[0] - ty) * (us[1] - tx)) / area;
+          const l0 = 1 - l1 - l2;
+          if (l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9) continue;
+          projectionStats.texels++;
+          const wx = l0 * c[0] + l1 * c[3] + l2 * c[6], wy = l0 * c[1] + l1 * c[4] + l2 * c[7], wz = l0 * c[2] + l1 * c[5] + l2 * c[8];
+          project(P, wx, wy, wz, pr);
+          if (!(pr[3] > 1e-9)) continue;
+          const px = pr[0], py = pr[1];
+          if (px < S.x || py < S.y || px >= S.x + S.w || py >= S.y + S.h) continue;
+          sampleShape(S, px, py, aa, sm);
+          if (sm[3] <= 0) continue;
+          const dk = (Math.floor(py) - R.y) * R.w + (Math.floor(px) - R.x);
+          if (!(pr[2] <= D[dk] + f.bias)) continue; // something nearer the projector covers it
+          // Facing: |cos| between the face normal and the projection ray (double-sided, like the view).
+          let dx, dy, dz;
+          if (P.eye) { dx = wx - P.eye[0]; dy = wy - P.eye[1]; dz = wz - P.eye[2]; const l = Math.hypot(dx, dy, dz) || 1; dx /= l; dy /= l; dz /= l; } else [dx, dy, dz] = P.dir;
+          const cs = Math.abs(f.n[0] * dx + f.n[1] * dy + f.n[2] * dz);
+          if (cs <= cosMax) continue;
+          const face = cs >= cosFull ? 1 : (cs - cosMax) / Math.max(1e-6, cosFull - cosMax);
+          const a = sm[3] * face * opacity;
+          const k = (y - by0) * BW + (x - bx0);
+          if (a > A[k]) { A[k] = a; C[k * 3] = sm[0]; C[k * 3 + 1] = sm[1]; C[k * 3 + 2] = sm[2]; }
+        }
       }
     }
   }
