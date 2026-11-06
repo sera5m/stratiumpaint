@@ -120,6 +120,29 @@ export function createCommands({ ed, view }) {
     return true;
   }
 
+  async function convertTo(format) {
+    const doc = ed.doc;
+    if (!doc) return;
+    const meta = FORMATS[format];
+    let quality = doc.quality ?? 0.92;
+    if (format === 'jpeg' || format === 'webp') {
+      const q = await dlg.qualityDialog(meta.label, Math.round(quality * 100));
+      if (q == null) return;
+      quality = q;
+    }
+    const bytes = await encodeDocument(doc, format, quality);
+    const name = `${stripExt(doc.name)}.${meta.ext}`;
+    if (platform.isNative) {
+      const path = await platform.pickSavePath(name);
+      if (!path) return;
+      await platform.writeFile(path, bytes);
+      ed.toast(`Converted to ${base(path)}`);
+    } else {
+      platform.download(name, bytes, meta.mime);
+      ed.toast(`Converted to ${name}`);
+    }
+  }
+
   async function closeDoc(doc = ed.doc) {
     if (!doc) return true;
     freezeScratch(doc);
@@ -207,6 +230,10 @@ export function createCommands({ ed, view }) {
     ed.addDoc(doc);
     ed.toast('Restored a backup into a new image. The original file was not overwritten.');
   }), { enabled: () => true });
+  add('convertPng', 'PNG', guard(() => convertTo('png')));
+  add('convertJpeg', 'JPEG', guard(() => convertTo('jpeg')));
+  add('convertWebp', 'WebP', guard(() => convertTo('webp')));
+  add('convertOra', 'OpenRaster (layers)', guard(() => convertTo('ora')));
   add('close', 'Close', guard(() => closeDoc()), { shortcut: 'Ctrl+W' });
   add('quit', 'Quit', guard(async () => { if (await closeAll()) platform.quit(); }), { shortcut: 'Ctrl+Q', enabled: () => platform.isNative });
 
