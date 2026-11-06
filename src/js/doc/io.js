@@ -1,5 +1,6 @@
 // Reading and writing image files. Browser-only (uses canvas for codecs).
 import { decodeOra, encodeOra } from '../core/ora.js';
+import { encodeBmp, encodeGif, encodeTga } from '../core/encode.js';
 import { Doc } from './document.js';
 import { Layer } from './layer.js';
 import { createCanvas } from './raster.js';
@@ -8,10 +9,13 @@ export const FORMATS = {
   png: { mime: 'image/png', ext: 'png', label: 'PNG' },
   jpeg: { mime: 'image/jpeg', ext: 'jpg', label: 'JPEG' },
   webp: { mime: 'image/webp', ext: 'webp', label: 'WebP' },
+  gif: { mime: 'image/gif', ext: 'gif', label: 'GIF' },
+  bmp: { mime: 'image/bmp', ext: 'bmp', label: 'Bitmap (BMP)' },
+  tga: { mime: 'image/x-tga', ext: 'tga', label: 'Targa (TGA)' },
   ora: { mime: 'image/openraster', ext: 'ora', label: 'OpenRaster (layers)' },
 };
 
-const BY_EXT = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', jpe: 'jpeg', webp: 'webp', ora: 'ora' };
+const BY_EXT = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', jpe: 'jpeg', webp: 'webp', gif: 'gif', bmp: 'bmp', tga: 'tga', ora: 'ora' };
 
 export function formatFromName(name) {
   const m = /\.([a-z0-9]+)$/i.exec(name ?? '');
@@ -96,6 +100,12 @@ export async function encodeDocument(doc, format, quality = 0.92) {
       mergedPng: await canvasToBytes(merged, 'image/png'),
       thumbPng: await canvasToBytes(thumb, 'image/png'),
     });
+  }
+  if (format === 'bmp' || format === 'gif' || format === 'tga') {
+    const img = doc.compositeImage();
+    if (format === 'bmp') return encodeBmp(img);
+    if (format === 'gif') return encodeGif(img);
+    return encodeTga(img);
   }
   let canvas = merged;
   if (format === 'jpeg') { // JPEG has no alpha: flatten onto white

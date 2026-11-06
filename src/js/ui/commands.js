@@ -233,6 +233,9 @@ export function createCommands({ ed, view }) {
   add('convertPng', 'PNG', guard(() => convertTo('png')));
   add('convertJpeg', 'JPEG', guard(() => convertTo('jpeg')));
   add('convertWebp', 'WebP', guard(() => convertTo('webp')));
+  add('convertGif', 'GIF', guard(() => convertTo('gif')));
+  add('convertBmp', 'Bitmap (BMP)', guard(() => convertTo('bmp')));
+  add('convertTga', 'Targa (TGA)', guard(() => convertTo('tga')));
   add('convertOra', 'OpenRaster (layers)', guard(() => convertTo('ora')));
   add('close', 'Close', guard(() => closeDoc()), { shortcut: 'Ctrl+W' });
   add('quit', 'Quit', guard(async () => { if (await closeAll()) platform.quit(); }), { shortcut: 'Ctrl+Q', enabled: () => platform.isNative });

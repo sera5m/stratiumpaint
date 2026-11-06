@@ -14,7 +14,7 @@ const { readDesktopAccent } = require('./accent.cjs');
 const ROOT = path.join(__dirname, '..');
 const INDEX = path.join(ROOT, 'dist', 'index.html');
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.jpe', '.webp', '.gif', '.bmp', '.avif', '.ora', '.2dlayered', '.3dlayered']);
-const SAVE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.ora']);
+const SAVE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tga', '.ora']);
 
 function userAppDir() {
   const base = process.env.XDG_DATA_HOME || path.join(app.getPath('home'), '.local', 'share');
@@ -189,6 +189,9 @@ ipcMain.handle('dialog:save', async (_e, defaultName) => {
     { name: 'PNG', extensions: ['png'] },
     { name: 'JPEG', extensions: ['jpg', 'jpeg'] },
     { name: 'WebP', extensions: ['webp'] },
+    { name: 'GIF', extensions: ['gif'] },
+    { name: 'Bitmap', extensions: ['bmp'] },
+    { name: 'Targa', extensions: ['tga'] },
     { name: 'OpenRaster (keeps layers)', extensions: ['ora'] },
   ].sort((a, b) => b.extensions.includes(ext) - a.extensions.includes(ext)); // the current format first
   const r = await dialog.showSaveDialog(win, { defaultPath: name, filters });

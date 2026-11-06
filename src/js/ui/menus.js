@@ -5,7 +5,7 @@ import { h } from './dom.js';
 import { icon } from './icons.js';
 
 export const MENUS = [
-  ['File', ['new', 'open', '-', 'save', 'saveAs', 'saveUnfinished', 'saveBackup', 'restoreBackup', '-', { label: 'Convert to', items: ['convertPng', 'convertJpeg', 'convertWebp', 'convertOra'] }, '-', 'close', 'quit']],
+  ['File', ['new', 'open', '-', 'save', 'saveAs', 'saveUnfinished', 'saveBackup', 'restoreBackup', '-', { label: 'Convert to', items: ['convertPng', 'convertJpeg', 'convertWebp', 'convertGif', 'convertBmp', 'convertTga', 'convertOra'] }, '-', 'close', 'quit']],
   ['Edit', ['undo', 'redo', '-', 'cut', 'copy', 'paste', 'pasteNew', '-', 'erase', 'fill', 'colorRange', '-', 'selectAll', 'deselect', 'invertSel', '-', 'wholeImage']],
   ['View', ['zoomIn', 'zoomOut', 'zoomFit', 'zoomActual', '-', 'grid', 'webgpu', '-', 'viewCanvas', 'viewNodes']],
   ['Image', ['crop', '-', 'resize', 'canvasSize', '-', 'flipH', 'flipV', '-', 'rotateCW', 'rotateCCW', 'rotate180', '-', 'removeBg', '-', 'flatten']],
