@@ -1,8 +1,7 @@
-// Set-down resample. The CPU path (core/xform.js resampleFloat) stays the reference and is what
-// tests run. When a WebGPU device is alive, the bake goes through OffscreenCanvas: the browser
-// rasterises the scale and the turn on the GPU in one drawImage, which is the set-down the move
-// tool was doing on the CPU. RESAMPLE_WGSL is the same bilinear supersample as resampleFloat, for
-// a compute pass when a caller wants the weights to match exactly.
+// Set-down resample. resampleFloat (core/xform.js) is the only path that commits pixels.
+// canvasBake is the drawImage equivalent, kept for reference; reading it back from a GPU canvas
+// returns 8×8 tiles on Vulkan, so resampleSetDown does not use it. RESAMPLE_WGSL matches
+// resampleFloat for a compute pass if a caller wants the same weights on the GPU.
 import { createImage } from '../core/image.js';
 import { resampleFloat, xformStats } from '../core/xform.js';
 import { rotatedBounds } from '../core/xform.js';
@@ -83,13 +82,14 @@ export function canvasBake(src, box, angle = 0) {
 }
 
 /**
- * The one resample at set-down. `device` set (the WebGPU compositor is up) bakes on the GPU via
- * canvas; otherwise the CPU reference. Always counts exactly one resample.
+ * The one resample at set-down. Always the CPU reference (resampleFloat).
+ *
+ * A GPU-backed OffscreenCanvas drawImage/getImageData round trip looks faster, but on Vulkan the
+ * readback is the canvas's 8×8 tiles in the wrong order, so a scaled selection lands as cubes and
+ * those cubes are real pixels from then on. `device` is accepted so callers can pass the
+ * compositor without caring; it does not change the pixels.
  */
 export function resampleSetDown(src, box, angle = 0, device = null) {
-  if (device) {
-    const baked = canvasBake(src, box, angle);
-    if (baked) { xformStats.resamples++; return baked; }
-  }
+  void device;
   return resampleFloat(src, box, angle);
 }

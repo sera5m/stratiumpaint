@@ -64,7 +64,7 @@ export class Layer {
       this._dirty = 'all';
     }
     if (this._dirty) {
-      const ctx = this._canvas.getContext('2d');
+      const ctx = this._canvas.getContext('2d', { willReadFrequently: true });
       const id = new ImageData(this.img.data, w, h);
       if (this._dirty === 'all') ctx.putImageData(id, 0, 0);
       else {

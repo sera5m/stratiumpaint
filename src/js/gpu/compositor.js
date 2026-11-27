@@ -255,7 +255,14 @@ export class GpuCompositor {
       this.floatTex = { id: f.id, content: -1, tex, w: cw, h: ch };
     }
     if (data) uploadTextureRect(this.device, tex, data, w, { x: 0, y: 0, w, h }); // once per lift
-    else this.device.queue.copyExternalImageToTexture({ source: f.canvas }, { texture: tex, premultipliedAlpha: false }, [w, h]); // GPU-side copy
+    else {
+      // Not copyExternalImageToTexture: that copies the canvas's tiled GPU store, and a preview
+      // whose width isn't a multiple of 8 comes back as 8×8 squares along the stroke. Read the
+      // CPU pixels (shape canvases are willReadFrequently) and upload them in aligned strips.
+      const ctx = f.canvas.getContext('2d', { willReadFrequently: true }) || f.canvas.getContext('2d');
+      const id = ctx.getImageData(0, 0, w, h);
+      uploadTextureRect(this.device, tex, id.data, w, { x: 0, y: 0, w, h });
+    }
     this.stats.uploads++;
     this.stats.uploadPixels = (this.stats.uploadPixels || 0) + w * h;
     Object.assign(this.floatTex, { id: f.id, content: f.content || 0 });

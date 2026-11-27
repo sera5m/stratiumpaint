@@ -5,7 +5,7 @@ import { eulerFromAxes, projectorAxes, rollAbout, aimProjection, occlusionPrevie
 import { gizmoHandles, dragMove, dragRotate, hitGizmo } from '../src/js/core/gizmo.js';
 import { packPickId, unpackPickId } from '../src/js/gpu/pick.js';
 import { resampleSetDown } from '../src/js/gpu/resample.js';
-import { xformStats } from '../src/js/core/xform.js';
+import { xformStats, resampleFloat } from '../src/js/core/xform.js';
 import { createImage } from '../src/js/core/image.js';
 import { cssFilter, GPU_ADJUST_IDS, ADJUST_WGSL } from '../src/js/gpu/filters.js';
 import { createTools } from '../src/js/tools/index.js';
@@ -65,6 +65,13 @@ test('pick ids and a CPU set-down still count as one resample', () => {
   const out = resampleSetDown(src, { x: 0, y: 0, w: 4, h: 4 }, 0, null);
   assert.equal(xformStats.resamples, before + 1);
   assert.equal(out.img.width, 4);
+  // A live device must not take the canvas readback path: that returns 8×8 tiles.
+  const scaled = resampleSetDown(src, { x: 1, y: 2, w: 6, h: 5 }, 0, {});
+  const cpu = resampleFloat(src, { x: 1, y: 2, w: 6, h: 5 }, 0);
+  assert.equal(xformStats.resamples, before + 3);
+  assert.deepEqual(scaled.img.data, cpu.img.data);
+  assert.equal(scaled.x, cpu.x);
+  assert.equal(scaled.y, cpu.y);
   assert.equal(cssFilter('invert'), 'invert(1)');
   assert.equal(cssFilter('gaussian-blur', { radius: 2 }), 'blur(2px)');
   assert.ok(GPU_ADJUST_IDS.has('sepia') && ADJUST_WGSL.includes('sepia'));
