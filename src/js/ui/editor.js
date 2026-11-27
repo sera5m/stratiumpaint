@@ -25,6 +25,7 @@ export const DEFAULT_OPTS = {
   projAngle: 80, // Projection: surfaces turned further than this from the projector get no paint
   sides: 5,
   shapeAngle: 0, // shapes: drawn turned by this many degrees about their centre
+  shapeInvert: false, // shapes: flip vertically about the centre so they point the other way
   gradient: 'linear',
   gradientMode: 'color',
   falloff: 'linear',

@@ -24,8 +24,8 @@ export class History extends Emitter {
     const applied = this.#path(this.#cur).filter((id) => id !== 0);
     const future = this.#futureFrom(this.#cur);
     return [
-      ...applied.map((id) => ({ name: this.#nodes[id].name, applied: true, id })),
-      ...future.map((n) => ({ name: n.name, applied: false, id: n.id })),
+      ...applied.map((id) => ({ name: this.#nodes[id].name, applied: true, id, meta: this.#nodes[id].cmd?.meta || null })),
+      ...future.map((n) => ({ name: n.name, applied: false, id: n.id, meta: n.cmd?.meta || null })),
     ];
   }
 
@@ -45,6 +45,7 @@ export class History extends Emitter {
         current: id === this.#cur,
         future: future.has(id),
         side: !!(n.cmd && !onPath.has(id) && !future.has(id)),
+        meta: n.cmd?.meta || null,
         children: n.children.filter((c) => this.#nodes[c]).map((c) => walk(c, depth + 1)),
       };
     };

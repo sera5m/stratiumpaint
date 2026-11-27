@@ -79,6 +79,7 @@ export function start() {
   buildStatusbar($('#statusbar'), ed, view);
 
   // ---------------------------------------------------------------- keyboard
+  let lastPaste = 0;
   const shortcuts = new Map();
   for (const c of cmds.values()) for (const combo of (c.shortcut ?? '').split('|').filter(Boolean)) shortcuts.set(combo, c);
 
@@ -89,7 +90,7 @@ export function start() {
 
     if (combo === 'Space') { e.preventDefault(); view.setSpace(true); return; }
     const cmd = shortcuts.get(combo);
-    if (cmd) { e.preventDefault(); run(cmd); return; }
+    if (cmd) { e.preventDefault(); if (cmd.id === 'paste') lastPaste = performance.now(); run(cmd); return; }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
 
     if (e.key === 'Escape') { ed.cancelTool(); return; }
@@ -107,12 +108,29 @@ export function start() {
   });
   window.addEventListener('blur', () => view.setSpace(false));
 
-  // On Linux, middle-click conventionally pastes the X11 "primary" selection (whatever text was
-  // last highlighted anywhere on the desktop) into focused editable elements. Our own Paste command
-  // never goes through this native event (it uses the clipboard bridge), so it's safe to always
-  // swallow it outside real text inputs — this keeps a middle-click on the canvas from dumping
-  // stray text in, while still allowing normal pasting into the text tool box or a dialog field.
-  window.addEventListener('paste', (e) => { if (!isTyping(e.target)) e.preventDefault(); }, true);
+  // Paste. ydotool (the EndeavourOS default) and some Wayland compositors deliver Ctrl+V as a
+  // paste event without a keydown the shortcut map can see, so handle the event itself. The image
+  // may ride on the event (clipboardData) or only be readable through the clipboard bridge.
+  window.addEventListener('paste', async (e) => {
+    if (isTyping(e.target)) return;
+    e.preventDefault();
+    // ydotool can fire both a keydown (caught above) and this event; don't paste twice.
+    if (performance.now() - lastPaste < 400) return;
+    lastPaste = performance.now();
+    const paste = cmds.get('paste');
+    if (!paste) return;
+    const dt = e.clipboardData;
+    const file = dt && ([...(dt.files || [])].find((f) => f.type?.startsWith('image/'))
+      || [...(dt.items || [])].find((it) => it.type?.startsWith('image/'))?.getAsFile());
+    if (file) {
+      try {
+        const { decodeImage } = await import('../doc/io.js');
+        const img = await decodeImage(new Uint8Array(await file.arrayBuffer()));
+        ed.clipboard = img;
+      } catch (err) { console.warn('Paste data unreadable:', err); }
+    }
+    await run(paste);
+  }, true);
 
   // ---------------------------------------------------------------- toasts
   const toasts = $('#toasts');

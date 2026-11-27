@@ -151,7 +151,7 @@ function commitShape(ed, s, region, drawShape, aa, opacity, name) {
   paintImage(s.layer.img, img, region.x, region.y, ed.doc.selection, opacity);
   shapeStats.layerWrites++;
   s.layer.touch(region);
-  ed.doc.commitRegion(s.layer, region, before, name);
+  ed.doc.commitRegion(s.layer, region, before, name, s.meta || null);
 }
 
 function cancelShape(ed, s) {
@@ -202,6 +202,7 @@ function makeShape({ id, name, kind, key }) {
       b = b && rectIntersect(b, layerRect(layer));
       if (b) region = region ? rectUnion(region, b) : b;
     }
+    const invert = !!o.shapeInvert && kind !== 'line';
     const paint = (ctx) => {
       ctx.lineWidth = Math.max(1, o.size);
       ctx.lineCap = 'round';
@@ -219,10 +220,18 @@ function makeShape({ id, name, kind, key }) {
         }
         ctx.translate(-(piece.dx || 0), -(piece.dy || 0));
         if (turn) { ctx.translate(gcx, gcy); ctx.rotate(turn); ctx.translate(-gcx, -gcy); }
+        if (invert) { ctx.translate(gcx, gcy); ctx.scale(1, -1); ctx.translate(-gcx, -gcy); }
         tracePath(ctx, kind, g.x0, g.y0, g.x1, g.y1, o.radius, o.sides || 5);
         paint(ctx);
         ctx.restore();
       }
+    };
+    s.meta = {
+      kind: 'shape', shape: kind,
+      x0: g.x0, y0: g.y0, x1: g.x1, y1: g.y1,
+      angle: +o.shapeAngle || 0, invert, sides: o.sides || 5, radius: o.radius || 0,
+      size: o.size, style: o.shape, opacity: o.opacity / 100, aa: !!o.aa,
+      stroke: { ...stroke }, fill: { ...fill }, layerId: layer.id,
     };
     return { region, drawShape, aa: o.aa, opacity: o.opacity / 100 };
   };
@@ -240,9 +249,9 @@ function makeShape({ id, name, kind, key }) {
   return {
     id, name, key, group: 'shape', cursor: 'crosshair',
     options: kind === 'line' ? ['size', 'opacity', 'aa', ...SHAPE3D]
-      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'shapeAngle', 'opacity', 'aa', ...SHAPE3D]
-      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'shapeAngle', 'opacity', 'aa', ...SHAPE3D]
-      : ['size', 'shape', 'shapeAngle', 'opacity', 'aa', ...SHAPE3D],
+      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'shapeAngle', 'shapeInvert', 'opacity', 'aa', ...SHAPE3D]
+      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'shapeAngle', 'shapeInvert', 'opacity', 'aa', ...SHAPE3D]
+      : ['size', 'shape', 'shapeAngle', 'shapeInvert', 'opacity', 'aa', ...SHAPE3D],
 
     /**
      * The shape between image-plane points a and b ([x, y]) as this tool would draw it (style,
@@ -265,6 +274,22 @@ function makeShape({ id, name, kind, key }) {
       return { ...region, canvas: c, opacity: p.opacity, aa: p.aa };
     },
 
+    overlay(ctx, ed) {
+      if (!S) return;
+      const b = plan(ed, S).region;
+      if (!b) return;
+      const v = ed.view;
+      if (!v?.toScreen) return;
+      const a = v.toScreen(b.x, b.y);
+      const z = v.zoom || 1;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(Math.round(a.x) + 0.5, Math.round(a.y) + 0.5, b.w * z, b.h * z);
+      ctx.restore();
+    },
+
     down(e, ed) {
       const layer = ed.editableLayer();
       if (!layer) return;
@@ -278,6 +303,7 @@ function makeShape({ id, name, kind, key }) {
       S.x1 = e.x; S.y1 = e.y; S.shift = e.shift; S.moved = true;
       if (e.wrap) S.wrap = e.wrap;
       draw(ed, S);
+      ed.requestOverlay?.();
     },
     // Redraw immediately if the colour changes mid-drag, so you don't have to nudge the mouse to
     // see it. Only once a real drag is underway — draw() marks the stroke as "something to commit

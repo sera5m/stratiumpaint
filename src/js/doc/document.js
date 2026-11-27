@@ -125,14 +125,14 @@ export class Doc extends Emitter {
   }
 
   /** Record a pixel edit that has ALREADY been applied to `layer` inside rect r. */
-  commitRegion(layer, r, before, name) {
+  commitRegion(layer, r, before, name, meta = null) {
     const after = cropImage(layer.img, r);
     const put = (src) => {
       const w = layer.img.width;
       for (let y = 0; y < r.h; y++) layer.img.data.set(src.data.subarray(y * r.w * 4, (y + 1) * r.w * 4), ((r.y + y) * w + r.x) * 4);
       layer.touch(r);
     };
-    this.push({ name, bytes: before.data.length + after.data.length, undo: () => put(before), redo: () => put(after) });
+    this.push({ name, meta, bytes: before.data.length + after.data.length, undo: () => put(before), redo: () => put(after) });
   }
 
   /**

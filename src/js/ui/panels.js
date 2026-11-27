@@ -1,10 +1,10 @@
 // Toolbox, tool options bar, layers / history / colours panels, document tabs and the status bar.
 import { GRADIENT_TYPES, GRADIENT_MODES, PATTERN_TYPES } from '../core/fill.js';
-import { maskBounds } from '../core/mask.js';
+import { maskBounds, rectMask } from '../core/mask.js';
 import { rgbToHex } from '../core/color.js';
 import { debounce, clear, h, raf } from './dom.js';
 import { icon } from './icons.js';
-import { colorDialog } from './dialogs.js';
+import { colorDialog, formDialog } from './dialogs.js';
 
 
 const FALLOFFS = [
@@ -110,6 +110,7 @@ const OPTIONS = {
   projAngle: { type: 'range', label: 'Max angle', min: 10, max: 90, unit: '°', when: (o) => o.shape3d === 'projection' },
   sides: { type: 'range', label: 'Sides', min: 3, max: 16, unit: '' },
   shapeAngle: { type: 'range', label: 'Rotate', min: -180, max: 180, unit: '°' },
+  shapeInvert: { type: 'toggle', label: 'Invert', title: 'Flip the shape upside down about its centre' },
   gradient: { type: 'select', label: 'Type', items: GRADIENT_TYPES },
   gradientMode: { type: 'select', label: 'Blend', items: GRADIENT_MODES },
   pattern: { type: 'select', label: 'Fill with', items: [['solid', 'Solid colour'], ...PATTERN_TYPES] },
@@ -392,6 +393,44 @@ export function buildLayersPanel(root, ed, cmds) {
   render();
 }
 
+
+function shapeBox(meta) {
+  const x = Math.min(meta.x0, meta.x1), y = Math.min(meta.y0, meta.y1);
+  return { x: Math.round(x), y: Math.round(y), w: Math.round(Math.abs(meta.x1 - meta.x0)) || 1, h: Math.round(Math.abs(meta.y1 - meta.y0)) || 1 };
+}
+
+/** Select the shape's bounds and switch to Move so its bounding box appears. */
+function floatShape(ed, meta) {
+  const doc = ed.doc;
+  if (!doc) return;
+  const b = shapeBox(meta);
+  doc.setSelection(rectMask(doc.width, doc.height, b.x, b.y, b.x + b.w, b.y + b.h), 'Select');
+  ed.setTool('move-pixels');
+  ed.requestOverlay?.();
+  ed.toast('Bounding box ready — drag to move, corners to scale.');
+}
+
+async function editShape(ed, meta) {
+  const b = shapeBox(meta);
+  const values = { x: b.x, y: b.y, w: b.w, h: b.h, points: meta.sides || 5 };
+  const fields = [
+    { id: 'x', label: 'X', type: 'number' },
+    { id: 'y', label: 'Y', type: 'number' },
+    { id: 'w', label: 'Width', type: 'number' },
+    { id: 'h', label: 'Height', type: 'number' },
+  ];
+  if (meta.shape === 'polygon' || meta.shape === 'star') fields.push({ id: 'points', label: 'Points', type: 'number' });
+  const r = await formDialog({ title: `Edit ${meta.shape}`, fields, values, okLabel: 'Apply' });
+  if (!r) return;
+  const next = {
+    ...meta,
+    x0: +r.x, y0: +r.y, x1: +r.x + Math.max(1, +r.w), y1: +r.y + Math.max(1, +r.h),
+    sides: Math.max(3, +r.points || meta.sides || 5),
+  };
+  floatShape(ed, next);
+  if (meta.shape === 'polygon' || meta.shape === 'star') ed.opts.sides = next.sides;
+}
+
 // ---------------------------------------------------------------------- history
 
 export function buildHistoryPanel(root, ed) {
@@ -431,8 +470,9 @@ export function buildHistoryPanel(root, ed) {
         role: 'treeitem',
         'aria-selected': String(node.current),
         style: { paddingLeft: `${8 + node.depth * 14}px` },
-        title: node.side ? 'Another branch of edits' : node.name,
+        title: node.meta?.kind === 'shape' ? 'Right-click to edit position and points' : (node.side ? 'Another branch of edits' : node.name),
         onClick: () => doc.history.goTo(node.id),
+        onContextmenu: (e) => { if (node.meta?.kind === 'shape') { e.preventDefault(); editShape(ed, node.meta); } },
       }, node.name));
     }
     list.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
@@ -470,7 +510,27 @@ export function buildHistoryPanel(root, ed) {
       h('span', { class: 'element-name' }, 'Selection'),
       h('span', { class: 'element-sub' }, label)));
     }
-    if (!doc.layers.length && !doc.selection) {
+    const shapes = [];
+    const walk = (node) => {
+      if (node.meta?.kind === 'shape' && !node.future && !node.side) shapes.push(node);
+      for (const c of node.children) walk(c);
+    };
+    if (doc.history) walk(doc.history.tree());
+    for (const node of shapes) {
+      const m = node.meta;
+      const label = `${m.shape} ${Math.round(Math.abs(m.x1 - m.x0))}×${Math.round(Math.abs(m.y1 - m.y0))}`;
+      list.append(h('div', {
+        class: 'history-row element-row',
+        role: 'treeitem',
+        title: 'Click for the bounding box, right-click to edit',
+        onClick: () => floatShape(ed, m),
+        onContextmenu: (e) => { e.preventDefault(); editShape(ed, m); },
+      },
+      h('span', { class: 'element-kind' }, 'Shape'),
+      h('span', { class: 'element-name' }, node.name),
+      h('span', { class: 'element-sub' }, label)));
+    }
+    if (!doc.layers.length && !doc.selection && !shapes.length) {
       list.append(h('div', { class: 'history-row empty' }, 'Nothing on the canvas'));
     }
   };
