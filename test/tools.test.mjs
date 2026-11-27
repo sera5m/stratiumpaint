@@ -66,6 +66,27 @@ test('editor: tool cycling by shared key, options, colours, documents', () => {
   assert.equal(ed.doc, doc);
 });
 
+test('a selection drops when you leave the select tools or click off it', () => {
+  const { ed, doc } = session();
+  ed.setTool('rect-select');
+  drag(ed, [[4, 4], [16, 12]]);
+  assert.ok(doc.selection, 'the drag selected');
+  ed.pointer('down', ev(1, 1));
+  ed.pointer('up', ev(2, 1)); // shaky click, still off the selection
+  assert.equal(doc.selection, null, 'clicking off drops it');
+
+  drag(ed, [[4, 4], [16, 12]]);
+  assert.ok(doc.selection);
+  ed.setTool('ellipse-select');
+  assert.ok(doc.selection, 'another select tool keeps it');
+  ed.setTool('move-pixels');
+  assert.ok(doc.selection, 'move still needs it');
+  ed.setTool('pan');
+  assert.ok(doc.selection, 'panning does not throw it away');
+  ed.setTool('line');
+  assert.equal(doc.selection, null, 'a drawing tool drops it instead of clipping to the box');
+});
+
 test('move selected pixels floats: nothing is written to history until it is set down', () => {
   const { ed, doc } = session(20, 10);
   doc.layer.img.data.set([255, 0, 0, 255], (3 * 20 + 3) * 4);

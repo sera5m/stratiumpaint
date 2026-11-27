@@ -73,6 +73,10 @@ export class Editor extends Emitter {
     const t = this.toolById(id);
     if (!t || t === this.tool) return;
     this.commitPending(); // finish (not discard) whatever the old tool was doing, e.g. an open text box
+    // A selection belongs to selecting, moving it, or just looking (pan, zoom, eyedropper).
+    // A tool that paints the canvas drops the marquee, or the stroke is clipped to a box
+    // you are no longer working on.
+    if (this.doc?.selection && !keepsSelection(t)) this.doc.deselect();
     this.tool = t;
     this.emit('tool', t);
     this.requestOverlay();
@@ -226,6 +230,11 @@ export class Editor extends Emitter {
   pointer(type, e) {
     const t = this.tool;
     if (!t || !this.doc) return;
+    // Clicking off the marching ants drops them. A click inside still clips, so Select All then
+    // a brush stroke in the picture keeps working.
+    if (type === 'down' && this.doc.selection && !keepsSelection(t) && !hitSelection(this.doc.selection, e.x, e.y)) {
+      this.doc.deselect();
+    }
     try {
       if (type === 'down') t.down?.(e, this);
       else if (type === 'move') t.move?.(e, this);
@@ -241,4 +250,15 @@ export class Editor extends Emitter {
   cancelTool() { this.tool.cancel?.(this); this.requestOverlay(); }
   /** Enter: set down whatever the current tool has pending (a floating move, an open text box). */
   commitTool() { this.tool.deactivate?.(this); this.requestOverlay(); }
+}
+
+/** Select, move, and navigation own the selection. Anything that paints the canvas does not. */
+function keepsSelection(tool) {
+  return tool?.group === 'select' || tool?.group === 'move' || tool?.group === 'nav';
+}
+
+function hitSelection(mask, x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  if (ix < 0 || iy < 0 || ix >= mask.width || iy >= mask.height) return false;
+  return mask.data[iy * mask.width + ix] > 0;
 }

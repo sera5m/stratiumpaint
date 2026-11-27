@@ -39,11 +39,13 @@ function boxSelect(id, name, shape, key) {
       const s = S;
       S = null;
       ed.requestOverlay();
-      const [x0, y0, x1, y1] = box(s), doc = ed.doc;
-      if (x0 === x1 || y0 === y1) { // a click without a drag clears the selection
+      const doc = ed.doc;
+      // A click, including a shaky one, is "never mind" — not a one-pixel selection.
+      if (Math.hypot(s.x1 - s.x0, s.y1 - s.y0) < 3) {
         if (s.mode === 'replace') doc.deselect();
         return;
       }
+      const [x0, y0, x1, y1] = box(s);
       const m = (shape === 'rect' ? rectMask : ellipseMask)(doc.width, doc.height, x0, y0, x1, y1);
       doc.setSelection(combineMasks(doc.selection, m, s.mode), name);
     },
