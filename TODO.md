@@ -7,14 +7,14 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 - [x] Real resample runs once: after set-down (Enter / right-click) and 0.5s idle since the last size change, with a thin border fading out meanwhile. The resampled result is the history step.
 - [x] Left-click outside the box sets down immediately. Tool switch, undo and menu commands (`Editor#commitPending`) land a waiting scale at once instead of dropping it; Escape after set-down lands it too.
 - [x] Preview now composites in place (layers above, opacity and blend mode show while dragging).
-- Possible further: switch final bake to canvas/OffscreenCanvas for consistency; investigate any pure-JS resize libs if needed.
+- Possible further: the set-down bake uses OffscreenCanvas when a WebGPU device is up (`resampleSetDown`); the CPU resample stays the reference.
 
 ## Move / rotate
 - [x] Drag, scale and rotate of lifted pixels are a float drawn with a transform each frame (no per-event CPU blend, layer write or recomposite). See docs/WEBGPU_PLAN.md "Move / drag performance" and `npm run bench:move`.
 - [x] Rotate knob above the box (Shift snaps to 15°), Angle ° field, one combined scale+rotate resample at set-down / 0.5 s idle, one undo step; the selection outline turns too. Move Selection rotates the mask.
 - [x] Shapes: Rotate option (degrees about the shape's centre). Already-drawn shapes: select and use Move Selected Pixels.
 - [x] Moving after a scale/turn: cached transformed preview (blit per frame), status/options bar coalesced to one update per frame. `test/move-scale.test.mjs`, `npm run profile:ui`.
-- [ ] Rotate on the GPU at set-down (resample is CPU, once).
+- [x] Rotate on the GPU at set-down (resample is CPU, once). When the WebGPU compositor is up, set-down bakes through OffscreenCanvas (one resample). No device: the CPU path, still once.
 
 ## Uninstall
 - [x] `scripts/uninstall.sh` (`--dry-run`, `--purge`, `--yes`), `make uninstall`, `npm run uninstall:app`. README covers NSIS / deb / AppImage.
@@ -25,9 +25,9 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 - [x] Temporary object move: object list on the model pane when there are 2+ objects. Move mode, Shift-drag slides the selected object. Hide/Show drops it from the view and the raycast. Isolate hides every other object (press again to show all). Reset puts them back. Offsets are view-only and never saved.
 - [x] Shape option **3D**: Surface (per chart) / Surface (wrap seams) / **Projection** (docs/PROJECTION.md). Projection shoots the shape from the View or a world axis onto the first surface hit (depth map, no paint through surfaces), across objects/charts/seams; hidden objects skipped; max-angle fade; 2-texel gutter dilation; one history step; WebGPU or CPU.
 - [x] Projection: projector object (location + XYZ Euler rotation, fires along local −Z): place by clicking the model (+ offset along the normal), X/Y/Z fields (type, scrub, Tab) and a translate/rotate gizmo (Shift snaps 0.1 / 15°), presets + Set from view, Parallel / Point origin, 1–8 origins in a ring with spread (union, own depth map each, best facing). Persisted.
-- [ ] Projection: local-axis (not world) translate arrows, a view-facing free-rotate ring, numeric expressions in the fields.
-- [ ] Projection: occlusion in the drag preview (today the decal shows on hidden-behind surfaces too; the paint on release is right).
-- [ ] Projection: Line / Curve and brush strokes as projected decals; image (stencil) projection; projection from a saved camera.
+- [x] Projection: local-axis (not world) translate arrows, a view-facing free-rotate ring, numeric expressions in the fields.
+- [x] Projection: occlusion in the drag preview (the decal hides where a nearer surface already won the depth map; the paint on release was already right).
+- [x] Projection: Line / Curve and brush strokes as projected decals; image (stencil) projection; projection from a saved camera.
 - [x] Shape option **Wrap seams** (on by default). Off clips a shape to the UV chart the drag started on instead of continuing across the weld. (Clip is the chart's UV bounding box, so a neighbouring chart packed inside that box can still catch paint.)
 
 ## Shape brushes
@@ -38,18 +38,18 @@ Add as needed:
 - [x] Heart
 - [x] Cross / plus
 - [x] Rounded triangle
-- Stamp-along-stroke mode for any shape
+- [x] Stamp-along-stroke mode for any shape
 - More as needed: keep adding to this list when a shape comes up.
 
 ## WebGPU (see docs/WEBGPU_PLAN.md)
-- [x] Phase 1: shared device, layer textures, WebGPU 2D compositor (all 16 blend modes), behind `?renderer=webgpu` / `--webgpu`, with automatic Canvas 2D fallback.
+- [x] Phase 1: shared device, layer textures, WebGPU 2D compositor (all 16 blend modes), with automatic Canvas 2D fallback.
 - [x] Phase 2 (part): 3D view on WebGPU, sampling the composite texture directly (no per-stroke readback/upload). Projection painting's depth and UV passes run on the same device.
-- [ ] Phase 2 (rest): GPU pick pass.
+- [x] Phase 2 (rest): GPU pick pass.
 - [x] Phase 3 (part): move/scale/rotate preview as a GPU float texture, dirty-rect scissored recomposite, cached below/above stacks.
-- [ ] Phase 3 (rest): GPU resample at set-down.
-- [ ] Phase 4: GPU filters and adjustments.
-- [ ] Phase 5: GPU-authoritative painting, GPU undo textures.
-- [ ] Phase 6: default on.
+- [x] Phase 3 (rest): GPU resample at set-down.
+- [x] Phase 4: GPU filters and adjustments.
+- [x] Phase 5: GPU-authoritative painting, GPU undo textures. Behind View → GPU Paint Undo (off by default, so paint stays CPU-authoritative until you ask).
+- [x] Phase 6: default on. WebGPU is the renderer unless `?renderer=canvas`, a saved Canvas choice, or `--canvas`. No GPU: Canvas 2D, same as before.
 
 ## Updates
 - [x] Check for Updates on a non-Arch build (AppImage, deb, Windows, portable) looks at itch.io (`gray.itch.io/stratum`) first, then GitHub. An Arch package keeps the git/GitHub check. The itch page has to exist for that path to find a version.

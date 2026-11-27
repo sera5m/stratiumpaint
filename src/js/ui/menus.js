@@ -7,9 +7,9 @@ import { icon } from './icons.js';
 export const MENUS = [
   ['File', ['new', 'open', '-', 'save', 'saveAs', 'saveUnfinished', 'saveBackup', 'restoreBackup', '-', { label: 'Convert to', items: ['convertPng', 'convertJpeg', 'convertWebp', 'convertGif', 'convertBmp', 'convertTga', 'convertOra'] }, '-', 'close', 'quit']],
   ['Edit', ['undo', 'redo', '-', 'cut', 'copy', 'paste', 'pasteNew', '-', 'erase', 'fill', 'colorRange', '-', 'selectAll', 'deselect', 'invertSel', '-', 'wholeImage']],
-  ['View', ['zoomIn', 'zoomOut', 'zoomFit', 'zoomActual', '-', 'grid', 'webgpu', '-', 'viewCanvas', 'viewNodes']],
+  ['View', ['zoomIn', 'zoomOut', 'zoomFit', 'zoomActual', '-', 'grid', 'webgpu', 'gpuPaint', 'gpuFilters', '-', 'viewCanvas', 'viewNodes']],
   ['Image', ['crop', '-', 'resize', 'canvasSize', '-', 'flipH', 'flipV', '-', 'rotateCW', 'rotateCCW', 'rotate180', '-', 'removeBg', '-', 'flatten']],
-  ['Model', ['openModel', 'demoModel', 'reunwrap', '-', 'addModelImage', 'newModelImage', 'modelRaise', 'modelLower', 'limitFaces', '-', 'layoutSplit', 'layout2d', 'layout3d', '-', 'uvLines', 'unmount']],
+  ['Model', ['openModel', 'demoModel', 'reunwrap', '-', 'addModelImage', 'newModelImage', 'modelRaise', 'modelLower', 'limitFaces', '-', 'saveCamera', 'useCamera', 'projectImage', '-', 'layoutSplit', 'layout2d', 'layout3d', '-', 'uvLines', 'unmount']],
   ['Layers', ['layerAdd', 'layerDelete', 'layerDuplicate', 'layerMerge', '-', 'layerUp', 'layerDown', '-', 'layerProps']],
   ['Nodes', ['viewNodes', 'nodeAdd', 'applyNodes', 'runScript']],
   ['Adjustments', ['wholeImage', '-', ...ADJUSTMENTS.map((s) => `adj:${s.id}`)]],

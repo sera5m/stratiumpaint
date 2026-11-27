@@ -28,7 +28,8 @@
 import { cloneImage, cropImage, stampImage } from '../core/image.js';
 import { scaleMask, translateMask, maskBounds } from '../core/mask.js';
 import { rectUnion, rectIntersect } from '../core/util.js';
-import { DEG, normAngle, snapAngle, boxCorners, rotatedBounds, toBoxFrame, fromBoxFrame, resampleFloat, transformMask } from '../core/xform.js';
+import { DEG, normAngle, snapAngle, boxCorners, rotatedBounds, toBoxFrame, fromBoxFrame, transformMask } from '../core/xform.js';
+import { resampleSetDown } from '../gpu/resample.js';
 import { targetRegion } from '../doc/ops.js';
 import { paintImage } from '../doc/raster.js';
 import { layerRect } from './common.js';
@@ -297,7 +298,7 @@ function movePixels() {
   const finalize = (ed, s) => {
     stopFade();
     if (S === s) S = null;
-    const res = resampleFloat(s.src, s.cur, s.angle);
+    const res = resampleSetDown(s.src, s.cur, s.angle, ed.gpuCompositor?.device || null);
     const dst = { x: Math.round(res.x), y: Math.round(res.y), w: res.img.width, h: res.img.height };
     const total = rectIntersect(rectUnion(s.r, dst), layerRect(s.layer)) || rectIntersect(s.r, layerRect(s.layer));
     const original = cropImage(s.layer.img, total); // the layer with the hole…

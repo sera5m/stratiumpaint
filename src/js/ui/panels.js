@@ -5,6 +5,7 @@ import { rgbToHex } from '../core/color.js';
 import { debounce, clear, h, raf } from './dom.js';
 import { icon } from './icons.js';
 import { colorDialog, formDialog } from './dialogs.js';
+import { evalExpr } from '../core/expr.js';
 
 
 const FALLOFFS = [
@@ -103,6 +104,9 @@ const OPTIONS = {
     items: [['custom', 'Custom'], ['view', 'View (align to camera)'], ['down', 'Down (−Y)'], ['up', 'Up (+Y)'], ['front', 'Front (−Z)'], ['back', 'Back (+Z)'], ['right', 'Right (−X)'], ['left', 'Left (+X)']],
   },
   projAlign: { type: 'action', label: 'Set from view', title: 'Turn the projector to look the way the 3D view does', event: 'projector:fromView', when: (o) => o.shape3d === 'projection' },
+  camSave: { type: 'action', label: 'Save camera', title: 'Remember this view and projector, and project from it later', event: 'projector:saveCam', when: (o) => o.shape3d === 'projection' },
+  camUse: { type: 'action', label: 'Use camera', title: 'Jump back to the saved view and projector', event: 'projector:useCam', when: (o) => o.shape3d === 'projection' && !!o.savedCam },
+  projImage: { type: 'action', label: 'Project image', title: 'Project the image on the clipboard through the projector', event: 'projector:imageAsk', when: (o) => o.shape3d === 'projection' },
   projSource: { type: 'select', label: 'Origin', title: 'Parallel rays, or rays from a point behind the projector', items: [['parallel', 'Parallel'], ['point', 'Point']], when: (o) => o.shape3d === 'projection' },
   projDist: { type: 'range', label: 'Distance', min: 10, max: 500, unit: '%', title: 'Point source distance behind the projector, % of the model size', when: (o) => o.shape3d === 'projection' && o.projSource === 'point' },
   projPoints: { type: 'range', label: 'Points', min: 1, max: 8, title: 'Fire from this many origins in a ring around the direction', when: (o) => o.shape3d === 'projection' },
@@ -111,6 +115,7 @@ const OPTIONS = {
   sides: { type: 'range', label: 'Sides', min: 3, max: 16, unit: '' },
   shapeAngle: { type: 'range', label: 'Rotate', min: -180, max: 180, unit: '°' },
   shapeInvert: { type: 'toggle', label: 'Invert', title: 'Flip the shape upside down about its centre' },
+  stampAlong: { type: 'toggle', label: 'Stamp along', title: 'Repeat the shape along the drag, one history step' },
   gradient: { type: 'select', label: 'Type', items: GRADIENT_TYPES },
   gradientMode: { type: 'select', label: 'Blend', items: GRADIENT_MODES },
   pattern: { type: 'select', label: 'Fill with', items: [['solid', 'Solid colour'], ...PATTERN_TYPES] },
@@ -229,7 +234,7 @@ export function buildOptionsBar(root, ed) {
       }
       case 'float': {
         const num = h('input', { type: 'number', class: 'num', step: def.step ?? 0.01, value: get(), 'aria-label': def.label });
-        num.addEventListener('change', () => { const v = parseFloat(num.value); if (Number.isFinite(v)) ed.setOpt(key, v); });
+        num.addEventListener('change', () => { const v = evalExpr(num.value); if (v != null) ed.setOpt(key, v); else num.value = String(get() ?? ''); });
         syncs.push(() => { const v = String(get()); if (document.activeElement !== num && num.value !== v) num.value = v; });
         return wrap(num);
       }
@@ -245,7 +250,7 @@ export function buildOptionsBar(root, ed) {
         const setK = (k, v) => { const cur = get() ? get().slice() : [0, 0, 0]; cur[k] = norm(v); ed.setOpt(key, cur); };
         const fields = [0, 1, 2].map((k) => {
           const inp = h('input', { type: 'text', inputmode: 'decimal', class: 'num vec3', 'aria-label': `${def.label} ${'XYZ'[k]}`, placeholder: '—' });
-          inp.addEventListener('change', () => { const v = parseFloat(inp.value); if (Number.isFinite(v)) setK(k, v); else inp.value = fmt(get()?.[k]); });
+          inp.addEventListener('change', () => { const v = evalExpr(inp.value); if (v != null) setK(k, v); else inp.value = fmt(get()?.[k]); });
           inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
           const tag = h('span', { class: `vec3-axis axis-${'xyz'[k]}`, title: 'Drag to scrub' }, 'XYZ'[k]);
           tag.style.cursor = 'ew-resize';

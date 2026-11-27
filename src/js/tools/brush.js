@@ -11,8 +11,40 @@ import { createImage, blendPixel } from '../core/image.js';
 import { maskBounds } from '../core/mask.js';
 import { clamp, rectUnion } from '../core/util.js';
 import { colorFor } from './common.js';
+import { createCanvas } from '../doc/raster.js';
 
 const TS = 6, T = 1 << TS, TM = T - 1; // tile size 64
+const PROJ = ['shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
+
+let strokeCanvas = null;
+/** A brush stroke on the projector plane: { x, y, w, h, canvas, opacity, aa } or null. */
+function strokeDecal(ed, pts, pencil) {
+  if (!pts?.length) return null;
+  const size = pencil ? 1 : Math.max(1, +ed.opts.size || 1);
+  const col = ed.primary || { r: 0, g: 0, b: 0, a: 1 };
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  const pad = size / 2 + 2;
+  const region = {
+    x: Math.floor(x0 - pad), y: Math.floor(y0 - pad),
+    w: Math.max(1, Math.ceil(x1 - x0 + pad * 2)), h: Math.max(1, Math.ceil(y1 - y0 + pad * 2)),
+  };
+  if (region.w * region.h > 2048 * 2048 || typeof document === 'undefined') return null;
+  if (!strokeCanvas) strokeCanvas = createCanvas(region.w, region.h);
+  const c = strokeCanvas;
+  if (c.width !== region.w || c.height !== region.h) { c.width = region.w; c.height = region.h; }
+  const ctx = c.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.lineWidth = size; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.strokeStyle = `rgba(${col.r | 0},${col.g | 0},${col.b | 0},${col.a ?? 1})`;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0] - region.x, pts[0][1] - region.y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] - region.x, pts[i][1] - region.y);
+  if (pts.length === 1) ctx.lineTo(pts[0][0] - region.x + 0.01, pts[0][1] - region.y);
+  ctx.stroke();
+  return { ...region, canvas: c, opacity: (ed.opts.opacity ?? 100) / 100, aa: pencil ? false : !!ed.opts.aa };
+}
 
 /** Work counters for tests and benchmarks. */
 export const brushStats = { strokes: 0, dabs: 0, backupPixels: 0, touches: 0, maskHits: 0, startCopied: 0 };
@@ -273,7 +305,11 @@ function makeBrush({ id, name, kind, key, icon }) {
 
   return {
     id, name, key, icon, group: kind === 'pencil' ? 'pencil' : 'brush', cursor: 'crosshair', ring: kind !== 'pencil',
-    options: kind === 'pencil' ? ['opacity', 'mirror', 'repeatX', 'repeatY', 'repeatN'] : ['size', 'hardness', 'opacity', 'aa', 'mirror', 'repeatX', 'repeatY', 'repeatN'],
+    options: kind === 'pencil' ? ['opacity', 'mirror', 'repeatX', 'repeatY', 'repeatN', ...PROJ]
+      : kind === 'brush' ? ['size', 'hardness', 'opacity', 'aa', 'mirror', 'repeatX', 'repeatY', 'repeatN', ...PROJ]
+      : ['size', 'hardness', 'opacity', 'aa', 'mirror', 'repeatX', 'repeatY', 'repeatN'],
+    projectionStroke: (kind === 'brush' || kind === 'pencil') ? (ed, pts) => strokeDecal(ed, pts, kind === 'pencil') : undefined,
+    projectionImage: (kind === 'brush' || kind === 'pencil') ? (ed, a, b) => strokeDecal(ed, [a, b], kind === 'pencil') : undefined,
 
     down(e, ed) {
       if (kind === 'clone' && e.ctrl) {
@@ -289,6 +325,9 @@ function makeBrush({ id, name, kind, key, icon }) {
       S.cx = b ? b.x + b.w / 2 : ed.doc.width / 2;
       S.cy = b ? b.y + b.h / 2 : ed.doc.height / 2;
       if (kind === 'clone') { S.ox = Math.round(source.x - e.x); S.oy = Math.round(source.y - e.y); }
+      if ((kind === 'brush' || kind === 'pencil') && ed.opts.gpuPaint && ed.gpuCompositor?.snapshotUndo) {
+        try { S.gpuBefore = ed.gpuCompositor.snapshotUndo(S.layer); if (ed.doc) ed.doc.authority = ed.gpuCompositor; } catch { S.gpuBefore = null; }
+      }
       if (S.snap) stampMany(S, Math.floor(e.x) + 0.5, Math.floor(e.y) + 0.5);
       else stampMany(S, e.x, e.y);
       S.rem = S.step;
@@ -307,10 +346,10 @@ function makeBrush({ id, name, kind, key, icon }) {
       const s = S;
       S = null;
       flush(s);
-      if (!s.dirty) return;
+      if (!s.dirty) { s.gpuBefore?.destroy?.(); return; }
       const surf = ed.surface();
-      if (surf.commitPatches) surf.commitPatches(s.layer, strokePatches(s), name); // only the painted tiles
-      else surf.commitRegion(s.layer, s.dirty, originalRegion(s, s.dirty), name);
+      if (surf.commitPatches) surf.commitPatches(s.layer, strokePatches(s), name, s.gpuBefore);
+      else { s.gpuBefore?.destroy?.(); surf.commitRegion(s.layer, s.dirty, originalRegion(s, s.dirty), name); }
     },
 
     cancel() {
@@ -326,6 +365,7 @@ function makeBrush({ id, name, kind, key, icon }) {
         });
         s.layer.touch(s.dirty);
       }
+      s.gpuBefore?.destroy?.();
     },
 
     overlay(ctx, ed, v) {

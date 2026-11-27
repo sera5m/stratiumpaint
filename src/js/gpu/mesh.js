@@ -4,11 +4,18 @@
 // Same shading as the WebGL path in ui/meshview.js.
 
 const MESH_WGSL = `
-struct U { mvp: mat4x4f, nrm: mat4x4f, decal: mat4x4f, dp: vec4f }; // dp: on, opacity, max u, max v
+struct U {
+  mvp: mat4x4f, nrm: mat4x4f, decal: mat4x4f,
+  dp: vec4f,   // on, opacity, max u, max v
+  occ: vec4f,  // on, lo, span, bias
+  os: vec4f,   // occ width, height
+  rx: vec4f, ry: vec4f, rd: vec4f, rw: vec4f,
+};
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
 @group(0) @binding(3) var dtex: texture_2d<f32>; // Projection-mode preview (straight alpha)
+@group(0) @binding(4) var otex: texture_2d<f32>; // nearest-surface depth (R) and hit (A); 1×1 clear = off
 struct VOut { @builtin(position) pos: vec4f, @location(0) n: vec3f, @location(1) uv: vec2f, @location(2) w: vec3f };
 @vertex fn vs(@location(0) p: vec3f, @location(1) n: vec3f, @location(2) uv: vec2f) -> VOut {
   var o: VOut;
@@ -27,7 +34,23 @@ struct VOut { @builtin(position) pos: vec4f, @location(0) n: vec3f, @location(1)
   let dw = max(q.w, 1e-6);
   let d = q.xy / dw;
   let s = textureSampleLevel(dtex, samp, d, 0.0);
-  let inside = u.dp.x > 0.5 && q.w > 1e-6 && d.x >= 0.0 && d.y >= 0.0 && d.x <= u.dp.z && d.y <= u.dp.w;
+  var inside = u.dp.x > 0.5 && q.w > 1e-6 && d.x >= 0.0 && d.y >= 0.0 && d.x <= u.dp.z && d.y <= u.dp.w;
+  if (inside && u.occ.x > 0.5) {
+    let w = dot(u.rw.xyz, i.w) + u.rw.w;
+    if (w <= 1e-6) { inside = false; }
+    else {
+      let fragD = dot(u.rd.xyz, i.w) + u.rd.w;
+      let px = vec2f(dot(u.rx.xyz, i.w) + u.rx.w, dot(u.ry.xyz, i.w) + u.ry.w) / w;
+      let dim = vec2i(i32(u.os.x), i32(u.os.y));
+      let pix = vec2i(px);
+      if (pix.x < 0 || pix.y < 0 || pix.x >= dim.x || pix.y >= dim.y) { inside = false; }
+      else {
+        let o = textureLoad(otex, pix, 0);
+        let nearest = u.occ.y + o.r * u.occ.z;
+        if (o.a < 0.5 || fragD > nearest + u.occ.w) { inside = false; }
+      }
+    }
+  }
   rgb = select(rgb, mix(rgb, s.rgb, s.a * u.dp.y), inside);
   let light = 0.62 + 0.38 * max(dot(normalize(i.n), normalize(vec3f(0.35, 0.8, 0.4))), 0.0);
   return vec4f(rgb * light, 1.0);
@@ -59,12 +82,13 @@ export class GpuMeshRenderer {
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
       multisample: { count: 4 },
     });
-    this.ubuf = d.createBuffer({ size: 208, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.ubuf = d.createBuffer({ size: 304, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.sampler = d.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
     this.bufs = null;
     this.count = 0;
     this.decal = null;
     this.#decalTexture(1, 1);
+    this.#occTexture(1, 1);
     this.stats = { frames: 0, bindGroups: 0 };
   }
 
@@ -75,7 +99,16 @@ export class GpuMeshRenderer {
     this._tex = null; // rebuild the bind group
   }
 
-  /** Projection preview: { m (world → decal uv, column-major), alpha, canvas, gen, w, h } or null. */
+  #occTexture(w, h) {
+    this.otex?.destroy();
+    this.otex = this.device.createTexture({ size: [Math.max(1, w), Math.max(1, h)], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+    this.ocap = [Math.max(1, w), Math.max(1, h)];
+    this._occSize = [1, 1];
+    this._occOn = false;
+    this._tex = null;
+  }
+
+  /** Projection preview: { m, alpha, canvas, gen, w, h, occ? } or null. occ is the depth preview. */
   setDecal(decal) {
     this.decal = decal || null;
     if (!decal || decal.gen === this._decalGen) return;
@@ -85,6 +118,15 @@ export class GpuMeshRenderer {
       this.#decalTexture(grow(decal.w, this.dcap[0]), grow(decal.h, this.dcap[1]));
     }
     this.device.queue.copyExternalImageToTexture({ source: decal.canvas }, { texture: this.dtex, premultipliedAlpha: false }, [decal.w, decal.h]);
+    const occ = decal.occ;
+    if (occ?.canvas && occ.w > 0 && occ.h > 0) {
+      if (occ.w > this.ocap[0] || occ.h > this.ocap[1]) this.#occTexture(occ.w, occ.h);
+      this.device.queue.copyExternalImageToTexture({ source: occ.canvas }, { texture: this.otex, premultipliedAlpha: false }, [occ.w, occ.h]);
+      this._occOn = true;
+      this._occSize = [occ.w, occ.h];
+    } else if (this._occOn) {
+      this.#occTexture(1, 1);
+    }
   }
 
   /** Non-indexed triangles: Float32Arrays pos (xyz), nrm (xyz), uv (uv); count vertices. */
@@ -115,11 +157,17 @@ export class GpuMeshRenderer {
       this._tex = tex;
       this.group = d.createBindGroup({
         layout: this.pipe.getBindGroupLayout(0),
-        entries: [{ binding: 0, resource: { buffer: this.ubuf } }, { binding: 1, resource: tex.createView() }, { binding: 2, resource: this.sampler }, { binding: 3, resource: this.dtex.createView() }],
+        entries: [
+          { binding: 0, resource: { buffer: this.ubuf } },
+          { binding: 1, resource: tex.createView() },
+          { binding: 2, resource: this.sampler },
+          { binding: 3, resource: this.dtex.createView() },
+          { binding: 4, resource: this.otex.createView() },
+        ],
       });
       this.stats.bindGroups++;
     }
-    const u = new Float32Array(52);
+    const u = new Float32Array(76);
     u.set(mvp, 0);
     u.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], 16);
     const dc = this.decal;
@@ -128,6 +176,12 @@ export class GpuMeshRenderer {
       const sx = dc.w / this.dcap[0], sy = dc.h / this.dcap[1], m = dc.m;
       for (let c = 0; c < 4; c++) { u[32 + c * 4] = m[c * 4] * sx; u[32 + c * 4 + 1] = m[c * 4 + 1] * sy; u[32 + c * 4 + 2] = 0; u[32 + c * 4 + 3] = m[c * 4 + 3]; }
       u.set([1, dc.alpha, sx, sy], 48);
+      const occ = dc.occ;
+      if (occ?.P && this._occOn) {
+        u.set([1, occ.lo, occ.span, occ.bias], 52);
+        u.set([this._occSize[0], this._occSize[1], 0, 0], 56);
+        u.set(occ.P.rx, 60); u.set(occ.P.ry, 64); u.set(occ.P.rd, 68); u.set(occ.P.rw, 72);
+      }
     }
     d.queue.writeBuffer(this.ubuf, 0, u);
     const enc = d.createCommandEncoder({ label: 'mesh' });
@@ -148,7 +202,7 @@ export class GpuMeshRenderer {
 
   destroy() {
     for (const b of Object.values(this.bufs || {})) b.destroy();
-    this.msaa?.destroy(); this.depth?.destroy(); this.ubuf.destroy(); this.dtex?.destroy();
+    this.msaa?.destroy(); this.depth?.destroy(); this.ubuf.destroy(); this.dtex?.destroy(); this.otex?.destroy();
     try { this.ctx?.unconfigure(); } catch { /* gone */ }
   }
 }

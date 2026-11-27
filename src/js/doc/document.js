@@ -140,8 +140,8 @@ export class Doc extends Emitter {
    * { x, y, w, h, stride (px per row of `before`), before } and hold the pixels as they were. History
    * keeps only those pieces, not the bounding rectangle of the whole stroke.
    */
-  commitPatches(layer, patches, name) {
-    if (!patches.length) return;
+  commitPatches(layer, patches, name, gpuSnap = null) {
+    if (!patches.length) { gpuSnap?.destroy?.(); return; }
     const W = layer.img.width;
     let bytes = 0, bounds = null;
     const items = patches.map((p) => {
@@ -158,8 +158,12 @@ export class Doc extends Emitter {
         for (let y = 0; y < p.h; y++) d.set(src.subarray(y * stride * 4, (y * stride + p.w) * 4), ((p.y + y) * W + p.x) * 4);
       }
       layer.touch({ x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h });
+      if (which === 'before' && gpuSnap?.restore) {
+        try { gpuSnap.restore(layer); } catch { /* CPU upload on the next composite still matches */ }
+        if (layer._gpuDirty == null) layer._gpuDirty = 'all';
+      }
     };
-    this.push({ name, bytes, undo: () => put('before'), redo: () => put('after') });
+    this.push({ name, bytes, undo: () => put('before'), redo: () => put('after'), dispose: () => { try { gpuSnap?.destroy?.(); } catch { /* */ } } });
   }
 
   undo() { return this.history.undo(); }

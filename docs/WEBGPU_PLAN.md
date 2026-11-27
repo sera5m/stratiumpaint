@@ -4,7 +4,7 @@ Goal: move Stratum's 2D and 3D rendering, and the heavy pixel work, onto WebGPU,
 breaking the "it just works" Canvas 2D app that exists today. Features and architecture come
 first; UI polish comes later.
 
-Status: **phase 1 has landed** (behind a flag, off by default). See [Phase 1](#phase-1--foundation-landed).
+Status: **phases 1–6 have landed.** WebGPU is the default renderer and falls back to Canvas 2D when there is no GPU (`?renderer=canvas`, a saved Canvas choice, or `--canvas` / `STRATUM_RENDERER=canvas` force Canvas 2D). Pick is a GPU id pass. Set-down resample bakes on the GPU when a device is up. Filters and adjustments can run on the GPU (View → GPU Filters). Brush strokes can snapshot the layer texture for undo (View → GPU Paint Undo, off unless asked, so tests and CPU painting stay authoritative).
 
 ---
 
@@ -134,12 +134,15 @@ Canvas 2D. The obvious costs are full CPU compositing through canvas mirrors (ev
 
 **Turning it on**
 
-* Browser (`npm run web`): open `http://localhost:8080/?renderer=webgpu`, or run
-  `localStorage['stratum.renderer'] = 'webgpu'`. Use `?renderer=canvas` to force the old path.
-* Menu: **View → WebGPU Renderer (Experimental)** toggles the saved preference for the next start.
-* Desktop app: start with `--webgpu` (or `STRATUM_WEBGPU=1`). That adds `enable-unsafe-webgpu`,
-  plus `enable-features=Vulkan` on Linux, and asks the page for WebGPU.
+* WebGPU is the default. `?renderer=canvas` or `localStorage['stratum.renderer'] = 'canvas'`
+  forces Canvas 2D. `?renderer=webgpu` asks for WebGPU explicitly.
+* Menu: **View → WebGPU Renderer** toggles the saved preference for the next start.
+* Desktop app: the Chromium switches (`enable-unsafe-webgpu`, and `Vulkan` on Linux) are on
+  unless you start with `--canvas` or `STRATUM_RENDERER=canvas`. `--webgpu` is accepted and
+  does the same as the default.
 * The console prints `Stratum: WebGPU renderer active`, or the reason it fell back.
+* **View → GPU Filters** runs adjustments and blurs on the GPU. **View → GPU Paint Undo**
+  snapshots the layer texture at the start of a brush stroke (off unless you turn it on).
 
 **Tests**
 

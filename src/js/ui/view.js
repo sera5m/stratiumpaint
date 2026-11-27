@@ -37,7 +37,7 @@ export class View {
     this.octx = this.overlay.getContext('2d');
     this.checker = null;
 
-    // 'canvas' (Canvas 2D, the default) or 'webgpu' (experimental, see gpu/backend.js).
+    // 'webgpu' (default; Canvas 2D if the GPU is missing) or 'canvas' when forced. See gpu/backend.js.
     this.renderer = 'canvas';
     this.rendererReason = 'default';
     this.gpu = null; // GpuCompositor while WebGPU is active
@@ -249,6 +249,9 @@ export class View {
       this.rendererReason = 'ok';
       this.canvas.style.visibility = 'hidden';
       this.ed.gpuCompositor = this.gpu; // the 3D view draws with it too
+      const mark = () => { if (this.ed.doc && this.gpu) this.ed.doc.authority = this.gpu; };
+      mark();
+      this.ed.on('doc', mark);
       console.info('Stratum: WebGPU renderer active');
       this.requestRender();
       this.ed.emit('renderer', this.renderer);

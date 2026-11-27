@@ -4,6 +4,7 @@ import { maskBounds, rectMask } from '../core/mask.js';
 import { fillMask } from '../core/fill.js';
 import { rectGrow, rectIntersect } from '../core/util.js';
 import { paintImage } from './raster.js';
+import { canvasFilter } from '../gpu/filters.js';
 
 /**
  * The area an operation should touch: selection bounds (or the whole layer), grown by `margin`
@@ -50,7 +51,9 @@ export class FilterSession {
     if (!region) return false;
     const src = cropImage(orig, region);
     const mask = ignoreSelection ? null : doc.selection;
-    const merged = blendByMask(src, spec.apply(src, params), mask, region.x, region.y);
+    let next = null;
+    if (doc.gpuFilters) { try { next = canvasFilter(src, spec.id, params); } catch { next = null; } }
+    const merged = blendByMask(src, next || spec.apply(src, params), mask, region.x, region.y);
     stampImage(layer.img, merged, region.x, region.y);
     layer.touch(region);
     this.dirty = region;

@@ -7,9 +7,10 @@ import { atlasOf, modelPaintLayer, reproject } from './place.js';
 import { h } from './dom.js';
 import { rectUnion } from '../core/util.js';
 import { GpuMeshRenderer } from '../gpu/mesh.js';
-import { projectPaint, commitProjection, decalMatrix, aimProjection, planeCoords, projectorAxes, eulerFromView } from '../core/projection.js';
+import { projectPaint, commitProjection, decalMatrix, aimProjection, planeCoords, projectorAxes, eulerFromView, occlusionPreview } from '../core/projection.js';
 import { gizmoHandles, hitGizmo, dragMove, dragRotate, AXIS_COLORS } from '../core/gizmo.js';
 import { gpuProjectPaint } from '../gpu/projection.js';
+import { packPickId, unpackPickId } from '../gpu/pick.js';
 
 const VS = `
 attribute vec3 aPos;
@@ -27,8 +28,8 @@ void main() {
   gl_Position = uMvp * vec4(aPos, 1.0);
 }`;
 
-// uDecal*: the Projection-mode preview, the shape projected onto every surface it faces (no
-// occlusion test; the paint on release has one). uDecalM maps world → decal texture coords (xy/w).
+// uDecal*: the Projection-mode preview. uOcc*: nearest surface in the projector's image, so the
+// preview does not paint surfaces hidden behind others (uOccP.x == 0 leaves the old behaviour).
 const FS = `
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -40,8 +41,15 @@ varying vec2 vUv;
 varying vec3 vW;
 uniform sampler2D uTex;
 uniform sampler2D uDecal;
+uniform sampler2D uOcc;
 uniform mat4 uDecalM;
 uniform vec4 uDecalP; // on, opacity, max u, max v
+uniform vec4 uRx;
+uniform vec4 uRy;
+uniform vec4 uRd;
+uniform vec4 uRw;
+uniform vec4 uOccP; // on, lo, span, bias
+uniform vec2 uOccS; // packed depth width, height
 void main() {
   vec4 tex = texture2D(uTex, vUv); // texture row 0 = top of the image (uploaded unflipped)
   vec3 rgb = tex.rgb;
@@ -50,8 +58,26 @@ void main() {
     if (q.w > 1e-6) {
       vec2 d = q.xy / q.w;
       if (d.x >= 0.0 && d.y >= 0.0 && d.x <= uDecalP.z && d.y <= uDecalP.w) {
-        vec4 s = texture2D(uDecal, d);
-        rgb = mix(rgb, s.rgb, s.a * uDecalP.y);
+        bool show = true;
+        if (uOccP.x > 0.5) {
+          float w = dot(uRw.xyz, vW) + uRw.w;
+          if (w <= 1e-6) show = false;
+          else {
+            float fragD = dot(uRd.xyz, vW) + uRd.w;
+            vec2 px = vec2(dot(uRx.xyz, vW) + uRx.w, dot(uRy.xyz, vW) + uRy.w) / w;
+            vec2 ouv = px / uOccS;
+            if (ouv.x < 0.0 || ouv.y < 0.0 || ouv.x > 1.0 || ouv.y > 1.0) show = false;
+            else {
+              vec4 occ = texture2D(uOcc, ouv);
+              float nearest = uOccP.y + occ.r * uOccP.z;
+              if (occ.a < 0.5 || fragD > nearest + uOccP.w) show = false;
+            }
+          }
+        }
+        if (show) {
+          vec4 s = texture2D(uDecal, d);
+          rgb = mix(rgb, s.rgb, s.a * uDecalP.y);
+        }
       }
     }
   }
@@ -59,6 +85,21 @@ void main() {
   float light = 0.62 + 0.38 * max(dot(n, normalize(vec3(0.35, 0.8, 0.4))), 0.0);
   gl_FragColor = vec4(rgb * light, 1.0);
 }`;
+
+const PICK_VS = `
+attribute vec3 aPos;
+attribute vec4 aId;
+uniform mat4 uMvp;
+varying vec4 vId;
+void main() {
+  vId = aId;
+  gl_Position = uMvp * vec4(aPos, 1.0);
+}`;
+const PICK_FS = `
+precision mediump float;
+varying vec4 vId;
+void main() { gl_FragColor = vId; }
+`;
 
 export class MeshView {
   constructor(ed, pane) {
@@ -140,6 +181,25 @@ export class MeshView {
     ed.on('tool', () => this.#request());
     ed.on('projector:fromView', () => ed.setOpt('projRot', eulerFromView(this.yaw, this.pitch)));
     ed.on('projector:place', () => { this._placeArmed = true; ed.toast('Click the model to place the projector.'); });
+    ed.on('projector:saveCam', () => {
+      const o = ed.opts;
+      ed.setOpt('savedCam', {
+        yaw: this.yaw, pitch: this.pitch, dist: this.dist, target: this.target.slice(),
+        loc: o.projLoc ? o.projLoc.slice() : null, rot: (o.projRot || [0, 0, 0]).slice(),
+      });
+      ed.toast('Camera saved. Use camera jumps back here.');
+    });
+    ed.on('projector:useCam', () => {
+      const c = ed.opts.savedCam;
+      if (!c) { ed.toast('No saved camera yet.'); return; }
+      this.yaw = c.yaw; this.pitch = c.pitch; this.dist = c.dist;
+      if (c.target) this.target = c.target.slice();
+      if (c.loc) ed.setOpt('projLoc', c.loc.slice());
+      if (c.rot) ed.setOpt('projRot', c.rot.slice());
+      this.#request();
+      ed.toast('Saved camera restored.');
+    });
+    ed.on('projector:image', (img) => this.#projectImage(img));
     this.#bind();
     this.#attach();
     this.#backend();
@@ -215,8 +275,15 @@ export class MeshView {
       decal: gl.getUniformLocation(prog, 'uDecal'),
       decalM: gl.getUniformLocation(prog, 'uDecalM'),
       decalP: gl.getUniformLocation(prog, 'uDecalP'),
+      occ: gl.getUniformLocation(prog, 'uOcc'),
+      rx: gl.getUniformLocation(prog, 'uRx'),
+      ry: gl.getUniformLocation(prog, 'uRy'),
+      rd: gl.getUniformLocation(prog, 'uRd'),
+      rw: gl.getUniformLocation(prog, 'uRw'),
+      occP: gl.getUniformLocation(prog, 'uOccP'),
+      occS: gl.getUniformLocation(prog, 'uOccS'),
     };
-    this.buf = { pos: gl.createBuffer(), nrm: gl.createBuffer(), uv: gl.createBuffer() };
+    this.buf = { pos: gl.createBuffer(), nrm: gl.createBuffer(), uv: gl.createBuffer(), pick: gl.createBuffer() };
     this.tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -231,10 +298,26 @@ export class MeshView {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    this.occTex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.occTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
     gl.activeTexture(gl.TEXTURE0);
     gl.useProgram(prog);
     gl.uniform1i(this.loc.tex, 0);
     gl.uniform1i(this.loc.decal, 1);
+    gl.uniform1i(this.loc.occ, 2);
+    gl.uniform4f(this.loc.occP, 0, 0, 1, 0);
+    gl.uniform2f(this.loc.occS, 1, 1);
+    try {
+      this.pickProg = program(gl, PICK_VS, PICK_FS);
+      this.pickLoc = { pos: gl.getAttribLocation(this.pickProg, 'aPos'), id: gl.getAttribLocation(this.pickProg, 'aId'), mvp: gl.getUniformLocation(this.pickProg, 'uMvp') };
+    } catch (err) { console.warn('Stratum: GPU pick unavailable', err); this.pickProg = null; }
+    gl.useProgram(prog);
     gl.enable(gl.DEPTH_TEST);
     gl.clearColor(0.07, 0.08, 0.1, 1);
   }
@@ -415,6 +498,7 @@ export class MeshView {
     const pos = new Float32Array(n * 9);
     const nrm = new Float32Array(n * 9);
     const uv = new Float32Array(n * 6);
+    const pick = new Uint8Array(n * 12);
     const flat = this.shape === 'flat';
     const groups = mount.groups || [];
     const off = this.offsets || [];
@@ -437,16 +521,21 @@ export class MeshView {
       const len = Math.hypot(nx, ny, nz) || 1;
       nx /= len; ny /= len; nz /= len;
       if (flat) { nx = 0; ny = 1; nz = 0; }
+      const id = packPickId(t);
       for (let k = 0; k < 3; k++) {
         pos[(w * 3 + k) * 3] = p[k][0]; pos[(w * 3 + k) * 3 + 1] = p[k][1]; pos[(w * 3 + k) * 3 + 2] = p[k][2];
         nrm[(w * 3 + k) * 3] = nx; nrm[(w * 3 + k) * 3 + 1] = ny; nrm[(w * 3 + k) * 3 + 2] = nz;
         uv[(w * 3 + k) * 2] = uvs[(t * 3 + k) * 2];
         uv[(w * 3 + k) * 2 + 1] = uvs[(t * 3 + k) * 2 + 1];
+        const o4 = (w * 3 + k) * 4;
+        pick[o4] = id[0]; pick[o4 + 1] = id[1]; pick[o4 + 2] = id[2]; pick[o4 + 3] = id[3];
       }
       w++;
     }
     const put = (buf, data) => { gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); };
     put(this.buf.pos, pos); put(this.buf.nrm, nrm); put(this.buf.uv, uv);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf.pick);
+    gl.bufferData(gl.ARRAY_BUFFER, pick.subarray(0, w * 12), gl.STATIC_DRAW);
     this.count = w * 3;
     this._geom = { pos, nrm, uv, count: this.count };
     this.gpuMesh?.setGeometry(pos, nrm, uv, this.count);
@@ -580,6 +669,22 @@ export class MeshView {
     }
     gl.uniformMatrix4fv(this.loc.decalM, false, dc ? dc.m : new Float32Array(16));
     gl.uniform4f(this.loc.decalP, dc ? 1 : 0, dc ? dc.alpha : 0, 1, 1);
+    const occ = dc?.occ;
+    if (occ?.canvas && occ.P) {
+      if (this._occGen !== occ.gen) {
+        this._occGen = occ.gen;
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, this.occTex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, occ.canvas);
+        gl.activeTexture(gl.TEXTURE0);
+      }
+      const P = occ.P;
+      gl.uniform4fv(this.loc.rx, P.rx); gl.uniform4fv(this.loc.ry, P.ry);
+      gl.uniform4fv(this.loc.rd, P.rd); gl.uniform4fv(this.loc.rw, P.rw);
+      gl.uniform4f(this.loc.occP, 1, occ.lo, occ.span, occ.bias);
+      gl.uniform2f(this.loc.occS, occ.w, occ.h);
+    } else gl.uniform4f(this.loc.occP, 0, 0, 1, 0);
     gl.uniformMatrix3fv(this.loc.n, false, new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]));
     const bind = (loc, buf, size) => {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -760,18 +865,14 @@ export class MeshView {
   // (core/projection.js; WebGPU when the 2D view runs on it). One history step.
 
   #projectionActive() {
-    const ed = this.ed;
-    return ed.tool?.group === 'shape' && ed.opts.shape3d === 'projection' && this.shape !== 'flat' && !!ed.doc?.mount?.uvs;
+    const ed = this.ed, t = ed.tool;
+    const paints = t && (t.projectionImage || t.projectionStroke);
+    return !!paints && ed.opts.shape3d === 'projection' && this.shape !== 'flat' && !!ed.doc?.mount?.uvs;
   }
 
-  #projectionWanted() {
-    if (!this.#projectionActive()) return false;
-    if (!this.ed.tool.projectionImage) {
-      if (!this._projToastShown) { this._projToastShown = true; this.ed.toast('Line / Curve paints on the surface; Projection works with the box shapes.'); }
-      return false;
-    }
-    return true;
-  }
+  #projectionWanted() { return this.#projectionActive(); }
+
+  #viewDir() { return norm(sub(this.target, this.#eye())); }
 
   /** CSS-pixel point of a pointer event on the canvas. */
   #cssPoint(e) {
@@ -820,7 +921,7 @@ export class MeshView {
   #gizmo() {
     const o = this.ed.opts;
     if (!o.projLoc) return null;
-    return gizmoHandles(o.projLoc, o.projRot, this.#toScreen(), this.#pxWorld(o.projLoc));
+    return gizmoHandles(o.projLoc, o.projRot, this.#toScreen(), this.#pxWorld(o.projLoc), this.#viewDir());
   }
 
   /** Projection for this drag (the projector as set now) and the map from pointer to its plane. */
@@ -852,7 +953,21 @@ export class MeshView {
     const { aim, toImg } = this.#projector();
     const a = toImg(e);
     if (!a || !aim.main) { ed.toast('Turn the view so you see the projector\u2019s plane (or turn the projector).'); return; }
-    this.proj = { aim, P: aim.main, toImg, a, b: a, shift: e.shiftKey, swap: e.button === 2, tool: ed.tool, img: null };
+    const brush = !!ed.tool.projectionStroke;
+    this.proj = { aim, P: aim.main, toImg, a, b: a, shift: e.shiftKey, swap: e.button === 2, tool: ed.tool, img: null, stroke: brush, pts: brush ? [a] : null };
+  }
+
+  #occlusion(P, img) {
+    const mount = this.ed.doc?.mount;
+    if (!mount || !img?.w || !img?.h || !P) return null;
+    const pack = occlusionPreview(mount, P, { x: img.x, y: img.y, w: img.w, h: img.h }, {
+      hidden: this.hidden.slice(), offsets: (this.offsets || []).map((o) => o && o.slice()), cap: 192,
+    });
+    if (!this._occCanvas) this._occCanvas = document.createElement('canvas');
+    const c = this._occCanvas;
+    if (c.width !== pack.w || c.height !== pack.h) { c.width = pack.w; c.height = pack.h; }
+    c.getContext('2d').putImageData(new ImageData(pack.data, pack.w, pack.h), 0, 0);
+    return { canvas: c, w: pack.w, h: pack.h, P: pack.P, lo: pack.lo, span: pack.span, bias: pack.bias, gen: (this._occPackGen = (this._occPackGen || 0) + 1) };
   }
 
   #projMove(e) {
@@ -860,8 +975,16 @@ export class MeshView {
     const b = s.toImg(e);
     if (b) s.b = b;
     s.shift = e.shiftKey;
-    s.img = s.tool.projectionImage(this.ed, s.a, s.b, { shift: s.shift, swap: s.swap, RW: s.P.RW, RH: s.P.RH });
-    this.decal = s.img ? { m: decalMatrix(s.P, s.img), alpha: s.img.opacity, canvas: s.img.canvas, gen: ++this._decalGen, w: s.img.w, h: s.img.h } : null;
+    if (s.stroke && b) {
+      const last = s.pts[s.pts.length - 1];
+      if (!last || Math.hypot(b[0] - last[0], b[1] - last[1]) >= 1) s.pts.push(b);
+      s.img = s.tool.projectionStroke(this.ed, s.pts, { RW: s.P.RW, RH: s.P.RH });
+    } else if (s.tool.projectionImage) {
+      s.img = s.tool.projectionImage(this.ed, s.a, s.b, { shift: s.shift, swap: s.swap, RW: s.P.RW, RH: s.P.RH });
+    }
+    let occ = null;
+    if (s.img) { try { occ = this.#occlusion(s.P, s.img); } catch (err) { console.warn(err); } }
+    this.decal = s.img ? { m: decalMatrix(s.P, s.img), alpha: s.img.opacity, canvas: s.img.canvas, gen: ++this._decalGen, w: s.img.w, h: s.img.h, occ } : null;
     this.#request();
   }
 
@@ -879,7 +1002,7 @@ export class MeshView {
     if (!this.#projectionActive() || !o.projLoc) { this.gizmoStats.hidden++; return; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const ts = this.#toScreen(), loc = o.projLoc, pw = this.#pxWorld(loc), ax = projectorAxes(o.projRot);
-    const h = gizmoHandles(loc, o.projRot, ts, pw);
+    const h = this.#gizmo();
     if (!h) return;
     const hot = this.gizmoDrag || this._gizmoHover;
     const line = (pts, col, w = 2, dash = null) => {
@@ -959,6 +1082,94 @@ export class MeshView {
     done();
   }
 
+  /** Centre a clipboard image on the projector and fire it the same way a shape releases. */
+  #projectImage(img) {
+    const ed = this.ed;
+    if (ed.opts.shape3d !== 'projection' || this.shape === 'flat' || !ed.doc?.mount?.uvs) {
+      ed.toast('Switch the model to Projection (solid view) first.');
+      return;
+    }
+    if (!ed.opts.projLoc) { ed.toast('Place the projector first.'); return; }
+    const w = img?.width | 0, h = img?.height | 0;
+    if (!w || !h || !img.data) { ed.toast('That image is empty.'); return; }
+    let aim;
+    try { ({ aim } = this.#projector()); } catch { aim = null; }
+    if (!aim?.main) { ed.toast('The projector has no view of the model.'); return; }
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    try {
+      const copy = img.data instanceof Uint8ClampedArray ? img.data : new Uint8ClampedArray(img.data);
+      canvas.getContext('2d').putImageData(new ImageData(copy, w, h), 0, 0);
+    } catch { ed.toast('Could not read that image.'); return; }
+    const x = Math.round(aim.RW / 2 - w / 2), y = Math.round(aim.RH / 2 - h / 2);
+    this.proj = {
+      aim, P: aim.main, toImg: () => null, a: [x, y], b: [x + w, y + h],
+      tool: { name: 'Image' },
+      img: { x, y, w, h, canvas, opacity: (ed.opts.opacity ?? 100) / 100, aa: true },
+    };
+    this.#projEnd(false);
+  }
+
+  /** GPU id pass: the triangle under the cursor, or -1. The CPU raycast still supplies the UV. */
+  #gpuPick(e) {
+    const gl = this.gl;
+    if (!gl || !this.pickProg || !this.count) return -1;
+    const w = this.canvas.width, h = this.canvas.height;
+    if (!w || !h) return -1;
+    const r = this.canvas.getBoundingClientRect();
+    if (!r.width || !r.height) return -1;
+    if (!this.pickFbo || this.pickW !== w || this.pickH !== h) {
+      this.pickFbo = gl.createFramebuffer();
+      this.pickTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.pickTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      this.pickDepth = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.pickDepth);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.pickTex, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.pickDepth);
+      this.pickW = w; this.pickH = h;
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        this.pickProg = null;
+        return -1;
+      }
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.pickFbo);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(this.pickProg);
+    gl.uniformMatrix4fv(this.pickLoc.mvp, false, this.#mvp());
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf.pos);
+    gl.enableVertexAttribArray(this.pickLoc.pos);
+    gl.vertexAttribPointer(this.pickLoc.pos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf.pick);
+    gl.enableVertexAttribArray(this.pickLoc.id);
+    gl.vertexAttribPointer(this.pickLoc.id, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, this.count);
+    const x = Math.max(0, Math.min(w - 1, Math.floor(((e.clientX - r.left) / r.width) * w)));
+    const y = Math.max(0, Math.min(h - 1, Math.floor((1 - (e.clientY - r.top) / r.height) * h)));
+    const px = new Uint8Array(4);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0.07, 0.08, 0.1, 1);
+    return unpackPickId(px);
+  }
+
+  #gpuPickSelect(e) {
+    let tri = -1;
+    try { tri = this.#gpuPick(e); } catch { tri = -1; }
+    this.lastPick = tri;
+    if (tri < 0 || !this.ed.doc?.mount) return;
+    const gi = this.#groupAt(tri, this.ed.doc.mount.groups || []);
+    if (gi >= 0) { this.selectedGroup = gi; this.#syncObjects(); }
+  }
+
   #source() {
     const doc = this.ed.doc;
     return doc?.session && !doc.atlas ? doc : null;
@@ -988,6 +1199,7 @@ export class MeshView {
         return;
       }
       if (e.button !== 0 && e.button !== 2) return;
+      if (e.button === 0 && !e.altKey) this.#gpuPickSelect(e);
       if (this.#projectionWanted()) {
         const o = ed.opts, sp = this.#cssPoint(e);
         if (!o.projLoc || this._placeArmed || e.ctrlKey || e.metaKey) {
@@ -1063,8 +1275,11 @@ export class MeshView {
       }
       if (this.gizmoDrag) {
         const gd = this.gizmoDrag, sp = this.#cssPoint(e);
-        if (gd.type === 'move') ed.setOpt('projLoc', dragMove(gd.loc0, gd.k, gd.s0, sp, this.#toScreen(), e.shiftKey));
-        else ed.setOpt('projRot', dragRotate(gd.rot0, gd.k, gd.centre, gd.s0, sp, norm(sub(this.target, this.#eye())), e.shiftKey));
+        if (gd.type === 'move') {
+          const ax = projectorAxes(gd.rot0 || [0, 0, 0]);
+          const dirs = [ax.right, ax.up, ax.forward];
+          ed.setOpt('projLoc', dragMove(gd.loc0, gd.k, gd.s0, sp, this.#toScreen(), e.shiftKey, dirs[gd.k]));
+        } else ed.setOpt('projRot', dragRotate(gd.rot0, gd.k, gd.centre, gd.s0, sp, norm(sub(this.target, this.#eye())), e.shiftKey));
         return;
       }
       if (this.proj) { this.#projMove(e); return; }

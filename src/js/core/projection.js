@@ -90,6 +90,46 @@ export function projectorAxes(rot) {
   return { right: rotateEuler([1, 0, 0], rot), up: rotateEuler([0, 1, 0], rot), forward: rotateEuler([0, 0, -1], rot) };
 }
 
+/** XYZ Euler (degrees) whose axes match `right` / `up` / `forward`. Gimbal lock (pitch ±90°) sets roll to 0. */
+export function eulerFromAxes(right, up, forward) {
+  const r00 = right[0], r10 = right[1], r20 = right[2];
+  const r21 = up[2];
+  const r22 = -forward[2];
+  const r12 = -forward[1];
+  const r11 = up[1];
+  const cy = Math.hypot(r00, r10);
+  const sy = -r20;
+  let rx, ry, rz;
+  if (cy > 1e-6) {
+    rx = Math.atan2(r21, r22);
+    ry = Math.atan2(sy, cy);
+    rz = Math.atan2(r10, r00);
+  } else {
+    rx = Math.atan2(-r12, r11);
+    ry = Math.atan2(sy, cy);
+    rz = 0;
+  }
+  const w = (rad) => {
+    let d = (rad * 180) / Math.PI;
+    d = ((d % 360) + 540) % 360 - 180;
+    if (Math.abs(d) < 1e-6 || Math.abs(d) === 180) d = Math.abs(d) < 1e-6 ? 0 : (d < 0 ? -180 : 180);
+    return d === -180 ? 180 : d;
+  };
+  return [w(rx), w(ry), w(rz)];
+}
+
+function spin(v, axis, deg) {
+  const k = norm3(axis), t = deg * D2R, c = Math.cos(t), s = Math.sin(t);
+  const kv = cross3(k, v), kd = dot3(k, v) * (1 - c);
+  return [v[0] * c + kv[0] * s + k[0] * kd, v[1] * c + kv[1] * s + k[1] * kd, v[2] * c + kv[2] * s + k[2] * kd];
+}
+
+/** Turn the projector's orientation by `deg` around a world axis (the view-facing ring). */
+export function rollAbout(rot, axis, deg) {
+  const a = projectorAxes(rot);
+  return eulerFromAxes(norm3(spin(a.right, axis, deg)), norm3(spin(a.up, axis, deg)), norm3(spin(a.forward, axis, deg)));
+}
+
 /** Rotation that looks like the 3D view's camera (yaw / pitch in radians, as in MeshView). */
 export function eulerFromView(yaw, pitch) {
   const w = (a) => { let d = ((a % 360) + 540) % 360 - 180; if (Math.abs(d) < 1e-9) d = 0; return d; };
@@ -291,6 +331,40 @@ export function depthMap(mount, P, R, { hidden = [], offsets = [] } = {}) {
     }
   }
   return D;
+}
+
+/** Pack a depth map into RGBA. R is (depth − lo) / span, A is 255 where a surface was hit. */
+export function packDepthMap(D) {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < D.length; i++) {
+    const d = D[i];
+    if (d < Infinity) { if (d < lo) lo = d; if (d > hi) hi = d; }
+  }
+  if (!(hi >= lo)) { lo = 0; hi = 1; }
+  const span = Math.max(hi - lo, 1e-4);
+  const data = new Uint8ClampedArray(D.length * 4);
+  for (let i = 0; i < D.length; i++) {
+    const d = D[i];
+    if (!(d < Infinity)) continue;
+    data[i * 4] = Math.max(0, Math.min(255, Math.round(((d - lo) / span) * 255)));
+    data[i * 4 + 3] = 255;
+  }
+  return { data, lo, span, bias: span * 0.02 + 1e-4 };
+}
+
+/**
+ * Depth of the mesh over `box` (projector image pixels) for the drag preview, capped at `cap`
+ * pixels on a side. The returned projector `P` is the one the preview shader must use: its image
+ * axes are scaled into the packed texture, depth is unchanged.
+ */
+export function occlusionPreview(mount, P, box, { hidden = [], offsets = [], cap = 256 } = {}) {
+  const w = Math.max(1, box.w | 0), h = Math.max(1, box.h | 0);
+  const s = Math.min(1, cap / w, cap / h);
+  const Rw = Math.max(1, Math.round(w * s)), Rh = Math.max(1, Math.round(h * s));
+  const scaleRow = (row, k, origin) => [row[0] * k, row[1] * k, row[2] * k, row[3] * k - origin * k];
+  const Ps = { ...P, rx: scaleRow(P.rx, s, box.x), ry: scaleRow(P.ry, s, box.y) };
+  const D = depthMap(mount, Ps, { x: 0, y: 0, w: Rw, h: Rh }, { hidden, offsets });
+  return { ...packDepthMap(D), w: Rw, h: Rh, P: Ps };
 }
 
 /** Premultiplied bilinear (or nearest) sample of a straight-alpha RGBA image at pixel coords. */

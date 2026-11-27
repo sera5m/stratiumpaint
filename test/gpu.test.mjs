@@ -93,14 +93,16 @@ test('compositePixel: transparent source leaves the backdrop, opaque normal repl
   assert.deepEqual(half, [0.5, 0.5, 0.5, 0.5]);
 });
 
-test('renderer selection: Canvas 2D unless WebGPU is asked for and actually works', () => {
+test('renderer selection: WebGPU by default, Canvas 2D when forced or the GPU is missing', () => {
   const store = (v) => ({ getItem: (k) => (k === STORAGE_KEY ? v : null) });
-  assert.equal(requestedRenderer({}), 'canvas');
+  assert.equal(requestedRenderer({}), 'webgpu');
   assert.equal(requestedRenderer({ search: '?renderer=webgpu' }), 'webgpu');
+  assert.equal(requestedRenderer({ search: '?renderer=canvas' }), 'canvas');
   assert.equal(requestedRenderer({ search: '', storage: store('webgpu') }), 'webgpu');
+  assert.equal(requestedRenderer({ search: '', storage: store('canvas') }), 'canvas');
   assert.equal(requestedRenderer({ search: '?renderer=canvas', storage: store('webgpu') }), 'canvas', 'URL beats storage');
-  assert.equal(requestedRenderer({ search: '?renderer=bogus', storage: store('bogus') }), 'canvas');
-  assert.equal(requestedRenderer({ storage: { getItem() { throw new Error('denied'); } } }), 'canvas');
+  assert.equal(requestedRenderer({ search: '?renderer=bogus', storage: store('bogus') }), 'webgpu');
+  assert.equal(requestedRenderer({ storage: { getItem() { throw new Error('denied'); } } }), 'webgpu');
 
   const ok = { requested: 'webgpu', hasGPU: true, adapter: true, device: true, maxTexture: 8192, docSize: 4000 };
   assert.equal(chooseRenderer(ok).renderer, 'webgpu');

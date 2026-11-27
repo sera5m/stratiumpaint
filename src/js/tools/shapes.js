@@ -226,6 +226,7 @@ function makeShape({ id, name, kind, key }) {
   /** Bounds the shape can touch (union over wrap pieces), and the vector drawing itself. */
   const plan = (ed, s) => {
     const { layer } = s, o = ed.opts, g = geometry(s);
+    if (s.stamps?.length && kind !== 'line') return stampPlan(ed, s);
     // Read colour live rather than what was captured at mousedown, so changing the primary/secondary
     // colour mid-drag (e.g. via a keyboard shortcut) updates the shape before it's released.
     const stroke = s.swap ? ed.secondary : ed.primary, fill = s.swap ? ed.primary : ed.secondary;
@@ -289,22 +290,63 @@ function makeShape({ id, name, kind, key }) {
     return { region, drawShape, aa: o.aa, opacity: o.opacity / 100 };
   };
 
+  /** One small copy of the shape at each point of the drag. One history step. */
+  const stampPlan = (ed, s) => {
+    const { layer } = s, o = ed.opts;
+    const size = Math.max(1, +o.size || 1);
+    const stroke = s.swap ? ed.secondary : ed.primary, fill = s.swap ? ed.primary : ed.secondary;
+    const pad = Math.ceil(size / 2) + 3;
+    const invert = !!o.shapeInvert;
+    let region = null;
+    for (const p of s.stamps) {
+      const b = rectIntersect({ x: Math.floor(p.x - size / 2) - pad, y: Math.floor(p.y - size / 2) - pad, w: Math.ceil(size) + pad * 2, h: Math.ceil(size) + pad * 2 }, layerRect(layer));
+      if (b) region = region ? rectUnion(region, b) : b;
+    }
+    const paint = (ctx) => {
+      ctx.lineWidth = Math.max(1, size);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = kind === 'rect' ? 'miter' : 'round';
+      if (o.shape === 'outline') { ctx.strokeStyle = rgbaCss(stroke); ctx.stroke(); }
+      else if (o.shape === 'fill') { ctx.fillStyle = rgbaCss(stroke); ctx.fill(); }
+      else { ctx.fillStyle = rgbaCss(fill); ctx.fill(); ctx.strokeStyle = rgbaCss(stroke); ctx.stroke(); }
+    };
+    const drawShape = (ctx) => {
+      for (const pt of s.stamps) {
+        const x0 = pt.x - size / 2, y0 = pt.y - size / 2, x1 = pt.x + size / 2, y1 = pt.y + size / 2;
+        ctx.save();
+        if (invert) { ctx.translate(pt.x, pt.y); ctx.scale(1, -1); ctx.translate(-pt.x, -pt.y); }
+        tracePath(ctx, kind, x0, y0, x1, y1, o.radius, o.sides || 5);
+        paint(ctx);
+        ctx.restore();
+      }
+    };
+    const p0 = s.stamps[0], p1 = s.stamps[s.stamps.length - 1];
+    s.meta = {
+      kind: 'shape', shape: kind, stamp: true,
+      x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y,
+      angle: 0, invert, sides: o.sides || 5, radius: o.radius || 0,
+      size, style: o.shape, opacity: o.opacity / 100, aa: !!o.aa,
+      stroke: { ...stroke }, fill: { ...fill }, layerId: layer.id,
+    };
+    return { region, drawShape, aa: o.aa, opacity: o.opacity / 100 };
+  };
+
   const draw = (ed, s) => {
     const p = plan(ed, s);
     preview(ed, s, p.region, p.opacity, p.aa, p.drawShape);
   };
 
   // 3D options: how a drag on the model maps the shape onto it (see ui/meshview.js).
-  const SHAPE3D = ['shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
+  const SHAPE3D = ['shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
   /** Reused canvas for projectionImage (the 3D view's decal preview reads it every frame). */
   let projCanvas = null;
 
   return {
     id, name, key, group: 'shape', cursor: 'crosshair',
     options: kind === 'line' ? ['size', 'opacity', 'aa', ...SHAPE3D]
-      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'shapeAngle', 'shapeInvert', 'opacity', 'aa', ...SHAPE3D]
-      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'shapeAngle', 'shapeInvert', 'opacity', 'aa', ...SHAPE3D]
-      : ['size', 'shape', 'shapeAngle', 'shapeInvert', 'opacity', 'aa', ...SHAPE3D],
+      : kind === 'roundrect' ? ['size', 'shape', 'radius', 'shapeAngle', 'shapeInvert', 'stampAlong', 'opacity', 'aa', ...SHAPE3D]
+      : (kind === 'polygon' || kind === 'star') ? ['size', 'shape', 'sides', 'shapeAngle', 'shapeInvert', 'stampAlong', 'opacity', 'aa', ...SHAPE3D]
+      : ['size', 'shape', 'shapeAngle', 'shapeInvert', 'stampAlong', 'opacity', 'aa', ...SHAPE3D],
 
     /**
      * The shape between image-plane points a and b ([x, y]) as this tool would draw it (style,
@@ -349,10 +391,20 @@ function makeShape({ id, name, kind, key }) {
       S = {
         layer, x0: e.x, y0: e.y, x1: e.x, y1: e.y, shift: e.shift,
         swap: e.button === 2, moved: false, wrap: e.wrap || null, float: null, canvas: null,
+        stamps: ed.opts.stampAlong && kind !== 'line' ? [{ x: e.x, y: e.y }] : null,
       };
     },
     move(e, ed) {
       if (!S) return;
+      if (S.stamps) {
+        const last = S.stamps[S.stamps.length - 1];
+        const step = Math.max(4, (+ed.opts.size || 1) * 1.25);
+        if (Math.hypot(e.x - last.x, e.y - last.y) >= step) S.stamps.push({ x: e.x, y: e.y });
+        S.moved = true;
+        draw(ed, S);
+        ed.requestOverlay?.();
+        return;
+      }
       S.x1 = e.x; S.y1 = e.y; S.shift = e.shift; S.moved = true;
       if (e.wrap) S.wrap = e.wrap;
       draw(ed, S);
@@ -447,9 +499,38 @@ function makeCurve() {
     return best;
   };
 
+  let projCanvas = null;
+
   return {
     id: 'line', name: 'Line / Curve', key: 'O', group: 'shape', cursor: 'crosshair',
-    options: ['size', 'opacity', 'aa', 'wrapShapes'],
+    options: ['size', 'opacity', 'aa', 'shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'],
+    /** Straight stroke between the drag points, on the projector's image plane. */
+    projectionImage(ed, a, b, { shift = false, swap = false, RW, RH } = {}) {
+      let bx = b[0], by = b[1];
+      if (shift) {
+        const dx = bx - a[0], dy = by - a[1], len = Math.hypot(dx, dy);
+        const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 12)) * (Math.PI / 12);
+        bx = a[0] + Math.cos(ang) * len; by = a[1] + Math.sin(ang) * len;
+      }
+      const s = {
+        layer: { width: RW, height: RH }, swap,
+        a: { x: a[0], y: a[1] }, b: { x: bx, y: by },
+        c0: { x: a[0] + (bx - a[0]) / 3, y: a[1] + (by - a[1]) / 3 },
+        c1: { x: a[0] + (bx - a[0]) * 2 / 3, y: a[1] + (by - a[1]) * 2 / 3 },
+      };
+      const p = plan(ed, s);
+      if (!p.region) return null;
+      const { region } = p;
+      if (!projCanvas) projCanvas = createCanvas(region.w, region.h);
+      const c = projCanvas;
+      if (c.width !== region.w || c.height !== region.h) { c.width = region.w; c.height = region.h; }
+      const ctx = c.getContext('2d');
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.save(); ctx.translate(-region.x, -region.y); p.drawShape(ctx); ctx.restore();
+      if (!p.aa) { const id = ctx.getImageData(0, 0, c.width, c.height); hardenAlpha(id); ctx.putImageData(id, 0, 0); }
+      return { ...region, canvas: c, opacity: p.opacity, aa: p.aa };
+    },
     down(e, ed) {
       if (S?.editing) {
         if (e.button === 2) { settle(ed); return; }

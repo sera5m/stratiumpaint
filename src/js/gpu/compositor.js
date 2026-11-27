@@ -119,6 +119,35 @@ export class GpuCompositor {
     return e.tex;
   }
 
+  /**
+   * Copy a layer's GPU texture as it is now (call at stroke start, before the paint). The returned
+   * snapshot restores that texture on undo. It does not clear the layer's dirty rect: the CPU
+   * buffer stays the fallback, and a stale snapshot must not hide a later CPU upload.
+   */
+  snapshotUndo(layer) {
+    const src = this.layerTexture(layer);
+    const w = layer.img.width, h = layer.img.height;
+    const d = this.device;
+    const tex = d.createTexture({
+      label: `undo ${layer.id}`, size: [w, h], format: 'rgba8unorm',
+      usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    const enc = d.createCommandEncoder({ label: 'undo snap' });
+    enc.copyTextureToTexture({ texture: src }, { texture: tex }, [w, h]);
+    d.queue.submit([enc.finish()]);
+    return {
+      restore: (ly) => {
+        const e = this.layers.get(ly);
+        if (!e?.tex) return;
+        const enc2 = d.createCommandEncoder({ label: 'undo restore' });
+        enc2.copyTextureToTexture({ texture: tex }, { texture: e.tex }, [e.w, e.h]);
+        d.queue.submit([enc2.finish()]);
+        if (ly._gpuDirty == null) ly._gpuDirty = 'all';
+      },
+      destroy: () => { try { tex.destroy(); } catch { /* already gone */ } },
+    };
+  }
+
   #targets(w, h) {
     if (this.acc && this.acc.w === w && this.acc.h === h) return this.acc;
     if (this.acc) { this.acc.a.destroy(); this.acc.b.destroy(); }

@@ -1,24 +1,23 @@
 // Which renderer draws the main 2D view. Pure functions so the choice is testable in node.
 //
-// The WebGPU renderer is experimental and OFF unless asked for:
-//   - URL query      ?renderer=webgpu   (or ?renderer=canvas to force the old path)
+// WebGPU is the default. It still falls back to Canvas 2D when the machine has no GPU:
+//   - URL query      ?renderer=canvas   forces Canvas 2D; ?renderer=webgpu asks for WebGPU
 //   - localStorage   stratum.renderer = 'webgpu' | 'canvas'
-//   - Electron       start with --webgpu (or STRATUM_WEBGPU=1); main.cjs adds the Chromium
-//                    switches Linux needs and passes ?renderer=webgpu to the page.
+//   - Electron       WebGPU switches are on unless --canvas or STRATUM_RENDERER=canvas.
 // Anything missing (no navigator.gpu, no adapter, device creation fails, document larger than the
-// GPU allows, device lost later) falls back to the Canvas 2D renderer, which stays the default.
+// GPU allows, device lost later) falls back to the Canvas 2D renderer.
 
 export const RENDERERS = ['canvas', 'webgpu'];
 export const STORAGE_KEY = 'stratum.renderer';
 
-/** The renderer the user asked for: 'webgpu' or 'canvas' (default). URL beats storage. */
+/** The renderer the user asked for. URL beats storage. Default is WebGPU (Canvas 2D is the fallback). */
 export function requestedRenderer({ search = '', storage = null } = {}) {
   let q = null;
   try { q = new URLSearchParams(search).get('renderer'); } catch { q = null; }
   if (RENDERERS.includes(q)) return q;
   let saved = null;
   try { saved = storage?.getItem?.(STORAGE_KEY) ?? null; } catch { saved = null; }
-  return RENDERERS.includes(saved) ? saved : 'canvas';
+  return RENDERERS.includes(saved) ? saved : 'webgpu';
 }
 
 /**

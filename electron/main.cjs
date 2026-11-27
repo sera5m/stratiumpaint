@@ -49,10 +49,10 @@ if (userCopy && !process.argv.includes('--script')) {
 }
 
 const SCRIPT_MODE = process.argv.includes('--script');
-// Experimental WebGPU renderer (docs/WEBGPU_PLAN.md). Off by default. `--webgpu` or STRATUM_WEBGPU=1
-// turns on the Chromium switches WebGPU needs (Linux also needs the Vulkan feature) and asks the
-// page for the WebGPU view; the page falls back to Canvas 2D by itself if no adapter shows up.
-const WEBGPU = process.argv.includes('--webgpu') || process.env.STRATUM_WEBGPU === '1';
+// WebGPU is on unless --canvas or STRATUM_RENDERER=canvas. Linux still needs the Vulkan switch
+// before the GPU process starts; the page falls back to Canvas 2D when no adapter shows up.
+// --webgpu / STRATUM_WEBGPU=1 are accepted and do the same as the default.
+const FORCE_CANVAS = process.argv.includes('--canvas') || process.env.STRATUM_RENDERER === 'canvas';
 let ownsScriptPort = false;
 let win = null;
 let forceClose = false;
@@ -86,7 +86,7 @@ function createWindow() {
     },
   });
   Menu.setApplicationMenu(null); // the app draws its own menu bar
-  win.loadFile(INDEX, WEBGPU ? { query: { renderer: 'webgpu' } } : undefined);
+  win.loadFile(INDEX, FORCE_CANVAS ? { query: { renderer: 'canvas' } } : undefined);
 
   // Let the renderer ask about unsaved work before the window really closes.
   win.on('close', (e) => {
@@ -750,7 +750,7 @@ async function launch() {
   }
   app.setName('stratum');
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
-  if (WEBGPU) {
+  if (!FORCE_CANVAS) {
     app.commandLine.appendSwitch('enable-unsafe-webgpu');
     if (process.platform === 'linux') app.commandLine.appendSwitch('enable-features', 'Vulkan');
   }

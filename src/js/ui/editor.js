@@ -23,6 +23,10 @@ export const DEFAULT_OPTS = {
   projPoints: 1, // fire from this many origins, in a ring around the direction
   projSpread: 20, // ring angle (degrees) for projPoints > 1
   projAngle: 80, // Projection: surfaces turned further than this from the projector get no paint
+  savedCam: null, // { yaw, pitch, dist, target, loc, rot } — projection from a saved camera
+  stampAlong: false, // shapes: repeat the shape along the drag
+  gpuPaint: false, // phase 5: snapshot the layer's GPU texture at stroke start (off: CPU undo only)
+  gpuFilters: false, // phase 4: adjustments/effects try the GPU path
   sides: 5,
   shapeAngle: 0, // shapes: drawn turned by this many degrees about their centre
   shapeInvert: false, // shapes: flip vertically about the centre so they point the other way
@@ -37,7 +41,7 @@ export const DEFAULT_OPTS = {
 };
 
 /** Options kept between sessions (persistOptions). */
-export const PERSISTED_OPTS = ['shape3d', 'wrapShapes', 'projectFrom', 'projLoc', 'projRot', 'projOffset', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
+export const PERSISTED_OPTS = ['shape3d', 'wrapShapes', 'projectFrom', 'projLoc', 'projRot', 'projOffset', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle', 'savedCam', 'stampAlong', 'gpuPaint', 'gpuFilters'];
 
 const DOC_EVENTS = ['render', 'layers', 'selection', 'size', 'history', 'meta', 'float'];
 
@@ -111,6 +115,7 @@ export class Editor extends Emitter {
       this.setOpt('projectFrom', presetOf(value));
       this._aiming = false;
     }
+    if ((key === 'gpuFilters' || key === 'gpuPaint') && this.doc) this.doc[key] = !!value;
     this.emit('opts', key);
     this.requestOverlay();
   }
@@ -183,7 +188,12 @@ export class Editor extends Emitter {
     for (const off of this._off) off();
     this._off = [];
     this.doc = doc;
-    if (doc) for (const ev of DOC_EVENTS) this._off.push(doc.on(ev, (...a) => this.emit(`doc:${ev}`, ...a)));
+    if (doc) {
+      doc.gpuFilters = !!this.opts.gpuFilters;
+      doc.gpuPaint = !!this.opts.gpuPaint;
+      if (this.gpuCompositor) doc.authority = this.gpuCompositor;
+      for (const ev of DOC_EVENTS) this._off.push(doc.on(ev, (...a) => this.emit(`doc:${ev}`, ...a)));
+    }
     this.emit('doc', doc);
   }
 

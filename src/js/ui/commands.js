@@ -16,6 +16,8 @@ import { putBackup, listBackups, formatWhen } from './backup.js';
 import * as platform from './platform.js';
 import { h } from './dom.js';
 import { STORAGE_KEY as RENDERER_KEY } from '../gpu/backend.js';
+import { adjustOnGPU, GPU_ADJUST_IDS } from '../gpu/filters.js';
+import { cloneImage } from '../core/image.js';
 import { executeLine } from '../nodes/script.js';
 import { canRedoGraph, canUndoGraph, ensureGraph, markGraph, redoGraph, undoGraph } from '../nodes/graph.js';
 
@@ -298,6 +300,12 @@ export function createCommands({ ed, view }) {
     ed.addDoc(doc);
   }), { shortcut: 'Ctrl+Alt+V', enabled: () => true });
 
+  ed.on('projector:imageAsk', async () => {
+    const img = await clipboardImage();
+    if (!img?.data) { ed.toast('Copy an image first, then project it.'); return; }
+    ed.emit('projector:image', img);
+  });
+
   add('erase', 'Erase Selection', () => { const l = ed.editableLayer(); if (l && !eraseSelection(ed.doc, l, ed.opts.wholeImage)) ed.toast('The selection is empty.'); }, { shortcut: 'Delete' });
   add('fill', 'Fill Selection', () => { const l = ed.editableLayer(); if (l && !fillSelection(ed.doc, l, ed.primary, ed.opts.wholeImage)) ed.toast('The selection is empty.'); }, { shortcut: 'Backspace' });
   add('selectAll', 'Select All', () => ed.doc.selectAll(), { shortcut: 'Ctrl+A' });
@@ -311,15 +319,23 @@ export function createCommands({ ed, view }) {
   add('zoomFit', 'Best Fit', () => view.fit(), { shortcut: 'Ctrl+B|Ctrl+0' });
   add('zoomActual', 'Actual Size (100%)', () => view.setZoom(1), { shortcut: 'Ctrl+Shift+A' });
   add('grid', 'Pixel Grid', () => ed.setOpt('grid', !ed.opts.grid), { checked: () => ed.opts.grid });
-  add('webgpu', 'WebGPU Renderer (Experimental)', () => {
+  add('webgpu', 'WebGPU Renderer', () => {
     let pref = null;
     try { pref = localStorage.getItem(RENDERER_KEY); } catch { /* no storage */ }
-    const on = view.renderer === 'webgpu' || pref === 'webgpu';
+    const on = pref === 'webgpu' || (pref !== 'canvas' && view.renderer === 'webgpu');
     try { localStorage.setItem(RENDERER_KEY, on ? 'canvas' : 'webgpu'); } catch { /* no storage */ }
     ed.toast(on
       ? 'Canvas 2D renderer from the next start.'
-      : 'WebGPU renderer from the next start (falls back to Canvas 2D if unavailable). Desktop app on Linux: start with --webgpu.');
-  }, { checked: () => view.renderer === 'webgpu' });
+      : 'WebGPU renderer from the next start. It falls back to Canvas 2D if the GPU is unavailable.');
+  }, { checked: () => {
+    let pref = null;
+    try { pref = localStorage.getItem(RENDERER_KEY); } catch { /* no storage */ }
+    if (pref === 'canvas') return false;
+    if (pref === 'webgpu') return true;
+    return view.renderer === 'webgpu';
+  } });
+  add('gpuPaint', 'GPU Paint Undo', () => ed.setOpt('gpuPaint', !ed.opts.gpuPaint), { checked: () => !!ed.opts.gpuPaint, title: 'Snapshot the layer on the GPU at the start of a brush stroke' });
+  add('gpuFilters', 'GPU Filters', () => ed.setOpt('gpuFilters', !ed.opts.gpuFilters), { checked: () => !!ed.opts.gpuFilters });
 
   // ------------------------------------------------------------------ image
 
@@ -456,6 +472,9 @@ export function createCommands({ ed, view }) {
   add('layoutSplit', 'Split View', () => setLayout('split'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === 'split' });
   add('layout2d', 'Texture Only', () => setLayout('2d'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === '2d' });
   add('layout3d', 'Model Only', () => setLayout('3d'), { enabled: () => !!ed.doc?.mount, checked: () => ed.layout === '3d' });
+  add('saveCamera', 'Save Camera', () => ed.emit('projector:saveCam'), { enabled: () => !!ed.doc?.mount });
+  add('useCamera', 'Use Saved Camera', () => ed.emit('projector:useCam'), { enabled: () => !!ed.opts.savedCam });
+  add('projectImage', 'Project Image', () => ed.emit('projector:imageAsk'), { enabled: () => ed.opts.shape3d === 'projection' && !!ed.doc?.mount });
   add('uvLines', 'UV Lines', () => {
     const m = ed.doc?.mount;
     if (!m) return;
@@ -485,8 +504,21 @@ export function createCommands({ ed, view }) {
   const runSpec = (spec) => {
     const layer = ed.editableLayer();
     if (!layer) return;
-    if (spec.params?.length) dlg.effectDialog(ed, spec);
-    else if (!applyFilter(ed.doc, layer, spec, {}, ed.opts.wholeImage)) ed.toast('The selection is empty.');
+    if (ed.opts.gpuFilters && ed.doc) ed.doc.gpuFilters = true;
+    if (spec.params?.length) { dlg.effectDialog(ed, spec); return; }
+    const device = ed.gpuCompositor?.device;
+    const whole = ed.opts.wholeImage || !ed.doc.selection;
+    if (device && ed.doc.gpuFilters && whole && GPU_ADJUST_IDS.has(spec.id)) {
+      adjustOnGPU(device, layer.img, spec.id, {}).then((out) => {
+        if (!out) { if (!applyFilter(ed.doc, layer, spec, {}, ed.opts.wholeImage)) ed.toast('The selection is empty.'); return; }
+        const before = cloneImage(layer.img);
+        layer.img.data.set(out.data);
+        layer.touch();
+        ed.doc.commitRegion(layer, { x: 0, y: 0, w: layer.img.width, h: layer.img.height }, before, spec.name);
+      }).catch(() => { if (!applyFilter(ed.doc, layer, spec, {}, ed.opts.wholeImage)) ed.toast('The selection is empty.'); });
+      return;
+    }
+    if (!applyFilter(ed.doc, layer, spec, {}, ed.opts.wholeImage)) ed.toast('The selection is empty.');
   };
   for (const s of ADJUSTMENTS) add(`adj:${s.id}`, s.name + (s.params?.length ? '…' : ''), () => runSpec(s), { shortcut: s.shortcut });
   for (const s of EFFECTS) add(`fx:${s.id}`, s.name + (s.params?.length ? '…' : ''), () => runSpec(s), { shortcut: s.shortcut });
