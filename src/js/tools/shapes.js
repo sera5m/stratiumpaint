@@ -57,6 +57,55 @@ function arrowPath(ctx, x, y, w, h) {
   ctx.closePath();
 }
 
+function roundTriPath(ctx, x, y, w, h, r) {
+  const rad = Math.min(r || 12, w / 4, h / 4);
+  const pts = [[x + w / 2, y], [x + w, y + h], [x, y + h]];
+  ctx.moveTo((pts[0][0] + pts[2][0]) / 2, (pts[0][1] + pts[2][1]) / 2);
+  for (let i = 0; i < 3; i++) {
+    const a = pts[i], b = pts[(i + 1) % 3];
+    ctx.arcTo(a[0], a[1], b[0], b[1], rad);
+  }
+  ctx.closePath();
+}
+
+function capsulePath(ctx, x, y, w, h) {
+  const r = Math.min(w, h) / 2;
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arc(x + w - r, y + r, r, -Math.PI / 2, Math.PI / 2);
+  ctx.lineTo(x + r, y + h);
+  ctx.arc(x + r, y + h - r, r, Math.PI / 2, -Math.PI / 2);
+  ctx.closePath();
+}
+
+function heartPath(ctx, x, y, w, h) {
+  const cx = x + w / 2;
+  ctx.moveTo(cx, y + h * 0.3);
+  ctx.bezierCurveTo(cx, y, x, y, x, y + h * 0.35);
+  ctx.bezierCurveTo(x, y + h * 0.6, cx, y + h * 0.75, cx, y + h);
+  ctx.bezierCurveTo(cx, y + h * 0.75, x + w, y + h * 0.6, x + w, y + h * 0.35);
+  ctx.bezierCurveTo(x + w, y, cx, y, cx, y + h * 0.3);
+  ctx.closePath();
+}
+
+function crossPath(ctx, x, y, w, h) {
+  const t = Math.min(w, h) * 0.3;
+  const cx = x + w / 2, cy = y + h / 2;
+  ctx.moveTo(cx - t / 2, y);
+  ctx.lineTo(cx + t / 2, y);
+  ctx.lineTo(cx + t / 2, cy - t / 2);
+  ctx.lineTo(x + w, cy - t / 2);
+  ctx.lineTo(x + w, cy + t / 2);
+  ctx.lineTo(cx + t / 2, cy + t / 2);
+  ctx.lineTo(cx + t / 2, y + h);
+  ctx.lineTo(cx - t / 2, y + h);
+  ctx.lineTo(cx - t / 2, cy + t / 2);
+  ctx.lineTo(x, cy + t / 2);
+  ctx.lineTo(x, cy - t / 2);
+  ctx.lineTo(cx - t / 2, cy - t / 2);
+  ctx.closePath();
+}
+
 function tracePath(ctx, kind, x0, y0, x1, y1, radius, sides = 5) {
   ctx.beginPath();
   if (kind === 'line') { ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); return; }
@@ -71,6 +120,10 @@ function tracePath(ctx, kind, x0, y0, x1, y1, radius, sides = 5) {
   else if (kind === 'polygon') poly(ctx, x, y, w, h, Math.max(3, sides | 0));
   else if (kind === 'star') starPath(ctx, x, y, w, h, Math.max(3, sides | 0));
   else if (kind === 'arrow') arrowPath(ctx, x, y, w, h);
+  else if (kind === 'capsule') capsulePath(ctx, x, y, w, h);
+  else if (kind === 'heart') heartPath(ctx, x, y, w, h);
+  else if (kind === 'cross') crossPath(ctx, x, y, w, h);
+  else if (kind === 'roundtri') roundTriPath(ctx, x, y, w, h, radius);
   else roundRectPath(ctx, x, y, w, h, Math.min(radius, w / 2, h / 2));
 }
 
@@ -480,4 +533,8 @@ export const shapeTools = () => [
   makeShape({ id: 'polygon', name: 'Polygon', kind: 'polygon', key: 'O' }),
   makeShape({ id: 'star', name: 'Star', kind: 'star', key: 'O' }),
   makeShape({ id: 'arrow', name: 'Arrow', kind: 'arrow', key: 'O' }),
+  makeShape({ id: 'capsule', name: 'Capsule', kind: 'capsule', key: 'O' }),
+  makeShape({ id: 'heart', name: 'Heart', kind: 'heart', key: 'O' }),
+  makeShape({ id: 'cross', name: 'Cross', kind: 'cross', key: 'O' }),
+  makeShape({ id: 'roundtri', name: 'Rounded Triangle', kind: 'roundtri', key: 'O' }),
 ];

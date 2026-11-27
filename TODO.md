@@ -18,7 +18,7 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 
 ## Uninstall
 - [x] `scripts/uninstall.sh` (`--dry-run`, `--purge`, `--yes`), `make uninstall`, `npm run uninstall:app`. README covers NSIS / deb / AppImage.
-- Not adding Help → Uninstall: removing the Arch package needs root (`pacman -R`) and would delete the running app; the terminal command is clearer.
+- [x] Help → Uninstall removes the home-folder copy and launcher. An Arch package still needs `sudo pacman -R stratum` (shown in the toast).
 
 ## 3D features
 - [x] Connected-component split: a group that does not share vertices becomes separate objects (`body 1`, `body 2`). Named groups that are connected stay as named.
@@ -34,11 +34,10 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 Current (`src/js/tools/shapes.js`): line/curve, rect, roundrect, ellipse, triangle, diamond, pentagon, hexagon, polygon, star, arrow (fill/outline/both, radius, sides).
 
 Add as needed:
-- Explicit Line
-- Capsule / pill
-- Heart
-- Cross / plus
-- Rounded triangle / other rounded variants
+- [x] Capsule / pill
+- [x] Heart
+- [x] Cross / plus
+- [x] Rounded triangle
 - Stamp-along-stroke mode for any shape
 - More as needed: keep adding to this list when a shape comes up.
 
@@ -51,6 +50,9 @@ Add as needed:
 - [ ] Phase 4: GPU filters and adjustments.
 - [ ] Phase 5: GPU-authoritative painting, GPU undo textures.
 - [ ] Phase 6: default on.
+
+## Updates
+- [x] Check for Updates on a non-Arch build (AppImage, deb, Windows, portable) looks at itch.io (`gray.itch.io/stratum`) first, then GitHub. An Arch package keeps the git/GitHub check. The itch page has to exist for that path to find a version.
 
 ## Context
 Substance 3D Painter comparison noted as useful reference for traditional 3D paint features (polygon fill, projection, path, symmetry, object isolation, etc.). Free/open subset first.

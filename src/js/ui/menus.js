@@ -14,7 +14,7 @@ export const MENUS = [
   ['Nodes', ['viewNodes', 'nodeAdd', 'applyNodes', 'runScript']],
   ['Adjustments', ['wholeImage', '-', ...ADJUSTMENTS.map((s) => `adj:${s.id}`)]],
   ['Effects', ['wholeImage', '-', ...EFFECT_CATEGORIES.map((cat) => ({ label: cat, items: EFFECTS.filter((e) => e.category === cat).map((e) => `fx:${e.id}`) }))]],
-  ['Help', ['shortcuts', 'checkUpdate', 'about']],
+  ['Help', ['shortcuts', 'checkUpdate', '-', 'uninstall', 'about']],
 ];
 
 const pretty = (s) => (s ?? '').split('|')[0];

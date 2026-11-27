@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('stratumNative', {
   accentColor: () => ipcRenderer.invoke('app:accent'),
   onAccentColor: on('app:accent'),
   checkUpdate: () => ipcRenderer.invoke('app:check-update'),
+  uninstall: () => ipcRenderer.invoke('app:uninstall'),
   applyUpdate: (mode) => ipcRenderer.invoke('app:apply-update', mode),
   onScriptExec: (cb) => ipcRenderer.on('script:exec', (_e, payload) => cb(payload)),
   scriptResult: (id, result) => ipcRenderer.send('script:result', id, result),

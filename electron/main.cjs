@@ -317,6 +317,27 @@ async function githubVersion() {
   return String(JSON.parse(buf.toString('utf8')).version || '');
 }
 
+/** Version string from an itch.io game page, or '' if the page is missing. */
+async function itchVersion() {
+  try {
+    const buf = await fetchBuf('https://gray.itch.io/stratum');
+    const html = buf.toString('utf8');
+    const m = html.match(/<span[^>]*class="version"[^>]*>([^<]+)<\/span>/i)
+      || html.match(/Version\s+([0-9]+\.[0-9]+\.[0-9]+)/i);
+    return m ? m[1].trim() : '';
+  } catch { return ''; }
+}
+
+/** 'arch' when pacman owns stratum, otherwise the portable kind. */
+async function installKind() {
+  if (process.platform === 'win32') return 'win';
+  if (process.env.APPIMAGE) return 'appimage';
+  try {
+    await runCmd('pacman', ['-Qq', 'stratum']);
+    return 'arch';
+  } catch { return 'portable'; }
+}
+
 async function canWrite(dir) {
   try { await fs.promises.access(dir, fs.constants.W_OK); return true; }
   catch { return false; }
@@ -405,12 +426,13 @@ function relaunchAt(dir) {
 
 ipcMain.handle('app:check-update', async () => {
   const version = require(path.join(ROOT, 'package.json')).version;
+  const kind = await installKind();
   let git = false;
   try {
     await runCmd('git', ['rev-parse', '--is-inside-work-tree']);
     git = true;
   } catch { /* installed copy, not a checkout */ }
-  if (git) {
+  if (git && kind === 'arch') {
     try {
       await runCmd('git', ['fetch', '--quiet', 'origin']);
       let behind = '0';
@@ -419,16 +441,46 @@ ipcMain.handle('app:check-update', async () => {
       const n = parseInt(behind, 10) || 0;
       let note = '';
       if (n) { try { note = await runCmd('git', ['log', '-1', '--pretty=%s', 'origin/master']); } catch { /* no note */ } }
-      return { version, mode: 'git', behind: n, note };
+      return { version, mode: 'git', behind: n, note, kind };
     } catch { /* origin missing or offline — try the version on GitHub */ }
+  }
+  // Non-Arch builds (AppImage, deb, Windows, portable) check itch.io first.
+  if (kind !== 'arch') {
+    const itch = await itchVersion();
+    if (itch && cmpVer(itch, version) > 0) {
+      return { version, mode: 'itch', behind: 1, note: itch, remoteVersion: itch, kind, url: 'https://gray.itch.io/stratum' };
+    }
   }
   try {
     const remoteVersion = await githubVersion();
     const behind = cmpVer(remoteVersion, version) > 0 ? 1 : 0;
-    return { version, mode: git ? 'git' : 'download', behind, note: remoteVersion, remoteVersion };
+    return { version, mode: git ? 'git' : 'download', behind, note: remoteVersion, remoteVersion, kind };
   } catch {
-    return { version, mode: 'offline', behind: 0 };
+    return { version, mode: 'offline', behind: 0, kind };
   }
+});
+
+ipcMain.handle('app:uninstall', async () => {
+  const kind = await installKind();
+  const home = userAppDir();
+  const removed = [];
+  if (fs.existsSync(home)) {
+    await fs.promises.rm(home, { recursive: true, force: true });
+    removed.push(home);
+  }
+  const launcher = path.join(process.env.XDG_DATA_HOME || path.join(app.getPath('home'), '.local', 'share'), '..', '..', '.local', 'bin', 'stratum');
+  // The launcher lives in ~/.local/bin when Check for Updates wrote one.
+  const bin = path.join(app.getPath('home'), '.local', 'bin', 'stratum');
+  if (fs.existsSync(bin)) {
+    await fs.promises.rm(bin, { force: true });
+    removed.push(bin);
+  }
+  const desktop = path.join(app.getPath('home'), '.local', 'share', 'applications', 'stratum.desktop');
+  if (fs.existsSync(desktop)) {
+    await fs.promises.rm(desktop, { force: true });
+    removed.push(desktop);
+  }
+  return { kind, removed, archCmd: kind === 'arch' ? 'sudo pacman -R stratum' : null };
 });
 
 ipcMain.handle('app:apply-update', async (_e, mode) => {

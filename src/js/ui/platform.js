@@ -114,6 +114,7 @@ export function openMeshFile() {
 }
 
 export const checkUpdate = () => (native?.checkUpdate ? native.checkUpdate() : Promise.resolve(null));
+export const uninstall = () => (native?.uninstall ? native.uninstall() : Promise.resolve(null));
 export const applyUpdate = (mode) => (native?.applyUpdate ? native.applyUpdate(mode) : Promise.resolve());
 
 export const readDroppedFiles = async (fileList) => {

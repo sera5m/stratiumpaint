@@ -537,14 +537,36 @@ export function createCommands({ ed, view }) {
     const newer = info.remoteVersion && info.remoteVersion !== info.version
       ? `Stratum ${info.remoteVersion} is available (you have ${info.version}).`
       : `${info.behind} new commit${info.behind === 1 ? '' : 's'}.${info.note ? ` Latest: ${info.note}.` : ''}`;
+    const where = info.mode === 'itch'
+      ? `Download it from ${info.url || 'itch.io'}.`
+      : 'It will be installed in your home folder if this copy cannot write to its own folder, then Stratum restarts.';
     const r = await dlg.confirmDialog({
       title: 'Update Stratum',
-      message: `${newer} It will be installed in your home folder if this copy cannot write to its own folder, then Stratum restarts.`,
-      buttons: [{ label: 'Update', primary: true }, { label: 'Not now', cancel: true }],
+      message: `${newer} ${where}`,
+      buttons: info.mode === 'itch'
+        ? [{ label: 'Open itch.io', primary: true }, { label: 'Not now', cancel: true }]
+        : [{ label: 'Update', primary: true }, { label: 'Not now', cancel: true }],
     });
     if (r !== 0) return;
+    if (info.mode === 'itch') { window.open(info.url || 'https://gray.itch.io/stratum'); return; }
     ed.toast('Updating. Stratum will restart when the build finishes.');
     await platform.applyUpdate(info.mode);
+  }), { enabled: () => true });
+
+  add('uninstall', 'Uninstall Stratum…', guard(async () => {
+    if (!platform.isNative) { ed.toast('Uninstall is only in the desktop app.'); return; }
+    const r = await dlg.confirmDialog({
+      title: 'Uninstall Stratum',
+      message: 'This removes the home-folder copy and launcher. An Arch package is removed with pacman (the command is shown after). Your saved files are kept.',
+      buttons: [{ label: 'Uninstall', primary: true }, { label: 'Cancel', cancel: true }],
+    });
+    if (r !== 0) return;
+    const info = await platform.uninstall();
+    if (!info) { ed.toast('Nothing to remove.'); return; }
+    const bits = info.removed?.length ? `Removed: ${info.removed.join(', ')}.` : 'No home-folder copy found.';
+    const arch = info.archCmd ? ` The Arch package is still installed. Run: ${info.archCmd}` : '';
+    ed.toast(bits + arch);
+    if (!info.archCmd) setTimeout(() => platform.quit(), 1500);
   }), { enabled: () => true });
 
   return { cmds, openFilesInto, closeDoc, closeAll, saveDoc, openMeshBytes };
