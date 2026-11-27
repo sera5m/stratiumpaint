@@ -5,6 +5,7 @@ import { BLEND_MODES } from '../src/js/core/blend.js';
 import { SEPARABLE, NON_SEPARABLE, CHANNEL, MODE_INDEX, modeIndex, blendRGB, compositePixel, compositeLayersCPU } from '../src/js/gpu/blendmath.js';
 import { COMPOSITE_WGSL, PRESENT_WGSL } from '../src/js/gpu/shaders.js';
 import { requestedRenderer, chooseRenderer, STORAGE_KEY } from '../src/js/gpu/backend.js';
+import { packTextureRect } from '../src/js/gpu/upload.js';
 import { Doc } from '../src/js/doc/document.js';
 import { Layer } from '../src/js/doc/layer.js';
 
@@ -137,4 +138,27 @@ test('no eval in app code (the CSP forbids it and the app would fail to start)',
     const src = readFileSync(f, 'utf8').replace(/\/\/.*$/gm, '');
     assert.ok(!/new Function\s*\(|\beval\s*\(/.test(src), f);
   }
+});
+
+test('texture uploads pad rows to 256 bytes so a dirty rect does not tile', () => {
+  const W = 1280, H = 8;
+  const data = new Uint8ClampedArray(W * H * 4);
+  const pix = (x, y, rgba) => data.set(rgba, (y * W + x) * 4);
+  pix(70, 3, [9, 8, 7, 6]);
+  pix(100, 3, [11, 12, 13, 14]);
+  const full = packTextureRect(data, W, { x: 0, y: 0, w: W, h: H });
+  assert.equal(full.layout.offset % 256, 0);
+  assert.equal(full.layout.bytesPerRow % 256, 0);
+  assert.equal(full.layout.bytesPerRow, W * 4, 'full width of 1280 is already aligned');
+  assert.equal(full.data, data);
+  const part = packTextureRect(data, W, { x: 70, y: 3, w: 40, h: 2 });
+  assert.equal(part.layout.offset, 0);
+  assert.equal(part.layout.bytesPerRow % 256, 0);
+  assert.ok(part.layout.bytesPerRow >= 40 * 4);
+  assert.notEqual(part.data, data);
+  const at = (x, y) => [...part.data.subarray(y * part.layout.bytesPerRow + x * 4, y * part.layout.bytesPerRow + x * 4 + 4)];
+  assert.deepEqual(at(0, 0), [9, 8, 7, 6]);
+  assert.deepEqual(at(30, 0), [11, 12, 13, 14]);
+  const narrow = packTextureRect(data, 100, { x: 0, y: 0, w: 100, h: 1 });
+  assert.equal(narrow.layout.bytesPerRow, 512, '400 bytes rounds up to 512, not down to 256');
 });

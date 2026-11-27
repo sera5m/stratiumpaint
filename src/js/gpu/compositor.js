@@ -18,6 +18,7 @@
 // flood fill keep working on the CPU exactly as before. Nothing here reads back from the GPU.
 import { COMPOSITE_WGSL, PRESENT_WGSL, CLEAR_WGSL, FLOAT_WGSL } from './shaders.js';
 import { modeIndex } from './blendmath.js';
+import { uploadTextureRect } from './upload.js';
 import { invert, floatMatrix, rotatedBounds } from '../core/xform.js';
 
 const SLOT = 256; // uniform buffer offset alignment
@@ -108,12 +109,8 @@ export class GpuCompositor {
       const r = dirty === 'all' ? { x: 0, y: 0, w, h } : clampRect(dirty, w, h);
       if (r) {
         this.stats.uploadPixels = (this.stats.uploadPixels || 0) + r.w * r.h;
-        this.device.queue.writeTexture(
-          { texture: e.tex, origin: [r.x, r.y] },
-          img.data,
-          { offset: (r.y * w + r.x) * 4, bytesPerRow: w * 4, rowsPerImage: r.h },
-          [r.w, r.h],
-        );
+        // 256-byte aligned. An unaligned dirty rect tiles into 64px squares on Vulkan.
+        uploadTextureRect(this.device, e.tex, img.data, w, r);
       }
     }
     return e.tex;
@@ -257,7 +254,7 @@ export class GpuCompositor {
       tex = this.device.createTexture({ label: 'float', size: [cw, ch], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
       this.floatTex = { id: f.id, content: -1, tex, w: cw, h: ch };
     }
-    if (data) this.device.queue.writeTexture({ texture: tex }, data, { bytesPerRow: w * 4, rowsPerImage: h }, [w, h]); // once per lift
+    if (data) uploadTextureRect(this.device, tex, data, w, { x: 0, y: 0, w, h }); // once per lift
     else this.device.queue.copyExternalImageToTexture({ source: f.canvas }, { texture: tex, premultipliedAlpha: false }, [w, h]); // GPU-side copy
     this.stats.uploads++;
     this.stats.uploadPixels = (this.stats.uploadPixels || 0) + w * h;

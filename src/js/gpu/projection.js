@@ -5,6 +5,7 @@
 // the map with the face's slope bias, and fades by facing). The face selection before and the
 // gutter dilation after are the shared CPU code, so both paths agree up to edge rasterization.
 import { projectionPlan, finishProjection, unionBox } from '../core/projection.js';
+import { uploadTextureRect } from './upload.js';
 
 const COMMON = `
 struct U {
@@ -168,7 +169,7 @@ export async function gpuProjectPaint(device, opts) {
   const live = [];
   const buf = (data, usage) => { const b = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, data); live.push(b); return b; };
   const stex = device.createTexture({ size: [S.w, S.h], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }); live.push(stex);
-  device.queue.writeTexture({ texture: stex }, S.data, { bytesPerRow: S.w * 4 }, [S.w, S.h]);
+  uploadTextureRect(device, stex, S.data, S.w, { x: 0, y: 0, w: S.w, h: S.h });
   const otex = device.createTexture({ size: [box.w, box.h], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC }); live.push(otex);
   const multi = plans.length > 1;
   if (multi && plans.length > device.limits.maxTextureArrayLayers) throw new Error('too many origins for the GPU');
