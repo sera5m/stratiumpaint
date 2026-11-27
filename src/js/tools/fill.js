@@ -6,6 +6,7 @@ import { fillMask, renderGradient } from '../core/fill.js';
 import { targetRegion } from '../doc/ops.js';
 import { paintImage } from '../doc/raster.js';
 import { colorFor, withOpacity } from './common.js';
+import { fillFaces, facePixelBounds, groupFaces, mirrorFace } from '../core/symmetry.js';
 
 function bucket() {
   return {
@@ -97,4 +98,44 @@ function gradient() {
   };
 }
 
-export const fillTools = () => [bucket(), gradient()];
+function polyFill() {
+  return {
+    id: 'poly-fill', name: 'Polygon Fill', key: 'Y', group: 'fill', cursor: 'crosshair',
+    options: ['opacity', 'polyScope', 'symmetry'],
+    down(e, ed) {
+      const mount = ed.doc?.mount;
+      if (e.face == null || !mount?.uvs) {
+        ed.toast('Polygon fill paints a face of the model. Click the 3D view.');
+        return;
+      }
+      const layer = ed.editableLayer();
+      if (!layer) return;
+      const triCount = mount.uvs.length / 6;
+      let faces = (ed.opts.polyScope === 'object' || e.shift)
+        ? groupFaces(mount.groups, e.face, triCount)
+        : [e.face];
+      if (ed.opts.symmetry && ed.opts.symmetry !== 'none') {
+        const have = new Set(faces);
+        const extra = [];
+        for (const f of faces) {
+          const m = mirrorFace(mount, f, ed.opts.symmetry);
+          if (m >= 0 && !have.has(m)) { have.add(m); extra.push(m); }
+        }
+        faces = faces.concat(extra);
+      }
+      const doc = ed.surface();
+      const color = withOpacity(colorFor(ed, e), ed.opts.opacity);
+      const rect = facePixelBounds(mount.uvs, faces, layer.width, layer.height);
+      if (!rect) { ed.toast('That face has no pixels to fill.'); return; }
+      const before = cropImage(layer.img, rect);
+      if (!fillFaces(layer.img, mount.uvs, faces, color, doc.selection)) {
+        ed.toast('That face has no pixels to fill.');
+        return;
+      }
+      layer.touch(rect);
+      doc.commitRegion(layer, rect, before, 'Polygon Fill');
+    },
+  };
+}
+
+export const fillTools = () => [bucket(), gradient(), polyFill()];

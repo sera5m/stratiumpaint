@@ -8,6 +8,7 @@ import { h } from './dom.js';
 import { rectUnion } from '../core/util.js';
 import { GpuMeshRenderer } from '../gpu/mesh.js';
 import { projectPaint, commitProjection, decalMatrix, aimProjection, planeCoords, projectorAxes, eulerFromView, occlusionPreview } from '../core/projection.js';
+import { worldAtUV } from '../core/symmetry.js';
 import { gizmoHandles, hitGizmo, dragMove, dragRotate, AXIS_COLORS } from '../core/gizmo.js';
 import { gpuProjectPaint } from '../gpu/projection.js';
 import { packPickId, unpackPickId } from '../gpu/pick.js';
@@ -179,6 +180,7 @@ export class MeshView {
     // Projector: redraw its gizmo when it or the mode changes; align it to the camera; arm placing.
     ed.on('opts', () => this.#request());
     ed.on('tool', () => this.#request());
+    ed.on('path', () => this.#request());
     ed.on('projector:fromView', () => ed.setOpt('projRot', eulerFromView(this.yaw, this.pitch)));
     ed.on('projector:place', () => { this._placeArmed = true; ed.toast('Click the model to place the projector.'); });
     ed.on('projector:saveCam', () => {
@@ -988,6 +990,34 @@ export class MeshView {
     this.#request();
   }
 
+  /** Path-tool points, in world space, over the model. */
+  #drawPath(ctx, dpr) {
+    const pts = this.ed.tool?.points?.();
+    const mount = this.ed.doc?.mount;
+    if (!pts?.length || !mount?.uvs) return;
+    const atlas = atlasOf(this.ed.doc) || this.ed.doc;
+    const ts = this.#toScreen();
+    const screen = [];
+    for (const p of pts) {
+      const w = worldAtUV(mount, p.x / atlas.width, p.y / atlas.height);
+      if (!w) continue;
+      const s = ts(w.p);
+      if (s) screen.push(s);
+    }
+    if (!screen.length) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.beginPath();
+    ctx.moveTo(screen[0][0], screen[0][1]);
+    for (const s of screen.slice(1)) ctx.lineTo(s[0], s[1]);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    if (screen.length > 1) ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ffd65a';
+    for (const s of screen) { ctx.beginPath(); ctx.arc(s[0], s[1], 3.5, 0, Math.PI * 2); ctx.fill(); }
+  }
+
   /** The projector, its gizmo and (while drawing) the shape's frame, on the 2D overlay. */
   #drawGizmo() {
     const g = this.gizmoCanvas;
@@ -999,7 +1029,7 @@ export class MeshView {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
     const o = this.ed.opts;
-    if (!this.#projectionActive() || !o.projLoc) { this.gizmoStats.hidden++; return; }
+    if (!this.#projectionActive() || !o.projLoc) { this.gizmoStats.hidden++; this.#drawPath(ctx, dpr); return; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const ts = this.#toScreen(), loc = o.projLoc, pw = this.#pxWorld(loc), ax = projectorAxes(o.projRot);
     const h = this.#gizmo();
@@ -1035,6 +1065,7 @@ export class MeshView {
       ctx.closePath(); ctx.fillStyle = AXIS_COLORS[ar.k]; ctx.fill();
     }
     ctx.beginPath(); ctx.arc(...h.centre, 4, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+    this.#drawPath(ctx, dpr);
     this.gizmoStats.drawn++;
   }
 
@@ -1234,7 +1265,7 @@ export class MeshView {
       this.painting = true;
       this.paintButton = e.button;
       ed.hover = p;
-      ed.pointer('down', { ...p, sx: 0, sy: 0, button: e.button === 2 ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: false });
+      ed.pointer('down', { ...p, face: hit.face, sx: 0, sy: 0, button: e.button === 2 ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: false });
     });
     c.addEventListener('pointermove', (e) => {
       if (this.dragging) {
@@ -1295,7 +1326,7 @@ export class MeshView {
       const shape = ed.tool?.group === 'shape';
       const p = this.#docPoint(hit, { shape });
       ed.hover = { x: hit.u * (atlasOf(ed.doc)?.width || ed.doc.width), y: hit.v * (atlasOf(ed.doc)?.height || ed.doc.height) };
-      ed.pointer('move', { ...p, sx: 0, sy: 0, button: this.paintButton === 2 ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: false });
+      ed.pointer('move', { ...p, face: hit.face, sx: 0, sy: 0, button: this.paintButton === 2 ? 2 : 0, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: false });
       ed.requestOverlay();
     });
     const end = (e) => {

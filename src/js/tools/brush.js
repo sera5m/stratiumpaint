@@ -12,9 +12,10 @@ import { maskBounds } from '../core/mask.js';
 import { clamp, rectUnion } from '../core/util.js';
 import { colorFor } from './common.js';
 import { createCanvas } from '../doc/raster.js';
+import { pixelMirror } from '../core/symmetry.js';
 
 const TS = 6, T = 1 << TS, TM = T - 1; // tile size 64
-const PROJ = ['shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
+const PROJ = ['symmetry', 'shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
 
 let strokeCanvas = null;
 /** A brush stroke on the projector plane: { x, y, w, h, canvas, opacity, aa } or null. */
@@ -114,9 +115,21 @@ function expandPoints(x, y, S) {
     base.length = 0;
     for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) base.push([x + i * rx, y + j * ry]);
   }
-  if (!S.mirror || S.mirror === 'none') return base;
-  const out = [];
-  for (const [px, py] of base) out.push(...mirrorPoints(px, py, S.mirror, S.cx, S.cy));
+  let out;
+  if (!S.mirror || S.mirror === 'none') out = base;
+  else {
+    out = [];
+    for (const [px, py] of base) out.push(...mirrorPoints(px, py, S.mirror, S.cx, S.cy));
+  }
+  if (S.sym) {
+    const extra = [];
+    for (const [px, py] of out) {
+      const m = S.sym(px, py);
+      if (!m || (Math.abs(m.x - px) < 0.75 && Math.abs(m.y - py) < 0.75)) continue;
+      extra.push([m.x, m.y]);
+    }
+    if (extra.length) out.push(...extra);
+  }
   return out;
 }
 
@@ -300,6 +313,7 @@ function makeBrush({ id, name, kind, key, icon }) {
       dirty: null, lx: e.x, ly: e.y, rem: 0, ox: 0, oy: 0,
       mirror: o.mirror || 'none', repeatX: o.repeatX || 0, repeatY: o.repeatY || 0, repeatN: o.repeatN || 1,
       cx: 0, cy: 0,
+      sym: pixelMirror(ed.doc?.mount, layer.width, layer.height, o.symmetry),
     };
   };
 
@@ -307,7 +321,7 @@ function makeBrush({ id, name, kind, key, icon }) {
     id, name, key, icon, group: kind === 'pencil' ? 'pencil' : 'brush', cursor: 'crosshair', ring: kind !== 'pencil',
     options: kind === 'pencil' ? ['opacity', 'mirror', 'repeatX', 'repeatY', 'repeatN', ...PROJ]
       : kind === 'brush' ? ['size', 'hardness', 'opacity', 'aa', 'mirror', 'repeatX', 'repeatY', 'repeatN', ...PROJ]
-      : ['size', 'hardness', 'opacity', 'aa', 'mirror', 'repeatX', 'repeatY', 'repeatN'],
+      : ['size', 'hardness', 'opacity', 'aa', 'mirror', 'repeatX', 'repeatY', 'repeatN', 'symmetry'],
     projectionStroke: (kind === 'brush' || kind === 'pencil') ? (ed, pts) => strokeDecal(ed, pts, kind === 'pencil') : undefined,
     projectionImage: (kind === 'brush' || kind === 'pencil') ? (ed, a, b) => strokeDecal(ed, [a, b], kind === 'pencil') : undefined,
 

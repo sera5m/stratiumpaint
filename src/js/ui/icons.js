@@ -28,6 +28,8 @@ const P = {
   arrow: '<path d="M4 10h9V6l7 6-7 6v-4H4z"/>',
   text: '<path d="M5 7V4.500h14V7M12 4.500V19M9 19h6"/>',
   'bg-remove': '<rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="3 2"/><circle cx="12" cy="12" r="4"/><path d="M5 5l3 3M19 5l-3 3"/>',
+  'poly-fill': '<path d="M12 3l8 5v8l-8 5-8-5V8z"/><path d="M12 8v8M8 10l8 4" opacity=".7"/>',
+  path: '<path d="M5 17c3-8 4-8 7-2s4 6 7-2"/><circle cx="5" cy="17" r="1.4" fill="currentColor"/><circle cx="12" cy="13" r="1.4" fill="currentColor"/><circle cx="19" cy="11" r="1.4" fill="currentColor"/>',
   'color-range': '<path d="M4 16c2-6 4-6 6 0s4 6 6 0 4-6 4 0"/><path d="M4 8h4M16 8h4"/>',
 
   eye: '<path d="M2 12s3.500-6.500 10-6.500S22 12 22 12s-3.500 6.500-10 6.500S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',

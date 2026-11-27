@@ -7,7 +7,7 @@ Quick-and-dirty became actually useful. Tracking remaining work.
 - [x] Real resample runs once: after set-down (Enter / right-click) and 0.5s idle since the last size change, with a thin border fading out meanwhile. The resampled result is the history step.
 - [x] Left-click outside the box sets down immediately. Tool switch, undo and menu commands (`Editor#commitPending`) land a waiting scale at once instead of dropping it; Escape after set-down lands it too.
 - [x] Preview now composites in place (layers above, opacity and blend mode show while dragging).
-- Possible further: the set-down bake uses OffscreenCanvas when a WebGPU device is up (`resampleSetDown`); the CPU resample stays the reference.
+- Possible further: a GPU bake of the set-down was tried (`canvasBake`) and taken back out. Reading a GPU canvas on Vulkan returns the tile store, so the resampled pixels become the cubes. Set-down stays on `resampleFloat`.
 
 ## Move / rotate
 - [x] Drag, scale and rotate of lifted pixels are a float drawn with a transform each frame (no per-event CPU blend, layer write or recomposite). See docs/WEBGPU_PLAN.md "Move / drag performance" and `npm run bench:move`.
@@ -41,6 +41,12 @@ Add as needed:
 - [x] Stamp-along-stroke mode for any shape
 - More as needed: keep adding to this list when a shape comes up.
 
+## 3D paint (Substance-style subset)
+- [x] Polygon fill (Y): click a face on the model. Fill: Object, or Shift, fills that object. One history step.
+- [x] Path (I): click points on the canvas or the model, Enter strokes them with the brush. Right-click drops the last point, Esc clears.
+- [x] Symmetry: Off / X / Y / Z on the brush, eraser, shapes, polygon fill and path. The other side of the model gets the same paint, in the same history step.
+- [x] Projection and object isolation were already in.
+
 ## WebGPU (see docs/WEBGPU_PLAN.md)
 - [x] Phase 1: shared device, layer textures, WebGPU 2D compositor (all 16 blend modes), with automatic Canvas 2D fallback.
 - [x] Phase 2 (part): 3D view on WebGPU, sampling the composite texture directly (no per-stroke readback/upload). Projection painting's depth and UV passes run on the same device.
@@ -55,4 +61,4 @@ Add as needed:
 - [x] Check for Updates on a non-Arch build (AppImage, deb, Windows, portable) looks at itch.io (`gray.itch.io/stratum`) first, then GitHub. An Arch package keeps the git/GitHub check. The itch page has to exist for that path to find a version.
 
 ## Context
-Substance 3D Painter comparison noted as useful reference for traditional 3D paint features (polygon fill, projection, path, symmetry, object isolation, etc.). Free/open subset first.
+Polygon fill, path and symmetry are in. Projection and object isolation were already in.

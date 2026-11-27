@@ -5,6 +5,7 @@ import { navTools } from './nav.js';
 import { fillTools } from './fill.js';
 import { brushTools } from './brush.js';
 import { shapeTools } from './shapes.js';
+import { pathTools } from './path.js';
 import { textTool } from './text.js';
 import { extraTools } from './extra.js';
 
@@ -13,8 +14,9 @@ export function createTools() {
   const [rectSel, ellSel, lasso, wand] = selectionTools();
   const [movePx, moveSel] = moveTools();
   const [zoom, pan, picker] = navTools();
-  const [bucket, gradient] = fillTools();
+  const [bucket, gradient, polyFill] = fillTools();
   const [brush, pencil, eraser, clone] = brushTools();
   const shapes = shapeTools();
-  return [rectSel, ellSel, lasso, wand, movePx, moveSel, zoom, pan, bucket, gradient, brush, pencil, eraser, clone, picker, ...shapes, textTool(), ...extraTools()];
+  const [path] = pathTools();
+  return [rectSel, ellSel, lasso, wand, movePx, moveSel, zoom, pan, bucket, gradient, polyFill, brush, pencil, eraser, clone, picker, ...shapes, path, textTool(), ...extraTools()];
 }

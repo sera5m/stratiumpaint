@@ -75,6 +75,8 @@ const OPTIONS = {
   size: { type: 'range', label: 'Size', min: 1, max: 200, unit: 'px' },
   hardness: { type: 'range', label: 'Hardness', min: 0, max: 100, unit: '%' },
   mirror: { type: 'select', label: 'Mirror', items: [['none', 'Off'], ['h', 'Horizontal'], ['v', 'Vertical'], ['both', 'Both'], ['radial4', 'Radial 4'], ['radial8', 'Radial 8']] },
+  symmetry: { type: 'select', label: 'Symmetry', title: 'Also paint the mirrored side of the model', items: [['none', 'Off'], ['x', 'X'], ['y', 'Y'], ['z', 'Z']] },
+  polyScope: { type: 'select', label: 'Fill', title: 'One polygon, or every polygon in that object. Shift fills the object either way.', items: [['face', 'Polygon'], ['object', 'Object']] },
   repeatX: { type: 'range', label: 'Repeat X', min: 0, max: 128, unit: 'px' },
   repeatY: { type: 'range', label: 'Repeat Y', min: 0, max: 128, unit: 'px' },
   repeatN: { type: 'range', label: 'Copies', min: 1, max: 8, unit: '' },
@@ -299,6 +301,7 @@ export function buildOptionsBar(root, ed) {
     root.append(h('span', { class: 'opt-spacer' }));
     if (ed.tool.id === 'clone') root.append(h('span', { class: 'opt-hint' }, 'Ctrl+click to set the source'));
     if (ed.tool.id === 'text') root.append(h('span', { class: 'opt-hint' }, 'Ctrl+Enter to commit'));
+    if (ed.tool.id === 'path') root.append(h('span', { class: 'opt-hint' }, 'Enter paints · right-click undoes a point · Esc clears'));
   };
 
   document.getElementById('font-list')?.append(...FONTS.map((f) => h('option', { value: f })));
@@ -610,7 +613,11 @@ export function buildStatusbar(root, ed, view) {
   const zoomOut = h('button', { class: 'icon-btn', type: 'button', title: 'Zoom out', 'aria-label': 'Zoom out', onClick: () => view.zoomAt(1 / 1.25, view.width / 2, view.height / 2) }, '−');
   const zoomIn = h('button', { class: 'icon-btn', type: 'button', title: 'Zoom in', 'aria-label': 'Zoom in', onClick: () => view.zoomAt(1.25, view.width / 2, view.height / 2) }, '+');
   const zoom = h('button', { class: 'st-zoom', type: 'button', title: 'Click for best fit', onClick: () => view.fit() });
-  root.append(hint, h('span', { class: 'opt-spacer' }), pos, sel, size, zoomOut, zoom, zoomIn);
+  const release = h('button', {
+    class: 'st-release', type: 'button', title: 'Drop the selection (Ctrl+D)',
+    onClick: () => ed.doc?.deselect(),
+  }, 'release selection');
+  root.append(hint, h('span', { class: 'opt-spacer' }), pos, sel, release, size, zoomOut, zoom, zoomIn);
 
   const HINTS = {
     'rect-select': 'Drag to select. Ctrl adds, Alt subtracts, Shift makes a square.',
@@ -619,6 +626,8 @@ export function buildStatusbar(root, ed, view) {
     wand: 'Click to select similar colours.',
     'move-pixels': 'Drag inside to move. Drag an edge or corner to scale, or set Width and Height. Shift keeps proportions. Scroll scales from the centre. Enter or right-click sets it down; Esc cancels.',
     'move-selection': 'Drag inside to move the outline. Drag an edge or corner to scale it, or set Width and Height. Enter or right-click sets it down; Esc cancels.',
+    'poly-fill': 'Click a face on the model to fill that polygon. Shift, or Fill: Object, fills the whole object. Symmetry paints the other side.',
+    path: 'Click to drop points on the canvas or the model. Enter strokes them with the brush. Right-click removes the last point. Esc clears.',
     zoom: 'Click to zoom in, right-click to zoom out, drag a box to zoom to it.',
     pan: 'Drag to pan. You can also hold Space with any tool.',
     bucket: 'Click to fill. Right-click fills with the secondary colour.',
@@ -649,6 +658,7 @@ export function buildStatusbar(root, ed, view) {
     const b = doc?.selection && selBounds(doc.selection);
     const live = b && off?.to ? off.to : b;
     setText(sel, live ? `Selection ${live.w} × ${live.h}` : '');
+    release.disabled = !doc?.selection;
     setText(zoom, doc ? `${Math.round(view.zoom * (view.zoom < 0.1 ? 1000 : 100)) / (view.zoom < 0.1 ? 10 : 1)}%` : '');
     zoomIn.disabled = zoomOut.disabled = zoom.disabled = !doc;
   };

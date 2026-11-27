@@ -34,6 +34,8 @@ export const DEFAULT_OPTS = {
   gradientMode: 'color',
   falloff: 'linear',
   mirror: 'none', repeatX: 0, repeatY: 0, repeatN: 1,
+  symmetry: 'none', // 3D: also paint the other side of the model, 'x' | 'y' | 'z'
+  polyScope: 'face', // polygon fill: one triangle, or the whole object group
   pattern: 'solid', patternSize: 16,
   font: 'DejaVu Sans', fontSize: 32, bold: false, italic: false,
   grid: false,
@@ -41,7 +43,7 @@ export const DEFAULT_OPTS = {
 };
 
 /** Options kept between sessions (persistOptions). */
-export const PERSISTED_OPTS = ['shape3d', 'wrapShapes', 'projectFrom', 'projLoc', 'projRot', 'projOffset', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle', 'savedCam', 'stampAlong', 'gpuPaint', 'gpuFilters'];
+export const PERSISTED_OPTS = ['shape3d', 'wrapShapes', 'projectFrom', 'projLoc', 'projRot', 'projOffset', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle', 'savedCam', 'stampAlong', 'gpuPaint', 'gpuFilters', 'symmetry', 'polyScope'];
 
 const DOC_EVENTS = ['render', 'layers', 'selection', 'size', 'history', 'meta', 'float'];
 

@@ -7,6 +7,7 @@
 // vector rotation of the path, so edges stay crisp. To turn a shape that is already drawn,
 // select it and use Move Selected Pixels' rotate knob.
 import { cropImage } from '../core/image.js';
+import { applyWrites, mirrorWrites } from '../core/symmetry.js';
 import { rectUnion, rectIntersect, rectGrow } from '../core/util.js';
 import { paintImage, rasterize, hardenAlpha, createCanvas } from '../doc/raster.js';
 import { layerRect, rgbaCss } from './common.js';
@@ -204,7 +205,18 @@ function commitShape(ed, s, region, drawShape, aa, opacity, name) {
   paintImage(s.layer.img, img, region.x, region.y, ed.doc.selection, opacity);
   shapeStats.layerWrites++;
   s.layer.touch(region);
-  ed.doc.commitRegion(s.layer, region, before, name, s.meta || null);
+  const writes = mirrorWrites(s.layer.img, region, before, ed.doc?.mount, ed.opts.symmetry);
+  if (writes.length) applyWrites(s.layer.img, writes);
+  const commit = () => {
+    ed.doc.commitRegion(s.layer, region, before, name, s.meta || null);
+    if (writes.length) {
+      ed.doc.commitPatches(s.layer, writes.map((w) => ({
+        x: w.x, y: w.y, w: 1, h: 1, stride: 1, before: w.before,
+      })), name);
+    }
+  };
+  if (writes.length) ed.doc.transaction(name, commit);
+  else commit();
 }
 
 function cancelShape(ed, s) {
@@ -337,7 +349,7 @@ function makeShape({ id, name, kind, key }) {
   };
 
   // 3D options: how a drag on the model maps the shape onto it (see ui/meshview.js).
-  const SHAPE3D = ['shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
+  const SHAPE3D = ['symmetry', 'shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'];
   /** Reused canvas for projectionImage (the 3D view's decal preview reads it every frame). */
   let projCanvas = null;
 
@@ -503,7 +515,7 @@ function makeCurve() {
 
   return {
     id: 'line', name: 'Line / Curve', key: 'O', group: 'shape', cursor: 'crosshair',
-    options: ['size', 'opacity', 'aa', 'shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'],
+    options: ['size', 'opacity', 'aa', 'symmetry', 'shape3d', 'projPlace', 'projOffset', 'projLoc', 'projRot', 'projectFrom', 'projAlign', 'camSave', 'camUse', 'projImage', 'projSource', 'projDist', 'projPoints', 'projSpread', 'projAngle'],
     /** Straight stroke between the drag points, on the projector's image plane. */
     projectionImage(ed, a, b, { shift = false, swap = false, RW, RH } = {}) {
       let bx = b[0], by = b[1];
