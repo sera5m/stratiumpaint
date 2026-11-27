@@ -5,7 +5,7 @@ import { BLEND_MODES } from '../src/js/core/blend.js';
 import { SEPARABLE, NON_SEPARABLE, CHANNEL, MODE_INDEX, modeIndex, blendRGB, compositePixel, compositeLayersCPU } from '../src/js/gpu/blendmath.js';
 import { COMPOSITE_WGSL, PRESENT_WGSL } from '../src/js/gpu/shaders.js';
 import { requestedRenderer, chooseRenderer, STORAGE_KEY } from '../src/js/gpu/backend.js';
-import { packTextureRect } from '../src/js/gpu/upload.js';
+import { planTextureUploads } from '../src/js/gpu/upload.js';
 import { Doc } from '../src/js/doc/document.js';
 import { Layer } from '../src/js/doc/layer.js';
 
@@ -140,25 +140,46 @@ test('no eval in app code (the CSP forbids it and the app would fail to start)',
   }
 });
 
-test('texture uploads pad rows to 256 bytes so a dirty rect does not tile', () => {
+test('texture uploads are 64px strips so a dirty rect cannot tile', () => {
   const W = 1280, H = 8;
   const data = new Uint8ClampedArray(W * H * 4);
   const pix = (x, y, rgba) => data.set(rgba, (y * W + x) * 4);
   pix(70, 3, [9, 8, 7, 6]);
   pix(100, 3, [11, 12, 13, 14]);
-  const full = packTextureRect(data, W, { x: 0, y: 0, w: W, h: H });
-  assert.equal(full.layout.offset % 256, 0);
-  assert.equal(full.layout.bytesPerRow % 256, 0);
-  assert.equal(full.layout.bytesPerRow, W * 4, 'full width of 1280 is already aligned');
-  assert.equal(full.data, data);
-  const part = packTextureRect(data, W, { x: 70, y: 3, w: 40, h: 2 });
-  assert.equal(part.layout.offset, 0);
-  assert.equal(part.layout.bytesPerRow % 256, 0);
-  assert.ok(part.layout.bytesPerRow >= 40 * 4);
-  assert.notEqual(part.data, data);
-  const at = (x, y) => [...part.data.subarray(y * part.layout.bytesPerRow + x * 4, y * part.layout.bytesPerRow + x * 4 + 4)];
-  assert.deepEqual(at(0, 0), [9, 8, 7, 6]);
-  assert.deepEqual(at(30, 0), [11, 12, 13, 14]);
-  const narrow = packTextureRect(data, 100, { x: 0, y: 0, w: 100, h: 1 });
-  assert.equal(narrow.layout.bytesPerRow, 512, '400 bytes rounds up to 512, not down to 256');
+  pix(1270, 4, [1, 2, 3, 4]);
+  const read = (u, x, y) => {
+    const bpr = u.layout.bytesPerRow ?? (u.size[0] * 4);
+    const o = (u.layout.offset || 0) + y * bpr + x * 4;
+    return [...u.data.subarray(o, o + 4)];
+  };
+  const full = planTextureUploads(data, W, { x: 0, y: 0, w: W, h: H });
+  assert.equal(full.length, W / 64);
+  for (const u of full) {
+    assert.equal(u.size[0], 64);
+    assert.equal(u.layout.bytesPerRow, 256);
+    assert.equal(u.layout.rowsPerImage, undefined);
+    assert.equal(u.layout.offset, 0);
+  }
+  // A driver that ignores bytesPerRow and walks 256-byte rows still hits the right texel,
+  // because the strip width is exactly 64.
+  const strip70 = full[Math.floor(70 / 64)];
+  assert.deepEqual(read(strip70, 70 - strip70.origin[0], 3), [9, 8, 7, 6]);
+  const part = planTextureUploads(data, W, { x: 70, y: 3, w: 40, h: 2 });
+  assert.equal(part.length, 1);
+  assert.equal(part[0].origin[0], 70);
+  assert.equal(part[0].size[0], 64);
+  assert.equal(part[0].layout.bytesPerRow, 256);
+  assert.deepEqual(read(part[0], 0, 0), [9, 8, 7, 6]);
+  assert.deepEqual(read(part[0], 30, 0), [11, 12, 13, 14]);
+  const edge = planTextureUploads(data, W, { x: 1270, y: 4, w: 10, h: 2 });
+  assert.equal(edge.length, 1);
+  assert.equal(edge[0].origin[0] + edge[0].size[0], W);
+  assert.deepEqual(read(edge[0], 1270 - edge[0].origin[0], 0), [1, 2, 3, 4]);
+  const narrow = planTextureUploads(data, 100, { x: 0, y: 0, w: 100, h: 1 });
+  assert.equal(narrow.length, 1);
+  assert.equal(narrow[0].size[1], 1);
+  assert.equal(narrow[0].layout.bytesPerRow, undefined, 'a single row omits the stride');
+  const skinny = planTextureUploads(data, 40, { x: 2, y: 1, w: 10, h: 3 });
+  assert.equal(skinny.length, 3);
+  assert.ok(skinny.every((u) => u.size[1] === 1 && u.layout.bytesPerRow === undefined));
 });

@@ -109,7 +109,7 @@ export class GpuCompositor {
       const r = dirty === 'all' ? { x: 0, y: 0, w, h } : clampRect(dirty, w, h);
       if (r) {
         this.stats.uploadPixels = (this.stats.uploadPixels || 0) + r.w * r.h;
-        // 256-byte aligned. An unaligned dirty rect tiles into 64px squares on Vulkan.
+        // 64px strips: a padded dirty-rect upload tiles into 64px squares on Vulkan.
         uploadTextureRect(this.device, e.tex, img.data, w, r);
       }
     }

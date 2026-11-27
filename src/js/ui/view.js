@@ -326,17 +326,26 @@ export class View {
     ctx.imageSmoothingQuality = 'high';
     const comp = doc.composite();
     if (r.w >= this.width && r.h >= this.height) { ctx.drawImage(comp, this.ox, this.oy, w, hh); return; }
-    // Partial: draw only the matching part of the composite (plus the filter's footprint, which
-    // the caller's clip trims), so a small change does not filter / mipmap the whole image.
-    // Zoomed out, the browser filters through mipmaps: start the sub-rect on a mip-block boundary
-    // so its mip levels are the same pixels as the whole image's.
+    // Partial: draw only the matching part of the composite (plus a pixel of filter footprint,
+    // which the caller's clip trims) so a small change does not walk the whole image.
     const m = Math.ceil(2 / Math.min(1, z)) + 1;
-    const al = z < 1 ? Math.min(256, 2 ** (Math.ceil(Math.log2(1 / z)) + 1)) : 1;
-    const down = (v) => Math.floor(v / al) * al, up = (v) => Math.ceil(v / al) * al;
-    const sx0 = clamp(down(Math.floor((r.x - this.ox) / z) - m), 0, doc.width), sy0 = clamp(down(Math.floor((r.y - this.oy) / z) - m), 0, doc.height);
-    const sx1 = clamp(up(Math.ceil((r.x + r.w - this.ox) / z) + m), 0, doc.width), sy1 = clamp(up(Math.ceil((r.y + r.h - this.oy) / z) + m), 0, doc.height);
+    const sx0 = clamp(Math.floor((r.x - this.ox) / z) - m, 0, doc.width), sy0 = clamp(Math.floor((r.y - this.oy) / z) - m, 0, doc.height);
+    const sx1 = clamp(Math.ceil((r.x + r.w - this.ox) / z) + m, 0, doc.width), sy1 = clamp(Math.ceil((r.y + r.h - this.oy) / z) + m, 0, doc.height);
     if (sx1 <= sx0 || sy1 <= sy0) return;
-    ctx.drawImage(comp, sx0, sy0, sx1 - sx0, sy1 - sy0, this.ox + sx0 * z, this.oy + sy0 * z, (sx1 - sx0) * z, (sy1 - sy0) * z);
+    const sw = sx1 - sx0, sh = sy1 - sy0;
+    const dx = this.ox + sx0 * z, dy = this.oy + sy0 * z;
+    if (z >= 1) { ctx.drawImage(comp, sx0, sy0, sw, sh, dx, dy, sw * z, sh * z); return; }
+    // Zoomed out, drawImage of a *sub-rect* of a large canvas is filtered through that canvas's
+    // mipmaps and comes back as ~64px tiles (the stroke turns into cubes; a flat fill hides it).
+    // Copy the rect 1:1 first so the filtered draw's source is the whole image it samples.
+    let scratch = this._blitScratch;
+    if (!scratch) scratch = this._blitScratch = document.createElement('canvas');
+    if (scratch.width !== sw || scratch.height !== sh) { scratch.width = sw; scratch.height = sh; }
+    const sctx = scratch.getContext('2d');
+    sctx.imageSmoothingEnabled = false;
+    sctx.clearRect(0, 0, sw, sh);
+    sctx.drawImage(comp, sx0, sy0, sw, sh, 0, 0, sw, sh);
+    ctx.drawImage(scratch, dx, dy, sw * z, sh * z);
   }
 
   #paintOverlay() {
